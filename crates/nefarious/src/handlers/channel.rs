@@ -513,18 +513,38 @@ pub async fn handle_invite(ctx: &HandlerContext, msg: &Message) {
     )
     .await;
 
+    let invite_msg = Message::with_source(
+        &prefix,
+        Command::Invite,
+        vec![target_nick.clone(), chan_name.clone()],
+    );
+    let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
+
     // Notify target
     {
         let tc = target.read().await;
-        let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
-        tc.send_from(
-            Message::with_source(
-                &prefix,
-                Command::Invite,
-                vec![target_nick.clone(), chan_name.clone()],
-            ),
-            &src,
-        );
+        tc.send_from(invite_msg.clone(), &src);
+    }
+
+    // IRCv3 invite-notify: every channel op with the cap sees the
+    // invite announcement too. Skip the inviter (they'd get a
+    // duplicate) and the target (already notified above).
+    if let Some(channel) = ctx.state.get_channel(chan_name) {
+        let chan = channel.read().await;
+        for (&member_id, flags) in &chan.members {
+            if member_id == client_id || member_id == target_id {
+                continue;
+            }
+            if !flags.op {
+                continue;
+            }
+            if let Some(member) = ctx.state.clients.get(&member_id) {
+                let m = member.read().await;
+                if m.has_cap(crate::capabilities::Capability::InviteNotify) {
+                    m.send_from(invite_msg.clone(), &src);
+                }
+            }
+        }
     }
 
     // Route to S2S — local target, derive numeric from its ClientId.

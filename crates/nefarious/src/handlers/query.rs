@@ -347,12 +347,34 @@ pub async fn send_lusers(
 }
 
 /// Handle AWAY command. With no argument clears away state; with an
-/// argument sets it. RPL_UNAWAY / RPL_NOWAWAY is sent to the client.
+/// argument sets it. RPL_UNAWAY / RPL_NOWAWAY is sent to the client,
+/// and (when our peers have `away-notify`) an AWAY message is
+/// broadcast to everyone sharing a channel with us.
 pub async fn handle_away(ctx: &HandlerContext, msg: &Message) {
     let new_state = msg.params.first().cloned().filter(|s| !s.is_empty());
     let mut client = ctx.client.write().await;
     client.away_message = new_state.clone();
+    let prefix = client.prefix();
+    let channels: std::collections::HashSet<String> = client.channels.iter().cloned().collect();
+    let client_id = client.id;
     drop(client);
+
+    // IRCv3 away-notify: notify everyone sharing a channel with us.
+    let away_params = match &new_state {
+        Some(msg) => vec![msg.clone()],
+        None => Vec::new(),
+    };
+    let away_msg = irc_proto::Message::with_source(&prefix, irc_proto::Command::Away, away_params);
+    let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
+    broadcast_to_shared_channels(
+        &ctx.state,
+        client_id,
+        &channels,
+        crate::capabilities::Capability::AwayNotify,
+        &away_msg,
+        &src,
+    )
+    .await;
 
     if new_state.is_some() {
         ctx.send_numeric(
@@ -363,6 +385,37 @@ pub async fn handle_away(ctx: &HandlerContext, msg: &Message) {
     } else {
         ctx.send_numeric(RPL_UNAWAY, vec!["You are no longer marked as being away".into()])
             .await;
+    }
+}
+
+/// Deliver `msg` to every local user (other than `source_id`) who
+/// shares at least one of `source_channels` with the source AND has
+/// `cap` enabled. Per-recipient tag injection is applied via
+/// `send_from`. Used by away-notify, chghost, setname, etc.
+async fn broadcast_to_shared_channels(
+    state: &crate::state::ServerState,
+    source_id: crate::client::ClientId,
+    source_channels: &std::collections::HashSet<String>,
+    cap: crate::capabilities::Capability,
+    msg: &Message,
+    src: &crate::tags::SourceInfo,
+) {
+    let mut seen: std::collections::HashSet<crate::client::ClientId> = std::collections::HashSet::new();
+    for chan_name in source_channels {
+        if let Some(channel) = state.get_channel(chan_name) {
+            let chan = channel.read().await;
+            for (&member_id, _) in &chan.members {
+                if member_id == source_id || !seen.insert(member_id) {
+                    continue;
+                }
+                if let Some(member) = state.clients.get(&member_id) {
+                    let m = member.read().await;
+                    if m.has_cap(cap) {
+                        m.send_from(msg.clone(), src);
+                    }
+                }
+            }
+        }
     }
 }
 

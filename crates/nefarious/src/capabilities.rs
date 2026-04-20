@@ -118,6 +118,9 @@ pub fn default_advertised_caps() -> HashSet<Capability> {
     // Phase 2.5 — richer NAMES/WHO formatting.
     set.insert(Capability::MultiPrefix);
     set.insert(Capability::UserhostInNames);
+    // Phase 2.6 — notify-style broadcasts for state changes.
+    set.insert(Capability::AwayNotify);
+    set.insert(Capability::InviteNotify);
     set
 }
 
