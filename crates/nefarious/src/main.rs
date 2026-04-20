@@ -42,6 +42,14 @@ fn main() {
     info!("nefarious-rs v{}", env!("CARGO_PKG_VERSION"));
     info!("loading config from {}", config_path.display());
 
+    // Quick path for populating the SASL in-memory account store from
+    // the environment. Format: `NEFARIOUS_ACCOUNTS=alice:secret,bob:pw`.
+    // Real backends (IAuth / Keycloak / config-file) come later in
+    // Phase 3; this is the dev shortcut so SASL PLAIN is testable
+    // immediately. Any value containing credentials is obviously
+    // operator-only — document it as such.
+    let sasl_accounts = std::env::var("NEFARIOUS_ACCOUNTS").ok();
+
     let config = match irc_config::Config::from_file(&config_path) {
         Ok(c) => c,
         Err(e) => {
@@ -69,5 +77,6 @@ fn main() {
         config,
         ssl_cert.as_deref(),
         ssl_key.as_deref(),
+        sasl_accounts,
     ));
 }

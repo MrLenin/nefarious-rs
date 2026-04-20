@@ -84,6 +84,12 @@ pub struct Client {
     /// labeled-response or other server-originated batch gets a fresh
     /// id. Clients only see their own ids, so per-client suffices.
     pub batch_counter: AtomicU32,
+    /// SASL mechanism currently in progress, if any. Set by the first
+    /// `AUTHENTICATE <mech>` line; cleared on success, failure, or
+    /// explicit abort (`AUTHENTICATE *`). While `Some`, the next
+    /// `AUTHENTICATE <payload>` line is interpreted as the mechanism's
+    /// initial client response.
+    pub sasl_mechanism: Option<String>,
 }
 
 impl Client {
@@ -117,6 +123,7 @@ impl Client {
             cap_version: 0,
             enabled_caps: HashSet::new(),
             batch_counter: AtomicU32::new(1),
+            sasl_mechanism: None,
         }
     }
 

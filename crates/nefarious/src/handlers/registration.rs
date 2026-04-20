@@ -92,15 +92,37 @@ pub async fn handle_nick_change(ctx: &HandlerContext, msg: &Message) {
     }
 }
 
-/// Handle the AUTHENTICATE command — SASL negotiation surface.
+/// Handle the AUTHENTICATE command — SASL negotiation.
 ///
-/// Phase 2.8 ships the framework only: the mechanism negotiation is
-/// accepted on the wire, but every authentication attempt is
-/// rejected with ERR_SASLFAIL. Phase 3 will replace this with real
-/// PLAIN / EXTERNAL / SCRAM implementations.
+/// Phase 3.2 implements the PLAIN mechanism. Later mechanisms
+/// (EXTERNAL, SCRAM-SHA-256, OAUTHBEARER) dispatch from the same
+/// function keyed off `Client.sasl_mechanism`.
+///
+/// Wire flow:
+/// ```text
+/// C → S : AUTHENTICATE PLAIN
+/// S → C : AUTHENTICATE +
+/// C → S : AUTHENTICATE <base64(authzid \0 authcid \0 password)>
+/// S → C : 900 RPL_LOGGEDIN  +  903 RPL_SASLSUCCESS
+/// ```
 pub async fn handle_authenticate(ctx: &HandlerContext, msg: &Message) {
-    // `AUTHENTICATE *` is the abort form. Acknowledge it cleanly.
-    if msg.params.first().map(|s| s.as_str()) == Some("*") {
+    use base64::Engine as _;
+
+    let param = match msg.params.first() {
+        Some(p) => p.clone(),
+        None => {
+            ctx.send_numeric(
+                crate::numeric::ERR_SASLFAIL,
+                vec!["SASL authentication failed".into()],
+            )
+            .await;
+            return;
+        }
+    };
+
+    // Explicit abort: client sends `AUTHENTICATE *`.
+    if param == "*" {
+        ctx.client.write().await.sasl_mechanism = None;
         ctx.send_numeric(
             crate::numeric::ERR_SASLABORTED,
             vec!["SASL authentication aborted".into()],
@@ -109,8 +131,123 @@ pub async fn handle_authenticate(ctx: &HandlerContext, msg: &Message) {
         return;
     }
 
-    // Everything else is answered with SASL failure until Phase 3
-    // wires the actual mechanism handlers.
+    // First phase: no mechanism yet → param is the mechanism name.
+    let mechanism = ctx.client.read().await.sasl_mechanism.clone();
+    let Some(mech) = mechanism else {
+        let mech_upper = param.to_ascii_uppercase();
+        if mech_upper != "PLAIN" {
+            // Unsupported mechanism. Advertise what we do support and fail.
+            ctx.send_numeric(
+                crate::numeric::RPL_SASLMECHS,
+                vec!["PLAIN".into(), "available SASL mechanisms".into()],
+            )
+            .await;
+            ctx.send_numeric(
+                crate::numeric::ERR_SASLFAIL,
+                vec!["SASL authentication failed".into()],
+            )
+            .await;
+            return;
+        }
+        {
+            let mut c = ctx.client.write().await;
+            c.sasl_mechanism = Some(mech_upper);
+        }
+        // Prompt the client for the client-initial response.
+        ctx.reply(Message::with_source(
+            ctx.server_name(),
+            Command::Authenticate,
+            vec!["+".into()],
+        ))
+        .await;
+        return;
+    };
+
+    // Second phase: the client's base64-encoded mechanism payload.
+    // A single `+` is an empty payload; for PLAIN that's invalid.
+    let decoded = if param == "+" {
+        Vec::new()
+    } else {
+        match base64::engine::general_purpose::STANDARD.decode(param.as_bytes()) {
+            Ok(v) => v,
+            Err(_) => {
+                reset_sasl_and_fail(ctx, "malformed base64 payload").await;
+                return;
+            }
+        }
+    };
+
+    match mech.as_str() {
+        "PLAIN" => handle_sasl_plain(ctx, &decoded).await,
+        _ => {
+            // Shouldn't reach here — mechanism was validated above.
+            reset_sasl_and_fail(ctx, "mechanism not supported").await;
+        }
+    }
+}
+
+/// Finish SASL PLAIN. `payload` is the decoded bytes of
+/// `authzid \0 authcid \0 password`. authzid is typically empty for
+/// IRC (the authcid is the requested account).
+async fn handle_sasl_plain(ctx: &HandlerContext, payload: &[u8]) {
+    let mut parts = payload.split(|b| *b == 0);
+    let authzid = parts.next().unwrap_or(b"");
+    let Some(authcid) = parts.next() else {
+        reset_sasl_and_fail(ctx, "missing authcid").await;
+        return;
+    };
+    let Some(password) = parts.next() else {
+        reset_sasl_and_fail(ctx, "missing password").await;
+        return;
+    };
+    if parts.next().is_some() {
+        // Extra NUL-separated fields aren't allowed.
+        reset_sasl_and_fail(ctx, "malformed PLAIN payload").await;
+        return;
+    }
+
+    let authcid = match std::str::from_utf8(authcid) {
+        Ok(s) => s,
+        Err(_) => {
+            reset_sasl_and_fail(ctx, "authcid not UTF-8").await;
+            return;
+        }
+    };
+    let password = match std::str::from_utf8(password) {
+        Ok(s) => s,
+        Err(_) => {
+            reset_sasl_and_fail(ctx, "password not UTF-8").await;
+            return;
+        }
+    };
+
+    // RFC 4616: when authzid is empty, use authcid. We ignore any
+    // non-empty authzid for now — no account switching.
+    let _ = authzid;
+
+    let store = std::sync::Arc::clone(&ctx.state.account_store);
+    let info = store.verify_plain(authcid, password).await;
+    let Some(info) = info else {
+        reset_sasl_and_fail(ctx, "invalid credentials").await;
+        return;
+    };
+
+    let client_id = ctx.client_id().await;
+    ctx.state.login_local(client_id, &info).await;
+
+    // After login_local has emitted RPL_LOGGEDIN + account-notify,
+    // the mechanism ends with RPL_SASLSUCCESS.
+    ctx.send_numeric(
+        crate::numeric::RPL_SASLSUCCESS,
+        vec!["SASL authentication successful".into()],
+    )
+    .await;
+
+    ctx.client.write().await.sasl_mechanism = None;
+}
+
+async fn reset_sasl_and_fail(ctx: &HandlerContext, _reason: &str) {
+    ctx.client.write().await.sasl_mechanism = None;
     ctx.send_numeric(
         crate::numeric::ERR_SASLFAIL,
         vec!["SASL authentication failed".into()],

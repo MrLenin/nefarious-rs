@@ -12,8 +12,17 @@ use crate::connection::handle_connection;
 use crate::state::ServerState;
 
 /// Start the IRC server with the given configuration.
-pub async fn run(config: Config, ssl_cert: Option<&Path>, ssl_key: Option<&Path>) {
-    let state = Arc::new(ServerState::new(config.clone()));
+pub async fn run(
+    config: Config,
+    ssl_cert: Option<&Path>,
+    ssl_key: Option<&Path>,
+    sasl_accounts: Option<String>,
+) {
+    let mut state_inner = ServerState::new(config.clone());
+    if let Some(spec) = sasl_accounts {
+        state_inner.account_store = build_account_store_from_env(&spec).await;
+    }
+    let state = Arc::new(state_inner);
 
     // Set up SSL acceptor if we have cert/key
     let ssl_acceptor = match (ssl_cert, ssl_key) {
@@ -195,6 +204,29 @@ where
     // Extract the raw stream and hand off to S2S handler
     let stream = framed.into_inner();
     crate::s2s::link::handle_server_link(stream, state, password, server_params).await;
+}
+
+/// Parse a `NEFARIOUS_ACCOUNTS=alice:secret,bob:pw` spec into an
+/// in-memory account store. Malformed pairs are logged and skipped
+/// so a typo can't break startup.
+async fn build_account_store_from_env(spec: &str) -> crate::accounts::SharedAccountStore {
+    let mut store = crate::accounts::InMemoryAccountStore::new();
+    for entry in spec.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        match entry.split_once(':') {
+            Some((user, pw)) if !user.is_empty() && !pw.is_empty() => {
+                store = store.with_account(user, pw).await;
+                info!("SASL account registered: {user}");
+            }
+            _ => {
+                error!("ignoring malformed NEFARIOUS_ACCOUNTS entry: {entry}");
+            }
+        }
+    }
+    std::sync::Arc::new(store)
 }
 
 fn build_ssl_acceptor(
