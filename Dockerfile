@@ -1,4 +1,6 @@
-FROM rust:1.87-bookworm AS builder
+# hickory-resolver 0.26 (added in Phase 1.7 for reverse DNS) requires
+# rustc >= 1.88. Stick to pinned patch versions for reproducibility.
+FROM rust:1.88-bookworm AS builder
 
 WORKDIR /build
 
@@ -9,11 +11,13 @@ RUN apt-get update && apt-get install -y libssl-dev pkg-config && rm -rf /var/li
 COPY Cargo.toml Cargo.lock* ./
 COPY crates/irc-proto/Cargo.toml crates/irc-proto/
 COPY crates/irc-config/Cargo.toml crates/irc-config/
+COPY crates/p10-proto/Cargo.toml crates/p10-proto/
 COPY crates/nefarious/Cargo.toml crates/nefarious/
 
 # Create dummy source files so cargo can resolve deps
 RUN mkdir -p crates/irc-proto/src && echo "pub fn _dummy() {}" > crates/irc-proto/src/lib.rs && \
     mkdir -p crates/irc-config/src && echo "pub fn _dummy() {}" > crates/irc-config/src/lib.rs && \
+    mkdir -p crates/p10-proto/src && echo "pub fn _dummy() {}" > crates/p10-proto/src/lib.rs && \
     mkdir -p crates/nefarious/src && echo "fn main() {}" > crates/nefarious/src/main.rs
 
 # Build dependencies (cached unless Cargo.toml changes)
