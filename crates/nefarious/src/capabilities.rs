@@ -112,6 +112,9 @@ pub fn default_advertised_caps() -> HashSet<Capability> {
     set.insert(Capability::AccountTag);
     // Phase 2.3 — self-echo of PRIVMSG/NOTICE.
     set.insert(Capability::EchoMessage);
+    // Phase 2.4 — batch framing + labeled-response.
+    set.insert(Capability::Batch);
+    set.insert(Capability::LabeledResponse);
     set
 }
 

@@ -7,108 +7,180 @@ pub mod server_query;
 
 use std::sync::Arc;
 
+use irc_proto::message::Tag;
 use irc_proto::{Command, Message};
 use tokio::sync::RwLock;
 use tracing::debug;
 
+use crate::capabilities::Capability;
 use crate::client::Client;
 use crate::numeric::*;
 use crate::state::ServerState;
 
 /// Context for handling a message from a registered client.
+///
+/// `current_batch` is populated while the handler is executing inside a
+/// labeled-response batch so every reply attaches `@batch=<id>` and the
+/// encompassing `BATCH +<id>` / `BATCH -<id>` pair is emitted around the
+/// handler.
 pub struct HandlerContext {
     pub state: Arc<ServerState>,
     pub client: Arc<RwLock<Client>>,
+    pub current_batch: Option<String>,
 }
 
 impl HandlerContext {
+    /// Create a fresh context for a connection (no active batch).
+    pub fn new(state: Arc<ServerState>, client: Arc<RwLock<Client>>) -> Self {
+        Self {
+            state,
+            client,
+            current_batch: None,
+        }
+    }
+
     /// Dispatch a message to the appropriate handler.
+    ///
+    /// Before dispatching, inspect the inbound message for `@label=...`
+    /// and, if the sending client has `labeled-response` enabled, wrap
+    /// the handler's replies in a `BATCH +id labeled-response` / `-id`
+    /// pair. The inner handlers receive a context with `current_batch`
+    /// set so `ctx.send_numeric` / `ctx.reply` tag each reply with
+    /// `@batch=id` automatically.
     pub async fn dispatch(&self, msg: &Message) {
+        let label = msg
+            .tags
+            .iter()
+            .find(|t| t.key == "label")
+            .and_then(|t| t.value.clone());
+
+        let use_batch = if let Some(ref _lbl) = label {
+            self.client.read().await.has_cap(Capability::LabeledResponse)
+        } else {
+            false
+        };
+
+        let batch_id = if use_batch {
+            let id = self.client.read().await.next_batch_id();
+            // Emit `@label=lbl :server BATCH +id labeled-response`. The
+            // BATCH open is the only message that carries the @label
+            // tag; each enclosed reply carries @batch=<id>.
+            let mut open = Message::with_source(
+                &self.state.server_name,
+                Command::Batch,
+                vec![format!("+{id}"), "labeled-response".into()],
+            );
+            if let Some(ref lbl) = label {
+                open.tags.push(Tag {
+                    key: "label".to_string(),
+                    value: Some(lbl.clone()),
+                });
+            }
+            self.client.read().await.send(open);
+            Some(id)
+        } else {
+            None
+        };
+
+        let ctx = HandlerContext {
+            state: Arc::clone(&self.state),
+            client: Arc::clone(&self.client),
+            current_batch: batch_id.clone(),
+        };
+
         match &msg.command {
             // Messaging
-            Command::Privmsg => messaging::handle_privmsg(self, msg).await,
-            Command::Notice => messaging::handle_notice(self, msg).await,
+            Command::Privmsg => messaging::handle_privmsg(&ctx, msg).await,
+            Command::Notice => messaging::handle_notice(&ctx, msg).await,
 
             // Channel operations
-            Command::Join => channel::handle_join(self, msg).await,
-            Command::Part => channel::handle_part(self, msg).await,
-            Command::Topic => channel::handle_topic(self, msg).await,
-            Command::Kick => channel::handle_kick(self, msg).await,
-            Command::Invite => channel::handle_invite(self, msg).await,
-            Command::Names => channel::handle_names(self, msg).await,
-            Command::List => channel::handle_list(self, msg).await,
+            Command::Join => channel::handle_join(&ctx, msg).await,
+            Command::Part => channel::handle_part(&ctx, msg).await,
+            Command::Topic => channel::handle_topic(&ctx, msg).await,
+            Command::Kick => channel::handle_kick(&ctx, msg).await,
+            Command::Invite => channel::handle_invite(&ctx, msg).await,
+            Command::Names => channel::handle_names(&ctx, msg).await,
+            Command::List => channel::handle_list(&ctx, msg).await,
 
             // Modes
-            Command::Mode => mode::handle_mode(self, msg).await,
+            Command::Mode => mode::handle_mode(&ctx, msg).await,
 
             // Queries
-            Command::Who => query::handle_who(self, msg).await,
-            Command::Whois => query::handle_whois(self, msg).await,
-            Command::Motd => query::handle_motd(self, msg).await,
-            Command::Lusers => query::handle_lusers(self, msg).await,
-            Command::Version => query::handle_version(self, msg).await,
-            Command::Away => query::handle_away(self, msg).await,
-            Command::Userhost => query::handle_userhost(self, msg).await,
-            Command::Ison => query::handle_ison(self, msg).await,
-            Command::Oper => query::handle_oper(self, msg).await,
+            Command::Who => query::handle_who(&ctx, msg).await,
+            Command::Whois => query::handle_whois(&ctx, msg).await,
+            Command::Motd => query::handle_motd(&ctx, msg).await,
+            Command::Lusers => query::handle_lusers(&ctx, msg).await,
+            Command::Version => query::handle_version(&ctx, msg).await,
+            Command::Away => query::handle_away(&ctx, msg).await,
+            Command::Userhost => query::handle_userhost(&ctx, msg).await,
+            Command::Ison => query::handle_ison(&ctx, msg).await,
+            Command::Oper => query::handle_oper(&ctx, msg).await,
 
             // Server queries
-            Command::Stats => server_query::handle_stats(self, msg).await,
-            Command::Time => server_query::handle_time(self, msg).await,
-            Command::Admin => server_query::handle_admin(self, msg).await,
-            Command::Info => server_query::handle_info(self, msg).await,
-            Command::Links => server_query::handle_links(self, msg).await,
-            Command::Map => server_query::handle_map(self, msg).await,
-            Command::Trace => server_query::handle_trace(self, msg).await,
+            Command::Stats => server_query::handle_stats(&ctx, msg).await,
+            Command::Time => server_query::handle_time(&ctx, msg).await,
+            Command::Admin => server_query::handle_admin(&ctx, msg).await,
+            Command::Info => server_query::handle_info(&ctx, msg).await,
+            Command::Links => server_query::handle_links(&ctx, msg).await,
+            Command::Map => server_query::handle_map(&ctx, msg).await,
+            Command::Trace => server_query::handle_trace(&ctx, msg).await,
 
             // Wallops (operator broadcast)
-            Command::Wallops => messaging::handle_wallops(self, msg).await,
+            Command::Wallops => messaging::handle_wallops(&ctx, msg).await,
 
             // Registration (nick change after registration)
-            Command::Nick => registration::handle_nick_change(self, msg).await,
+            Command::Nick => registration::handle_nick_change(&ctx, msg).await,
 
             // PING/PONG
             Command::Ping => {
                 let token = msg.params.first().map(|s| s.as_str()).unwrap_or("");
-                let client = self.client.read().await;
-                client.send(Message::with_source(
-                    &self.state.server_name,
+                let reply = Message::with_source(
+                    &ctx.state.server_name,
                     Command::Pong,
-                    vec![self.state.server_name.clone(), token.to_string()],
-                ));
+                    vec![ctx.state.server_name.clone(), token.to_string()],
+                );
+                ctx.reply(reply).await;
             }
             Command::Pong => {
                 // Client responded to our PING — update last_active
-                let mut client = self.client.write().await;
+                let mut client = ctx.client.write().await;
                 client.last_active = chrono::Utc::now();
             }
 
             // QUIT is handled in the connection loop, not here
             Command::Quit => {}
 
-            // CAP — stub for now
-            Command::Cap => registration::handle_cap(self, msg).await,
+            // CAP
+            Command::Cap => registration::handle_cap(&ctx, msg).await,
 
             // Unknown
             Command::Unknown(cmd) => {
                 debug!("unknown command from client: {cmd}");
-                let client = self.client.read().await;
-                client.send_numeric(
-                    &self.state.server_name,
+                ctx.send_numeric(
                     ERR_UNKNOWNCOMMAND,
                     vec![cmd.clone(), "Unknown command".to_string()],
-                );
+                )
+                .await;
             }
 
             // Other known commands we haven't implemented yet
             _ => {
-                let client = self.client.read().await;
-                client.send_numeric(
-                    &self.state.server_name,
+                ctx.send_numeric(
                     ERR_UNKNOWNCOMMAND,
                     vec![msg.command.to_string(), "Not yet implemented".to_string()],
-                );
+                )
+                .await;
             }
+        }
+
+        // Close the labeled-response batch, if we opened one.
+        if let Some(id) = batch_id {
+            let close = Message::with_source(
+                &self.state.server_name,
+                Command::Batch,
+                vec![format!("-{id}")],
+            );
+            self.client.read().await.send(close);
         }
     }
 
@@ -132,9 +204,60 @@ impl HandlerContext {
         &self.state.server_name
     }
 
-    /// Helper: send a numeric to the client.
+    /// Apply IRCv3 reply-path tags to `msg` before sending it to the
+    /// requesting client: `@time` if they have `server-time`, and
+    /// `@batch=<id>` if we're inside a labeled-response batch.
+    pub fn apply_reply_tags(&self, msg: &mut Message, client: &Client) {
+        if client.has_cap(Capability::ServerTime) {
+            msg.tags.push(Tag {
+                key: "time".to_string(),
+                value: Some(crate::tags::format_server_time(chrono::Utc::now())),
+            });
+        }
+        if let Some(ref id) = self.current_batch {
+            msg.tags.push(Tag {
+                key: "batch".to_string(),
+                value: Some(id.clone()),
+            });
+        }
+    }
+
+    /// Send a server-originated reply message to the requesting client,
+    /// attaching the reply-path tags (server-time + batch) first.
+    pub async fn reply(&self, mut msg: Message) {
+        let client = self.client.read().await;
+        self.apply_reply_tags(&mut msg, &client);
+        client.send(msg);
+    }
+
+    /// Send a user-originated reply (notably an `echo-message` self-copy
+    /// of a PRIVMSG/NOTICE) to the requesting client. Attaches
+    /// @server-time and @account via `tagged_for`, plus @batch if we're
+    /// inside a labeled-response batch. Deduplicated so @time isn't
+    /// attached twice.
+    pub async fn reply_from(&self, msg: Message, src: &crate::tags::SourceInfo) {
+        let client = self.client.read().await;
+        let mut out = crate::tags::tagged_for(msg, &client, src);
+        if let Some(ref id) = self.current_batch {
+            out.tags.push(Tag {
+                key: "batch".to_string(),
+                value: Some(id.clone()),
+            });
+        }
+        client.send(out);
+    }
+
+    /// Send a numeric to the client with reply-path tags applied.
     pub async fn send_numeric(&self, numeric: u16, params: Vec<String>) {
         let client = self.client.read().await;
-        client.send_numeric(&self.state.server_name, numeric, params);
+        let mut full_params = vec![client.nick.clone()];
+        full_params.extend(params);
+        let mut msg = Message::with_source(
+            &self.state.server_name,
+            Command::Numeric(numeric),
+            full_params,
+        );
+        self.apply_reply_tags(&mut msg, &client);
+        client.send(msg);
     }
 }

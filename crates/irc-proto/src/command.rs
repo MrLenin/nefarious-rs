@@ -13,6 +13,9 @@ pub enum Command {
     Quit,
     Error,
 
+    // IRCv3 batch framing
+    Batch,
+
     // Channel operations
     Join,
     Part,
@@ -83,6 +86,7 @@ impl Command {
             "PONG" => Command::Pong,
             "QUIT" => Command::Quit,
             "ERROR" => Command::Error,
+            "BATCH" => Command::Batch,
             "JOIN" => Command::Join,
             "PART" => Command::Part,
             "TOPIC" => Command::Topic,
@@ -128,6 +132,7 @@ impl fmt::Display for Command {
             Command::Pong => write!(f, "PONG"),
             Command::Quit => write!(f, "QUIT"),
             Command::Error => write!(f, "ERROR"),
+            Command::Batch => write!(f, "BATCH"),
             Command::Join => write!(f, "JOIN"),
             Command::Part => write!(f, "PART"),
             Command::Topic => write!(f, "TOPIC"),

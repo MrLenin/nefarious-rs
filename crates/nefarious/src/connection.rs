@@ -99,10 +99,7 @@ pub async fn handle_connection<S>(
     send_welcome(&client, &state).await;
 
     // Main message loop
-    let ctx = HandlerContext {
-        state: Arc::clone(&state),
-        client: Arc::clone(&client),
-    };
+    let ctx = HandlerContext::new(Arc::clone(&state), Arc::clone(&client));
 
     let quit_reason = message_loop(&mut reader, &ctx).await;
 
@@ -151,10 +148,7 @@ async fn registration_phase(
     let mut got_nick = false;
     let mut got_user = false;
 
-    let ctx = HandlerContext {
-        state: Arc::clone(state),
-        client: Arc::clone(client),
-    };
+    let ctx = HandlerContext::new(Arc::clone(state), Arc::clone(client));
 
     while let Some(result) = stream.next().await {
         let msg = match result {

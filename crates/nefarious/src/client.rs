@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use tokio::sync::{Notify, mpsc};
 
@@ -80,6 +80,10 @@ pub struct Client {
     pub cap_version: u16,
     /// The capabilities this client has successfully REQ'd and we ACK'd.
     pub enabled_caps: HashSet<Capability>,
+    /// Monotonic counter for BATCH ids allocated to this client. Each
+    /// labeled-response or other server-originated batch gets a fresh
+    /// id. Clients only see their own ids, so per-client suffices.
+    pub batch_counter: AtomicU32,
 }
 
 impl Client {
@@ -112,12 +116,22 @@ impl Client {
             cap_negotiating: false,
             cap_version: 0,
             enabled_caps: HashSet::new(),
+            batch_counter: AtomicU32::new(1),
         }
     }
 
     /// Whether the given capability is active for this client.
     pub fn has_cap(&self, cap: Capability) -> bool {
         self.enabled_caps.contains(&cap)
+    }
+
+    /// Allocate a unique BATCH id string for this client. Short base36
+    /// to keep the wire line size down; monotonic so replays are easy to
+    /// read in packet captures.
+    pub fn next_batch_id(&self) -> String {
+        let n = self.batch_counter.fetch_add(1, Ordering::Relaxed);
+        // base36-ish using digits+letters; plenty of headroom with u32.
+        format!("b{n:x}")
     }
 
     /// Request that the connection task disconnect this client and run

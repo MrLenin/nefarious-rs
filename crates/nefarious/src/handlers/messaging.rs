@@ -119,22 +119,26 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
             return;
         }
 
-        // Send to all local channel members. The sender is skipped by
-        // default, but with `echo-message` they receive their own line
-        // back — with the same tags every other recipient sees.
-        let echo = ctx
-            .client
-            .read()
-            .await
-            .has_cap(crate::capabilities::Capability::EchoMessage);
+        // Send to every other local channel member first.
         for (&member_id, _) in &chan.members {
-            if member_id == client_id && !echo {
+            if member_id == client_id {
                 continue;
             }
             if let Some(member) = ctx.state.clients.get(&member_id) {
                 let m = member.read().await;
                 m.send_from(out_msg.clone(), &src);
             }
+        }
+
+        // Then echo-message: self-copy carrying the same user-event tags
+        // plus the reply-path tags (notably @batch) for labeled-response.
+        let echo = ctx
+            .client
+            .read()
+            .await
+            .has_cap(crate::capabilities::Capability::EchoMessage);
+        if echo {
+            ctx.reply_from(out_msg.clone(), &src).await;
         }
 
         // Route to S2S link if there are remote members
@@ -152,18 +156,17 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
     } else {
         // Private message to a user — check local first, then remote
         if let Some(target_client) = ctx.state.find_client_by_nick(target) {
-            // Direct-message echo: when the sender has echo-message, the
-            // message goes to them *in addition to* the target.
-            let echo = ctx
-                .client
-                .read()
-                .await
-                .has_cap(crate::capabilities::Capability::EchoMessage);
             let tc = target_client.read().await;
             tc.send_from(out_msg.clone(), &src);
             drop(tc);
-            if echo {
-                ctx.client.read().await.send_from(out_msg, &src);
+            // echo-message: send the sender a labeled copy.
+            if ctx
+                .client
+                .read()
+                .await
+                .has_cap(crate::capabilities::Capability::EchoMessage)
+            {
+                ctx.reply_from(out_msg, &src).await;
             }
         } else if ctx.state.find_remote_by_nick(target).is_some() {
             // Route to S2S link
