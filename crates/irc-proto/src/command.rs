@@ -25,6 +25,10 @@ pub enum Command {
     Warn,
     Note,
 
+    // IRCv3 account-notify broadcast (not to be confused with the P10
+    // ACCOUNT token used on the s2s wire).
+    Account,
+
     // Channel operations
     Join,
     Part,
@@ -101,6 +105,7 @@ impl Command {
             "FAIL" => Command::Fail,
             "WARN" => Command::Warn,
             "NOTE" => Command::Note,
+            "ACCOUNT" => Command::Account,
             "JOIN" => Command::Join,
             "PART" => Command::Part,
             "TOPIC" => Command::Topic,
@@ -152,6 +157,7 @@ impl fmt::Display for Command {
             Command::Fail => write!(f, "FAIL"),
             Command::Warn => write!(f, "WARN"),
             Command::Note => write!(f, "NOTE"),
+            Command::Account => write!(f, "ACCOUNT"),
             Command::Join => write!(f, "JOIN"),
             Command::Part => write!(f, "PART"),
             Command::Topic => write!(f, "TOPIC"),

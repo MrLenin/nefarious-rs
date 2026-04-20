@@ -108,11 +108,28 @@ pub async fn handle_join(ctx: &HandlerContext, msg: &Message) {
             client.channels.insert(chan_name.to_string());
         }
 
-        // Notify all channel members (including the joiner)
-        let join_msg =
-            Message::with_source(&prefix, Command::Join, vec![chan_name.to_string()]);
-        let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
-        send_to_channel(ctx, chan_name, &join_msg, &src).await;
+        // Notify all channel members (including the joiner).
+        //
+        // IRCv3 extended-join clients receive
+        //   `:nick!user@host JOIN <channel> <account> :<realname>`
+        // with `*` as the account for logged-out users. Other clients
+        // receive the plain RFC form. Per-recipient cap check means
+        // we build both variants and pick at send time.
+        let (src, account, realname) = {
+            let c = ctx.client.read().await;
+            (
+                crate::tags::SourceInfo::from_local(&c),
+                c.account.clone().unwrap_or_else(|| "*".to_string()),
+                c.realname.clone(),
+            )
+        };
+        let plain = Message::with_source(&prefix, Command::Join, vec![chan_name.to_string()]);
+        let extended = Message::with_source(
+            &prefix,
+            Command::Join,
+            vec![chan_name.to_string(), account, realname],
+        );
+        send_join_to_channel(ctx, chan_name, &plain, &extended, &src).await;
 
         // Route to S2S
         {
@@ -603,6 +620,36 @@ pub async fn handle_list(ctx: &HandlerContext, _msg: &Message) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Send a JOIN to every channel member, picking the `extended-join`
+/// form for clients that negotiated the cap and the plain form for
+/// everyone else. Per-recipient IRCv3 tags are applied via
+/// `send_from`.
+async fn send_join_to_channel(
+    ctx: &HandlerContext,
+    chan_name: &str,
+    plain: &Message,
+    extended: &Message,
+    src: &crate::tags::SourceInfo,
+) {
+    let channel = match ctx.state.get_channel(chan_name) {
+        Some(c) => c,
+        None => return,
+    };
+
+    let chan = channel.read().await;
+    for (&member_id, _) in &chan.members {
+        if let Some(member) = ctx.state.clients.get(&member_id) {
+            let m = member.read().await;
+            let msg = if m.has_cap(crate::capabilities::Capability::ExtendedJoin) {
+                extended.clone()
+            } else {
+                plain.clone()
+            };
+            m.send_from(msg, src);
+        }
+    }
+}
 
 /// Send a message to all members of a channel with per-recipient
 /// IRCv3 tag attachment. `src` is the event metadata (time, source

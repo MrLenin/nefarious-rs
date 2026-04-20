@@ -124,6 +124,9 @@ pub fn default_advertised_caps() -> HashSet<Capability> {
     set.insert(Capability::Chghost);
     set.insert(Capability::Setname);
     set.insert(Capability::StandardReplies);
+    // Phase 2.7 — JOIN payload + login/logout broadcast.
+    set.insert(Capability::ExtendedJoin);
+    set.insert(Capability::AccountNotify);
     set
 }
 

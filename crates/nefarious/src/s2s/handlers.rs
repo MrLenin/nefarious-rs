@@ -1256,9 +1256,43 @@ pub async fn handle_account(state: &ServerState, msg: &P10Message) {
     };
 
     if let Some(remote) = state.remote_clients.get(&numeric) {
-        let mut rc = remote.write().await;
-        rc.account = account;
-        debug!("account update for {}: {:?}", rc.nick, rc.account);
+        let (prefix, channels, account_str, src) = {
+            let mut rc = remote.write().await;
+            rc.account = account.clone();
+            debug!("account update for {}: {:?}", rc.nick, rc.account);
+            (
+                rc.prefix(),
+                rc.channels.clone(),
+                account.clone().unwrap_or_else(|| "*".to_string()),
+                crate::tags::SourceInfo::from_remote(&rc),
+            )
+        };
+
+        // IRCv3 account-notify: every local user sharing a channel
+        // with this remote user and with `account-notify` enabled
+        // sees `:X ACCOUNT <account-or-*>`.
+        let account_msg = irc_proto::Message::with_source(
+            &prefix,
+            irc_proto::Command::Account,
+            vec![account_str],
+        );
+        let mut seen = std::collections::HashSet::new();
+        for chan_name in &channels {
+            if let Some(channel) = state.get_channel(chan_name) {
+                let chan = channel.read().await;
+                for (&member_id, _) in &chan.members {
+                    if !seen.insert(member_id) {
+                        continue;
+                    }
+                    if let Some(member) = state.clients.get(&member_id) {
+                        let m = member.read().await;
+                        if m.has_cap(crate::capabilities::Capability::AccountNotify) {
+                            m.send_from(account_msg.clone(), &src);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
