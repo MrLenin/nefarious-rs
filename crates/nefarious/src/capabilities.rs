@@ -123,6 +123,7 @@ pub fn default_advertised_caps() -> HashSet<Capability> {
     set.insert(Capability::InviteNotify);
     set.insert(Capability::Chghost);
     set.insert(Capability::Setname);
+    set.insert(Capability::StandardReplies);
     set
 }
 

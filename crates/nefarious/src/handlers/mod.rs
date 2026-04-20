@@ -264,4 +264,51 @@ impl HandlerContext {
         self.apply_reply_tags(&mut msg, &client);
         client.send(msg);
     }
+
+    /// IRCv3 standard-replies FAIL. Emitted only when the client has
+    /// the cap — silently dropped otherwise so older clients don't get
+    /// duplicated error deliveries (they're expected to rely on
+    /// numerics).
+    ///
+    /// Wire: `FAIL <command> <code> [<context>...] :<description>`.
+    pub async fn fail(&self, command: &str, code: &str, context: &[&str], description: &str) {
+        self.standard_reply(Command::Fail, command, code, context, description)
+            .await;
+    }
+
+    /// IRCv3 standard-replies WARN.
+    pub async fn warn(&self, command: &str, code: &str, context: &[&str], description: &str) {
+        self.standard_reply(Command::Warn, command, code, context, description)
+            .await;
+    }
+
+    /// IRCv3 standard-replies NOTE.
+    pub async fn note(&self, command: &str, code: &str, context: &[&str], description: &str) {
+        self.standard_reply(Command::Note, command, code, context, description)
+            .await;
+    }
+
+    async fn standard_reply(
+        &self,
+        verb: Command,
+        command: &str,
+        code: &str,
+        context: &[&str],
+        description: &str,
+    ) {
+        let client = self.client.read().await;
+        if !client.has_cap(Capability::StandardReplies) {
+            return;
+        }
+        let mut params: Vec<String> = Vec::with_capacity(3 + context.len());
+        params.push(command.to_string());
+        params.push(code.to_string());
+        for c in context {
+            params.push((*c).to_string());
+        }
+        params.push(description.to_string());
+        let mut msg = Message::with_source(&self.state.server_name, verb, params);
+        self.apply_reply_tags(&mut msg, &client);
+        client.send(msg);
+    }
 }

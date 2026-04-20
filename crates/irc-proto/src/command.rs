@@ -20,6 +20,11 @@ pub enum Command {
     Chghost,
     Setname,
 
+    // IRCv3 standard replies
+    Fail,
+    Warn,
+    Note,
+
     // Channel operations
     Join,
     Part,
@@ -93,6 +98,9 @@ impl Command {
             "BATCH" => Command::Batch,
             "CHGHOST" => Command::Chghost,
             "SETNAME" => Command::Setname,
+            "FAIL" => Command::Fail,
+            "WARN" => Command::Warn,
+            "NOTE" => Command::Note,
             "JOIN" => Command::Join,
             "PART" => Command::Part,
             "TOPIC" => Command::Topic,
@@ -141,6 +149,9 @@ impl fmt::Display for Command {
             Command::Batch => write!(f, "BATCH"),
             Command::Chghost => write!(f, "CHGHOST"),
             Command::Setname => write!(f, "SETNAME"),
+            Command::Fail => write!(f, "FAIL"),
+            Command::Warn => write!(f, "WARN"),
+            Command::Note => write!(f, "NOTE"),
             Command::Join => write!(f, "JOIN"),
             Command::Part => write!(f, "PART"),
             Command::Topic => write!(f, "TOPIC"),
