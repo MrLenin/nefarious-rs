@@ -1,0 +1,30 @@
+[workspace]
+members = [
+    "crates/nefarious",
+    "crates/irc-proto",
+    "crates/irc-config",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "GPL-2.0-only"
+repository = "https://github.com/evilnet/nefarious-rs"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tokio-openssl = "0.6"
+openssl = "0.10"
+nom = "8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = "1"
+dashmap = "6"
+thiserror = "2"
+chrono = "0.4"
+futures = "0.3"
+
+# workspace crates
+irc-proto = { path = "crates/irc-proto" }
+irc-config = { path = "crates/irc-config" }

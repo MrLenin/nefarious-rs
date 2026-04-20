@@ -1,0 +1,19 @@
+[package]
+name = "nefarious"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+irc-proto = { workspace = true }
+irc-config = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-openssl = { workspace = true }
+openssl = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+bytes = { workspace = true }
+dashmap = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }

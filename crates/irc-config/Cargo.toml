@@ -1,0 +1,9 @@
+[package]
+name = "irc-config"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+nom = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
