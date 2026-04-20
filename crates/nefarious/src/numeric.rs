@@ -16,6 +16,10 @@ pub const RPL_LUSERUNKNOWN: u16 = 253;
 pub const RPL_LUSERCHANNELS: u16 = 254;
 pub const RPL_LUSERME: u16 = 255;
 
+// Userhost/Ison
+pub const RPL_USERHOST: u16 = 302;
+pub const RPL_ISON: u16 = 303;
+
 // Away
 pub const RPL_AWAY: u16 = 301;
 pub const RPL_UNAWAY: u16 = 305;

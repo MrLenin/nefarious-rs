@@ -88,9 +88,13 @@ pub async fn handle_join(ctx: &HandlerContext, msg: &Message) {
                 }
             }
 
-            is_new = chan.members.is_empty();
+            // A channel is genuinely brand-new only when it has no members
+            // at all — local OR remote. If remote_members is populated the
+            // channel already exists somewhere on the network (from burst
+            // or a prior link) and the joiner must not get ops for free.
+            is_new = chan.is_empty();
 
-            // Add the member — first member gets ops
+            // Add the member — first member (of a brand-new channel) gets ops.
             let flags = MembershipFlags {
                 op: is_new,
                 ..Default::default()

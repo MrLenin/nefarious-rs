@@ -46,6 +46,10 @@ impl HandlerContext {
             Command::Motd => query::handle_motd(self, msg).await,
             Command::Lusers => query::handle_lusers(self, msg).await,
             Command::Version => query::handle_version(self, msg).await,
+            Command::Away => query::handle_away(self, msg).await,
+            Command::Userhost => query::handle_userhost(self, msg).await,
+            Command::Ison => query::handle_ison(self, msg).await,
+            Command::Oper => query::handle_oper(self, msg).await,
 
             // Registration (nick change after registration)
             Command::Nick => registration::handle_nick_change(self, msg).await,

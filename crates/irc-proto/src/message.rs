@@ -159,10 +159,15 @@ impl fmt::Display for Message {
         // Command
         write!(f, "{}", self.command)?;
 
-        // Params
+        // Params. Always emit the last parameter with a leading `:` — this
+        // is the convention every IRC server follows and it means the
+        // wire format round-trips through parse/Display even when the
+        // trailing param happens to not contain spaces (otherwise
+        // `TOPIC #c :hello` would re-emit as `TOPIC #c hello`, which is
+        // semantically equivalent but byte-wise different).
+        let last_idx = self.params.len().saturating_sub(1);
         for (i, param) in self.params.iter().enumerate() {
-            let is_last = i == self.params.len() - 1;
-            if is_last && (param.contains(' ') || param.starts_with(':') || param.is_empty()) {
+            if i == last_idx {
                 write!(f, " :{param}")?;
             } else {
                 write!(f, " {param}")?;

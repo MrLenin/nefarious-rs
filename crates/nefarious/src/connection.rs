@@ -289,31 +289,11 @@ async fn send_welcome(client: &Arc<RwLock<Client>>, state: &ServerState) {
         c.send_numeric(server, RPL_ISUPPORT, params);
     }
 
-    let clients = state.client_count();
-    let channels = state.channel_count();
-
-    c.send_numeric(
-        server,
-        RPL_LUSERCLIENT,
-        vec![format!(
-            "There are {clients} users and 0 invisible on 1 servers"
-        )],
-    );
-    c.send_numeric(
-        server,
-        RPL_LUSEROP,
-        vec!["0".into(), "operator(s) online".into()],
-    );
-    c.send_numeric(
-        server,
-        RPL_LUSERCHANNELS,
-        vec![channels.to_string(), "channels formed".into()],
-    );
-    c.send_numeric(
-        server,
-        RPL_LUSERME,
-        vec![format!("I have {clients} clients and 0 servers")],
-    );
+    // Drop the read lock before delegating to send_lusers — it wants its
+    // own lock and we'd deadlock holding one.
+    drop(c);
+    crate::handlers::query::send_lusers(Arc::clone(client), state).await;
+    let c = client.read().await;
 
     if state.motd.is_empty() {
         c.send_numeric(server, ERR_NOMOTD, vec!["MOTD File is missing".into()]);

@@ -42,6 +42,14 @@ pub enum Command {
     // Operator
     Oper,
     Kill,
+    Wallops,
+
+    // Away
+    Away,
+
+    // User queries
+    Userhost,
+    Ison,
 
     // Numeric reply (three-digit code)
     Numeric(u16),
@@ -88,6 +96,10 @@ impl Command {
             "INFO" => Command::Info,
             "OPER" => Command::Oper,
             "KILL" => Command::Kill,
+            "WALLOPS" => Command::Wallops,
+            "AWAY" => Command::Away,
+            "USERHOST" => Command::Userhost,
+            "ISON" => Command::Ison,
             other => Command::Unknown(other.to_string()),
         }
     }
@@ -124,6 +136,10 @@ impl fmt::Display for Command {
             Command::Info => write!(f, "INFO"),
             Command::Oper => write!(f, "OPER"),
             Command::Kill => write!(f, "KILL"),
+            Command::Wallops => write!(f, "WALLOPS"),
+            Command::Away => write!(f, "AWAY"),
+            Command::Userhost => write!(f, "USERHOST"),
+            Command::Ison => write!(f, "ISON"),
             Command::Numeric(n) => write!(f, "{n:03}"),
             Command::Unknown(s) => write!(f, "{s}"),
         }

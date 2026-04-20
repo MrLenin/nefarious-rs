@@ -9,22 +9,13 @@ pub async fn handle_who(ctx: &HandlerContext, msg: &Message) {
     let mask = msg.params.first().map(|s| s.as_str()).unwrap_or("*");
 
     if mask.starts_with('#') || mask.starts_with('&') {
-        // WHO for a channel
+        // WHO for a channel — include both local and remote members.
         if let Some(channel) = ctx.state.get_channel(mask) {
             let chan = channel.read().await;
             for (&member_id, flags) in &chan.members {
                 if let Some(member) = ctx.state.clients.get(&member_id) {
                     let m = member.read().await;
-                    let status = format!(
-                        "H{}",
-                        if flags.op {
-                            "@"
-                        } else if flags.voice {
-                            "+"
-                        } else {
-                            ""
-                        }
-                    );
+                    let status = who_status(flags);
                     ctx.send_numeric(
                         RPL_WHOREPLY,
                         vec![
@@ -40,25 +31,76 @@ pub async fn handle_who(ctx: &HandlerContext, msg: &Message) {
                     .await;
                 }
             }
+            for (&numeric, flags) in &chan.remote_members {
+                if let Some(remote) = ctx.state.remote_clients.get(&numeric) {
+                    let r = remote.read().await;
+                    let server_name = ctx
+                        .state
+                        .remote_servers
+                        .get(&r.server)
+                        .map(|s| s.value().clone());
+                    let server_display = if let Some(s) = server_name {
+                        s.read().await.name.clone()
+                    } else {
+                        ctx.state.server_name.clone()
+                    };
+                    let status = who_status(flags);
+                    ctx.send_numeric(
+                        RPL_WHOREPLY,
+                        vec![
+                            mask.to_string(),
+                            r.user.clone(),
+                            r.host.clone(),
+                            server_display,
+                            r.nick.clone(),
+                            status,
+                            format!("1 {}", r.realname),
+                        ],
+                    )
+                    .await;
+                }
+            }
         }
-    } else {
-        // WHO for a nick
-        if let Some(target) = ctx.state.find_client_by_nick(mask) {
-            let m = target.read().await;
-            ctx.send_numeric(
-                RPL_WHOREPLY,
-                vec![
-                    "*".to_string(),
-                    m.user.clone(),
-                    m.host.clone(),
-                    ctx.state.server_name.clone(),
-                    m.nick.clone(),
-                    "H".to_string(),
-                    format!("0 {}", m.realname),
-                ],
-            )
-            .await;
-        }
+    } else if let Some(target) = ctx.state.find_client_by_nick(mask) {
+        let m = target.read().await;
+        ctx.send_numeric(
+            RPL_WHOREPLY,
+            vec![
+                "*".to_string(),
+                m.user.clone(),
+                m.host.clone(),
+                ctx.state.server_name.clone(),
+                m.nick.clone(),
+                "H".to_string(),
+                format!("0 {}", m.realname),
+            ],
+        )
+        .await;
+    } else if let Some(remote) = ctx.state.find_remote_by_nick(mask) {
+        let r = remote.read().await;
+        let server_display = ctx
+            .state
+            .remote_servers
+            .get(&r.server)
+            .map(|s| s.value().clone());
+        let server_name = if let Some(s) = server_display {
+            s.read().await.name.clone()
+        } else {
+            ctx.state.server_name.clone()
+        };
+        ctx.send_numeric(
+            RPL_WHOREPLY,
+            vec![
+                "*".to_string(),
+                r.user.clone(),
+                r.host.clone(),
+                server_name,
+                r.nick.clone(),
+                "H".to_string(),
+                format!("1 {}", r.realname),
+            ],
+        )
+        .await;
     }
 
     ctx.send_numeric(
@@ -66,6 +108,17 @@ pub async fn handle_who(ctx: &HandlerContext, msg: &Message) {
         vec![mask.to_string(), "End of /WHO list".into()],
     )
     .await;
+}
+
+fn who_status(flags: &crate::channel::MembershipFlags) -> String {
+    let prefix = if flags.op {
+        "@"
+    } else if flags.voice {
+        "+"
+    } else {
+        ""
+    };
+    format!("H{prefix}")
 }
 
 /// Handle WHOIS command.
@@ -86,88 +139,130 @@ pub async fn handle_whois(ctx: &HandlerContext, msg: &Message) {
         &msg.params[0]
     };
 
-    let target = match ctx.state.find_client_by_nick(nick) {
-        Some(t) => t,
-        None => {
-            ctx.send_numeric(
-                ERR_NOSUCHNICK,
-                vec![nick.clone(), "No such nick/channel".into()],
-            )
-            .await;
-            ctx.send_numeric(
-                RPL_ENDOFWHOIS,
-                vec![nick.clone(), "End of /WHOIS list".into()],
-            )
-            .await;
-            return;
-        }
-    };
-
-    let t = target.read().await;
-
-    // 311 RPL_WHOISUSER
-    ctx.send_numeric(
-        RPL_WHOISUSER,
-        vec![
-            t.nick.clone(),
-            t.user.clone(),
-            t.host.clone(),
-            "*".to_string(),
-            t.realname.clone(),
-        ],
-    )
-    .await;
-
-    // 312 RPL_WHOISSERVER
-    ctx.send_numeric(
-        RPL_WHOISSERVER,
-        vec![
-            t.nick.clone(),
-            ctx.state.server_name.clone(),
-            ctx.state.server_description.clone(),
-        ],
-    )
-    .await;
-
-    // 319 RPL_WHOISCHANNELS — show channels the target is in
-    if !t.channels.is_empty() {
-        let mut chan_list = Vec::new();
-        for chan_name in &t.channels {
-            if let Some(channel) = ctx.state.get_channel(chan_name) {
-                let chan = channel.read().await;
-                if let Some(flags) = chan.members.get(&t.id) {
-                    chan_list.push(format!("{}{}", flags.highest_prefix(), chan_name));
+    // Try local first, then fall back to remote users seen via P10 burst.
+    if let Some(target) = ctx.state.find_client_by_nick(nick) {
+        let t = target.read().await;
+        ctx.send_numeric(
+            RPL_WHOISUSER,
+            vec![
+                t.nick.clone(),
+                t.user.clone(),
+                t.host.clone(),
+                "*".to_string(),
+                t.realname.clone(),
+            ],
+        )
+        .await;
+        ctx.send_numeric(
+            RPL_WHOISSERVER,
+            vec![
+                t.nick.clone(),
+                ctx.state.server_name.clone(),
+                ctx.state.server_description.clone(),
+            ],
+        )
+        .await;
+        if !t.channels.is_empty() {
+            let mut chan_list = Vec::new();
+            for chan_name in &t.channels {
+                if let Some(channel) = ctx.state.get_channel(chan_name) {
+                    let chan = channel.read().await;
+                    if let Some(flags) = chan.members.get(&t.id) {
+                        chan_list.push(format!("{}{}", flags.highest_prefix(), chan_name));
+                    }
                 }
             }
+            if !chan_list.is_empty() {
+                ctx.send_numeric(
+                    RPL_WHOISCHANNELS,
+                    vec![t.nick.clone(), chan_list.join(" ")],
+                )
+                .await;
+            }
         }
-        if !chan_list.is_empty() {
+        let idle_secs = (chrono::Utc::now() - t.last_active).num_seconds().max(0);
+        ctx.send_numeric(
+            RPL_WHOISIDLE,
+            vec![
+                t.nick.clone(),
+                idle_secs.to_string(),
+                t.connected_at.timestamp().to_string(),
+                "seconds idle, signon time".to_string(),
+            ],
+        )
+        .await;
+        ctx.send_numeric(
+            RPL_ENDOFWHOIS,
+            vec![t.nick.clone(), "End of /WHOIS list".into()],
+        )
+        .await;
+    } else if let Some(remote) = ctx.state.find_remote_by_nick(nick) {
+        // Remote user WHOIS: no idle time (we don't track remote activity)
+        // and the server line reports the remote's home server.
+        let r = remote.read().await;
+        ctx.send_numeric(
+            RPL_WHOISUSER,
+            vec![
+                r.nick.clone(),
+                r.user.clone(),
+                r.host.clone(),
+                "*".to_string(),
+                r.realname.clone(),
+            ],
+        )
+        .await;
+        let server_info = ctx
+            .state
+            .remote_servers
+            .get(&r.server)
+            .map(|e| e.value().clone());
+        let (server_name, server_desc) = if let Some(s) = server_info {
+            let s = s.read().await;
+            (s.name.clone(), s.description.clone())
+        } else {
+            (ctx.state.server_name.clone(), String::new())
+        };
+        ctx.send_numeric(
+            RPL_WHOISSERVER,
+            vec![r.nick.clone(), server_name, server_desc],
+        )
+        .await;
+        if !r.channels.is_empty() {
+            let channels: Vec<String> = r.channels.iter().cloned().collect();
             ctx.send_numeric(
                 RPL_WHOISCHANNELS,
-                vec![t.nick.clone(), chan_list.join(" ")],
+                vec![r.nick.clone(), channels.join(" ")],
             )
             .await;
         }
+        if let Some(ref account) = r.account {
+            ctx.send_numeric(
+                RPL_WHOISACCOUNT,
+                vec![
+                    r.nick.clone(),
+                    account.clone(),
+                    "is logged in as".to_string(),
+                ],
+            )
+            .await;
+        }
+        ctx.send_numeric(
+            RPL_ENDOFWHOIS,
+            vec![r.nick.clone(), "End of /WHOIS list".into()],
+        )
+        .await;
+    } else {
+        ctx.send_numeric(
+            ERR_NOSUCHNICK,
+            vec![nick.clone(), "No such nick/channel".into()],
+        )
+        .await;
+        ctx.send_numeric(
+            RPL_ENDOFWHOIS,
+            vec![nick.clone(), "End of /WHOIS list".into()],
+        )
+        .await;
     }
-
-    // 317 RPL_WHOISIDLE
-    let idle_secs = (chrono::Utc::now() - t.last_active).num_seconds().max(0);
-    ctx.send_numeric(
-        RPL_WHOISIDLE,
-        vec![
-            t.nick.clone(),
-            idle_secs.to_string(),
-            t.connected_at.timestamp().to_string(),
-            "seconds idle, signon time".to_string(),
-        ],
-    )
-    .await;
-
-    // 318 RPL_ENDOFWHOIS
-    ctx.send_numeric(
-        RPL_ENDOFWHOIS,
-        vec![t.nick.clone(), "End of /WHOIS list".into()],
-    )
-    .await;
 }
 
 /// Handle MOTD command.
@@ -194,31 +289,178 @@ pub async fn handle_motd(ctx: &HandlerContext, _msg: &Message) {
 
 /// Handle LUSERS command.
 pub async fn handle_lusers(ctx: &HandlerContext, _msg: &Message) {
-    let clients = ctx.state.client_count();
-    let channels = ctx.state.channel_count();
+    send_lusers(ctx.client.clone(), &ctx.state).await;
+}
 
-    ctx.send_numeric(
+/// Emit the LUSERS reply block to the given client. Shared between the
+/// post-registration welcome burst and the LUSERS command so the numbers
+/// match.
+pub async fn send_lusers(
+    client: std::sync::Arc<tokio::sync::RwLock<crate::client::Client>>,
+    state: &crate::state::ServerState,
+) {
+    let total_users = state.total_user_count();
+    let invisible = state.invisible_count().await;
+    let visible = total_users.saturating_sub(invisible);
+    let operators = state.operator_count().await;
+    let channels = state.channel_count();
+    let servers = state.server_count();
+    let local_clients = state.client_count();
+
+    let server_name = state.server_name.clone();
+    let c = client.read().await;
+
+    c.send_numeric(
+        &server_name,
         RPL_LUSERCLIENT,
         vec![format!(
-            "There are {clients} users and 0 invisible on 1 servers"
+            "There are {visible} users and {invisible} invisible on {servers} servers"
         )],
-    )
-    .await;
+    );
 
-    ctx.send_numeric(RPL_LUSEROP, vec!["0".into(), "operator(s) online".into()])
-        .await;
+    c.send_numeric(
+        &server_name,
+        RPL_LUSEROP,
+        vec![operators.to_string(), "operator(s) online".into()],
+    );
 
-    ctx.send_numeric(
+    c.send_numeric(
+        &server_name,
         RPL_LUSERCHANNELS,
         vec![channels.to_string(), "channels formed".into()],
-    )
-    .await;
+    );
 
-    ctx.send_numeric(
+    c.send_numeric(
+        &server_name,
         RPL_LUSERME,
-        vec![format!("I have {clients} clients and 0 servers")],
-    )
-    .await;
+        vec![format!(
+            "I have {local_clients} clients and {} servers",
+            servers.saturating_sub(1)
+        )],
+    );
+}
+
+/// Handle AWAY command. With no argument clears away state; with an
+/// argument sets it. RPL_UNAWAY / RPL_NOWAWAY is sent to the client.
+pub async fn handle_away(ctx: &HandlerContext, msg: &Message) {
+    let new_state = msg.params.first().cloned().filter(|s| !s.is_empty());
+    let mut client = ctx.client.write().await;
+    client.away_message = new_state.clone();
+    drop(client);
+
+    if new_state.is_some() {
+        ctx.send_numeric(
+            RPL_NOWAWAY,
+            vec!["You have been marked as being away".into()],
+        )
+        .await;
+    } else {
+        ctx.send_numeric(RPL_UNAWAY, vec!["You are no longer marked as being away".into()])
+            .await;
+    }
+}
+
+/// Handle USERHOST — `USERHOST <nick> [<nick>...]`. Returns a single
+/// 302 reply containing `nick[*]=+|-user@host` tokens for each online user.
+pub async fn handle_userhost(ctx: &HandlerContext, msg: &Message) {
+    if msg.params.is_empty() {
+        ctx.send_numeric(
+            ERR_NEEDMOREPARAMS,
+            vec!["USERHOST".into(), "Not enough parameters".into()],
+        )
+        .await;
+        return;
+    }
+
+    let mut tokens = Vec::new();
+    for nick in msg.params.iter().take(5) {
+        if let Some(client) = ctx.state.find_client_by_nick(nick) {
+            let c = client.read().await;
+            let oper_mark = if c.modes.contains(&'o') { "*" } else { "" };
+            let away_mark = if c.away_message.is_some() { "-" } else { "+" };
+            tokens.push(format!("{}{oper_mark}={away_mark}{}@{}", c.nick, c.user, c.host));
+        } else if let Some(remote) = ctx.state.find_remote_by_nick(nick) {
+            let r = remote.read().await;
+            let oper_mark = if r.modes.contains(&'o') { "*" } else { "" };
+            tokens.push(format!("{}{oper_mark}=+{}@{}", r.nick, r.user, r.host));
+        }
+    }
+
+    ctx.send_numeric(RPL_USERHOST, vec![tokens.join(" ")]).await;
+}
+
+/// Handle ISON — `ISON <nick> [<nick>...]`. Returns a single 303 reply
+/// with the space-separated subset of the queried nicks that are online.
+pub async fn handle_ison(ctx: &HandlerContext, msg: &Message) {
+    if msg.params.is_empty() {
+        ctx.send_numeric(
+            ERR_NEEDMOREPARAMS,
+            vec!["ISON".into(), "Not enough parameters".into()],
+        )
+        .await;
+        return;
+    }
+
+    // Params can be `nick1 nick2 ...` across multiple params or one
+    // space-separated param; accept both.
+    let mut present = Vec::new();
+    for p in &msg.params {
+        for nick in p.split_whitespace() {
+            if ctx.state.nick_in_use(nick) {
+                present.push(nick.to_string());
+            }
+        }
+    }
+
+    ctx.send_numeric(RPL_ISON, vec![present.join(" ")]).await;
+}
+
+/// Handle OPER — `OPER <name> <password>`. Matches against Operator
+/// config blocks and grants user mode +o on success. Password comparison
+/// is plaintext for now; the C server supports bcrypt/pbkdf2 but that
+/// belongs in the auth phase.
+pub async fn handle_oper(ctx: &HandlerContext, msg: &Message) {
+    if msg.params.len() < 2 {
+        ctx.send_numeric(
+            ERR_NEEDMOREPARAMS,
+            vec!["OPER".into(), "Not enough parameters".into()],
+        )
+        .await;
+        return;
+    }
+
+    let name = &msg.params[0];
+    let password = &msg.params[1];
+
+    let matched = ctx
+        .state
+        .config
+        .operators
+        .iter()
+        .find(|op| op.name == *name && op.password == *password);
+
+    if matched.is_none() {
+        ctx.send_numeric(ERR_PASSWDMISMATCH, vec!["Password incorrect".into()])
+            .await;
+        return;
+    }
+
+    {
+        let mut client = ctx.client.write().await;
+        client.modes.insert('o');
+    }
+
+    ctx.send_numeric(RPL_YOUREOPER, vec!["You are now an IRC operator".into()])
+        .await;
+
+    // Echo the mode change back to the client.
+    let nick = ctx.nick().await;
+    let client = ctx.client.read().await;
+    client.send(Message::with_source(
+        &nick,
+        irc_proto::Command::Mode,
+        vec![nick.clone(), "+o".into()],
+    ));
 }
 
 /// Handle VERSION command.

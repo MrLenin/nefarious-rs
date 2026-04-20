@@ -124,6 +124,72 @@ pub fn base64_to_ipv4(s: &str) -> Option<std::net::Ipv4Addr> {
     }
 }
 
+/// Encode any IP address into the format used on the P10 wire.
+///
+/// Matches `iptobase64` in `nefarious2/ircd/numnicks.c:475` when the peer
+/// advertises `+6` (IPv6-capable):
+///   * IPv4 and IPv4-mapped IPv6 (`::ffff:a.b.c.d`) collapse to the 6-char
+///     32-bit form, for backwards compatibility with legacy peers.
+///   * Otherwise each 16-bit IPv6 segment is encoded as 3 base64 chars,
+///     with the longest run of zero segments replaced by `_`.
+pub fn ip_to_base64(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V4(v4) => ipv4_to_base64(v4),
+        std::net::IpAddr::V6(v6) => {
+            // IPv4-mapped (::ffff:a.b.c.d) or IPv4-compatible (::a.b.c.d)
+            // both round-trip through the 32-bit form.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return ipv4_to_base64(v4);
+            }
+
+            let segs = v6.segments();
+
+            let mut out = String::with_capacity(25);
+            // Leading non-zero segments are emitted literally.
+            let mut i = 0;
+            while i < 8 && segs[i] != 0 {
+                out.push_str(&inttobase64(segs[i] as u32, 3));
+                i += 1;
+            }
+            let zero_start = i;
+
+            // Find the longest run of zero segments from `zero_start` onward.
+            let mut max_start = zero_start;
+            let mut max_len = 0usize;
+            let mut curr_start = zero_start;
+            let mut curr_len = 0usize;
+            for j in zero_start..8 {
+                if segs[j] == 0 {
+                    if curr_len == 0 {
+                        curr_start = j;
+                    }
+                    curr_len += 1;
+                    if curr_len > max_len {
+                        max_start = curr_start;
+                        max_len = curr_len;
+                    }
+                } else {
+                    curr_len = 0;
+                }
+            }
+
+            // Emit the remainder, collapsing the longest zero run to `_`.
+            let mut ii = zero_start;
+            while ii < 8 {
+                if ii == max_start && max_len > 0 {
+                    out.push('_');
+                    ii += max_len;
+                } else {
+                    out.push_str(&inttobase64(segs[ii] as u32, 3));
+                    ii += 1;
+                }
+            }
+
+            out
+        }
+    }
+}
+
 /// Encode a numeric capacity mask (e.g., max clients) to base64.
 /// The C code uses 3+ chars depending on capacity.
 /// For our purposes, 3 chars covers up to 262143 clients.
@@ -223,6 +289,38 @@ mod tests {
     fn ipv4_zeros() {
         let ip = std::net::Ipv4Addr::new(0, 0, 0, 0);
         assert_eq!(ipv4_to_base64(ip), "AAAAAA");
+    }
+
+    #[test]
+    fn ipv6_all_zeros_collapses_to_underscore() {
+        let ip: std::net::Ipv6Addr = "::".parse().unwrap();
+        // All eight segments are zero → one _ replaces them all.
+        assert_eq!(ip_to_base64(std::net::IpAddr::V6(ip)), "_");
+    }
+
+    #[test]
+    fn ipv6_mapped_ipv4_uses_v4_form() {
+        let v6: std::net::Ipv6Addr = "::ffff:127.0.0.1".parse().unwrap();
+        let direct = ipv4_to_base64(std::net::Ipv4Addr::new(127, 0, 0, 1));
+        assert_eq!(ip_to_base64(std::net::IpAddr::V6(v6)), direct);
+    }
+
+    #[test]
+    fn ipv6_compresses_longest_zero_run() {
+        // 2001:0db8::8a2e:0370:7334 — three zero segments get the _.
+        let ip: std::net::Ipv6Addr = "2001:db8::8a2e:370:7334".parse().unwrap();
+        let s = ip_to_base64(std::net::IpAddr::V6(ip));
+        // 2001 db8 _ 8a2e 0370 7334 → 3+3 + 1 + 3+3+3 = 16 chars
+        assert_eq!(s.len(), 16);
+        assert!(s.contains('_'));
+    }
+
+    #[test]
+    fn ipv6_no_zero_run_no_underscore() {
+        let ip: std::net::Ipv6Addr = "2001:db8:1:2:3:4:5:6".parse().unwrap();
+        let s = ip_to_base64(std::net::IpAddr::V6(ip));
+        assert_eq!(s.len(), 24); // 8 segs × 3 chars each
+        assert!(!s.contains('_'));
     }
 
     #[test]

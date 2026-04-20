@@ -57,10 +57,26 @@ impl Decoder for IrcCodec {
     type Error = CodecError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        // Search for \r\n or \n starting from where we left off
-        let search_start = self.next_search_offset;
+        // Loop instead of recursing so an attacker sending lots of bare
+        // `\r\n` lines can't blow the stack.
+        loop {
+            let search_start = self.next_search_offset;
 
-        if let Some(newline_pos) = find_line_end(&src[search_start..]) {
+            let Some(newline_pos) = find_line_end(&src[search_start..]) else {
+                // No complete line yet. Drain and report error if the
+                // accumulated (unterminated) buffer has already exceeded
+                // the limit; otherwise remember where to resume searching.
+                if src.len() > self.max_line_length {
+                    src.clear();
+                    self.next_search_offset = 0;
+                    return Err(CodecError::LineTooLong {
+                        max: self.max_line_length,
+                    });
+                }
+                self.next_search_offset = src.len();
+                return Ok(None);
+            };
+
             let line_end = search_start + newline_pos;
 
             // Determine how many bytes the line terminator is (\r\n vs \n)
@@ -73,7 +89,6 @@ impl Decoder for IrcCodec {
 
             // Check line length (content only)
             if line_len > self.max_line_length {
-                // Consume the oversized line and report error
                 src.advance(line_end + 1);
                 self.next_search_offset = 0;
                 return Err(CodecError::LineTooLong {
@@ -97,22 +112,10 @@ impl Decoder for IrcCodec {
             src.advance(line_end + 1);
             self.next_search_offset = 0;
 
-            match msg {
-                Some(m) => Ok(Some(m)),
-                None => {
-                    // Empty or unparseable line — skip and try next
-                    self.decode(src)
-                }
+            if let Some(m) = msg {
+                return Ok(Some(m));
             }
-        } else {
-            // No complete line yet — check if buffer is getting too large
-            if src.len() > self.max_line_length {
-                return Err(CodecError::LineTooLong {
-                    max: self.max_line_length,
-                });
-            }
-            self.next_search_offset = src.len();
-            Ok(None)
+            // Empty / unparseable line — loop to try the next line.
         }
     }
 }

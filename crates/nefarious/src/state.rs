@@ -270,6 +270,43 @@ impl ServerState {
         self.clients.len() + self.remote_clients.len()
     }
 
+    /// Count of users with the `+i` (invisible) mode across the network.
+    pub async fn invisible_count(&self) -> usize {
+        let mut n = 0;
+        for entry in self.clients.iter() {
+            if entry.value().read().await.modes.contains(&'i') {
+                n += 1;
+            }
+        }
+        for entry in self.remote_clients.iter() {
+            if entry.value().read().await.modes.contains(&'i') {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Count of users with the `+o` (operator) mode across the network.
+    pub async fn operator_count(&self) -> usize {
+        let mut n = 0;
+        for entry in self.clients.iter() {
+            if entry.value().read().await.modes.contains(&'o') {
+                n += 1;
+            }
+        }
+        for entry in self.remote_clients.iter() {
+            if entry.value().read().await.modes.contains(&'o') {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Total server count on the network, including this one.
+    pub fn server_count(&self) -> usize {
+        1 + self.remote_servers.len()
+    }
+
     /// Generate ISUPPORT (005) tokens.
     pub fn isupport_tokens(&self) -> Vec<String> {
         vec![

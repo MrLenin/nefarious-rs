@@ -1,6 +1,6 @@
 use tracing::info;
 
-use p10_proto::numeric::{capacity_to_base64, ipv4_to_base64};
+use p10_proto::numeric::{capacity_to_base64, ip_to_base64};
 
 use crate::s2s::types::ServerLink;
 use crate::state::ServerState;
@@ -25,15 +25,10 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
             client: client.id.0 as u32,
         };
 
-        // Encode IP — use 127.0.0.1 as fallback for localhost connections
-        let ip_encoded = if client.addr.ip().is_loopback() {
-            ipv4_to_base64(std::net::Ipv4Addr::new(127, 0, 0, 1))
-        } else {
-            match client.addr.ip() {
-                std::net::IpAddr::V4(v4) => ipv4_to_base64(v4),
-                std::net::IpAddr::V6(_) => "AAAAAA".to_string(), // TODO: IPv6 encoding
-            }
-        };
+        // Encode IP in the P10 wire form. `ip_to_base64` handles v4, v6,
+        // and v4-mapped v6 correctly (matches nefarious2 iptobase64 with
+        // v6_ok=1).
+        let ip_encoded = ip_to_base64(client.addr.ip());
 
         // Format modes
         let modes: String = client.modes.iter().collect();

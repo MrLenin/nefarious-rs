@@ -37,6 +37,10 @@ pub struct Client {
     pub tls: bool,
     /// User modes (simplified as a set of chars).
     pub modes: HashSet<char>,
+    /// Away message, when the user has issued `AWAY :<msg>`. `None` when
+    /// the user is present; when `Some`, other users PRIVMSG/NOTICE to this
+    /// nick trigger an RPL_AWAY response.
+    pub away_message: Option<String>,
     /// Channels this client is in.
     pub channels: HashSet<String>,
     /// Connection timestamp.
@@ -78,6 +82,7 @@ impl Client {
             addr,
             tls,
             modes: HashSet::new(),
+            away_message: None,
             channels: HashSet::new(),
             connected_at: now,
             last_active: now,
@@ -111,9 +116,17 @@ impl Client {
         !self.nick.is_empty() && !self.user.is_empty()
     }
 
-    /// Send a message to this client (non-blocking, drops if buffer full).
+    /// Send a message to this client (non-blocking).
+    ///
+    /// If the outbound queue is full the client is disconnected with
+    /// "SendQ exceeded" — dropping messages silently would cause state
+    /// drift with the rest of the network. `TrySendError::Closed` means
+    /// the writer task already exited, so there is nothing more to do.
     pub fn send(&self, msg: Message) {
-        let _ = self.sender.try_send(msg);
+        use tokio::sync::mpsc::error::TrySendError;
+        if let Err(TrySendError::Full(_)) = self.sender.try_send(msg) {
+            self.request_disconnect("SendQ exceeded");
+        }
     }
 
     /// Send a numeric reply from the server.
