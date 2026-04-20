@@ -469,6 +469,39 @@ impl ServerState {
         1 + self.remote_servers.len()
     }
 
+    /// Broadcast `CAP NEW`/`CAP DEL` notifications to every local
+    /// `cap-notify` client. Called when the advertised set mutates
+    /// (e.g. after a REHASH). `subcmd` is "NEW" or "DEL". Caps are
+    /// sorted by name so the wire ordering is deterministic.
+    pub async fn broadcast_cap_notify(&self, subcmd: &str, caps: &[Capability]) {
+        if caps.is_empty() {
+            return;
+        }
+        // Render the CAP line contents once and reuse per recipient.
+        let mut tokens: Vec<String> = caps
+            .iter()
+            .map(|c| match c.ls_value() {
+                Some(v) => format!("{}={v}", c.name()),
+                None => c.name().to_string(),
+            })
+            .collect();
+        tokens.sort();
+        let payload = tokens.join(" ");
+
+        for entry in self.clients.iter() {
+            let c = entry.value().read().await;
+            if !c.has_cap(Capability::CapNotify) {
+                continue;
+            }
+            let target = if c.nick.is_empty() { "*".to_string() } else { c.nick.clone() };
+            c.send(irc_proto::Message::with_source(
+                &self.server_name,
+                irc_proto::Command::Cap,
+                vec![target, subcmd.to_string(), payload.clone()],
+            ));
+        }
+    }
+
     /// Generate ISUPPORT (005) tokens.
     pub fn isupport_tokens(&self) -> Vec<String> {
         vec![

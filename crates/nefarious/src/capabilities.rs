@@ -137,29 +137,30 @@ pub fn default_advertised_caps() -> HashSet<Capability> {
 mod tests {
     use super::*;
 
+    const ALL_CAPS: &[Capability] = &[
+        Capability::CapNotify,
+        Capability::MessageTags,
+        Capability::ServerTime,
+        Capability::AccountTag,
+        Capability::EchoMessage,
+        Capability::Batch,
+        Capability::LabeledResponse,
+        Capability::MultiPrefix,
+        Capability::UserhostInNames,
+        Capability::InviteNotify,
+        Capability::AwayNotify,
+        Capability::StandardReplies,
+        Capability::Chghost,
+        Capability::Setname,
+        Capability::AccountNotify,
+        Capability::ExtendedJoin,
+        Capability::Sasl,
+    ];
+
     #[test]
     fn roundtrip_all_known_names() {
-        // Every declared variant must roundtrip through its wire name.
-        for cap in [
-            Capability::CapNotify,
-            Capability::MessageTags,
-            Capability::ServerTime,
-            Capability::AccountTag,
-            Capability::EchoMessage,
-            Capability::Batch,
-            Capability::LabeledResponse,
-            Capability::MultiPrefix,
-            Capability::UserhostInNames,
-            Capability::InviteNotify,
-            Capability::AwayNotify,
-            Capability::StandardReplies,
-            Capability::Chghost,
-            Capability::Setname,
-            Capability::AccountNotify,
-            Capability::ExtendedJoin,
-            Capability::Sasl,
-        ] {
-            assert_eq!(Capability::from_name(cap.name()), Some(cap));
+        for cap in ALL_CAPS {
+            assert_eq!(Capability::from_name(cap.name()), Some(*cap));
         }
     }
 
@@ -174,5 +175,39 @@ mod tests {
     fn default_advertised_includes_cap_notify() {
         let caps = default_advertised_caps();
         assert!(caps.contains(&Capability::CapNotify));
+    }
+
+    /// Parity check: every advertised cap must have a name recognised
+    /// by C nefarious2 (from `include/capab.h`). The whitelist is
+    /// copied verbatim from the C header. A mismatch here means we've
+    /// invented a cap name that won't federate.
+    #[test]
+    fn every_advertised_cap_name_matches_c_reference() {
+        const C_KNOWN: &[&str] = &[
+            "multi-prefix",
+            "userhost-in-names",
+            "extended-join",
+            "away-notify",
+            "account-notify",
+            "sasl",
+            "cap-notify",
+            "server-time",
+            "echo-message",
+            "account-tag",
+            "chghost",
+            "invite-notify",
+            "labeled-response",
+            "batch",
+            "setname",
+            "standard-replies",
+            "message-tags",
+        ];
+        for cap in default_advertised_caps() {
+            let n = cap.name();
+            assert!(
+                C_KNOWN.contains(&n),
+                "advertised cap {n} is not in the C parity whitelist"
+            );
+        }
     }
 }
