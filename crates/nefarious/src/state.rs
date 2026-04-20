@@ -49,9 +49,9 @@ impl ServerState {
     }
 
     /// Register a client (after NICK+USER complete).
-    pub fn register_client(&self, client: Arc<RwLock<Client>>, nick: &str) {
+    pub async fn register_client(&self, client: Arc<RwLock<Client>>, nick: &str) {
         let id = {
-            let c = client.blocking_read();
+            let c = client.read().await;
             c.id
         };
         self.nicks.insert(nick.to_ascii_lowercase(), id);

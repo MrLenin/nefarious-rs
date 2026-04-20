@@ -59,7 +59,7 @@ pub async fn handle_connection<S>(
     info!("client {nick} ({addr}) registered");
 
     // Register in global state
-    state.register_client(Arc::clone(&client), &nick);
+    state.register_client(Arc::clone(&client), &nick).await;
 
     // Send welcome burst
     send_welcome(&client, &state).await;
