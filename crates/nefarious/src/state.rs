@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
+use hickory_resolver::TokioResolver;
 use tokio::sync::RwLock;
 
 use irc_config::Config;
@@ -150,11 +151,24 @@ pub struct ServerState {
     pub config: Arc<Config>,
     /// MOTD lines.
     pub motd: Vec<String>,
+    /// Shared DNS resolver for reverse-lookup of connecting clients.
+    /// `None` when the system DNS configuration could not be parsed at
+    /// startup (we log a warning and fall back to IP-as-host).
+    pub dns_resolver: Option<Arc<TokioResolver>>,
 }
 
 impl ServerState {
     pub fn new(config: Config) -> Self {
         let now = chrono::Utc::now();
+        let dns_resolver = match crate::dns::build_resolver() {
+            Ok(r) => Some(Arc::new(r)),
+            Err(e) => {
+                tracing::warn!(
+                    "could not build DNS resolver from system config: {e}; reverse DNS disabled"
+                );
+                None
+            }
+        };
         Self {
             server_name: config.general.name.clone(),
             server_description: config.general.description.clone(),
@@ -176,6 +190,7 @@ impl ServerState {
                 "Welcome to nefarious-rs".to_string(),
                 "A Rust implementation of Nefarious IRCd".to_string(),
             ],
+            dns_resolver,
         }
     }
 

@@ -1,6 +1,7 @@
 mod channel;
 mod client;
 mod connection;
+mod dns;
 mod handlers;
 mod numeric;
 mod s2s;

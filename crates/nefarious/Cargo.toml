@@ -18,3 +18,4 @@ dashmap = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
+hickory-resolver = { version = "0.26", default-features = false, features = ["system-config", "tokio"] }

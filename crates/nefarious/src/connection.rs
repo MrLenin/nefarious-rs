@@ -43,6 +43,19 @@ pub async fn handle_connection<S>(
         return;
     }
 
+    // Kick off a reverse-DNS lookup in the background. The task updates
+    // Client.host on success before the user finishes registering, or
+    // sends a "Couldn't look up" notice on failure. Matches
+    // nefarious2/ircd/ircd_res.c but uses hickory-resolver.
+    if let Some(ref resolver) = state.dns_resolver {
+        crate::dns::spawn_reverse_lookup(
+            Arc::clone(resolver),
+            state.server_name.clone(),
+            Arc::clone(&client),
+            addr.ip(),
+        );
+    }
+
     // Frame the stream with IRC codec
     let framed = Framed::new(stream, IrcCodec::new());
     let (mut sink, mut reader) = framed.split();
