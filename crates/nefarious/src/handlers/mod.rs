@@ -156,6 +156,10 @@ impl HandlerContext {
 
             // CAP
             Command::Cap => registration::handle_cap(&ctx, msg).await,
+            // AUTHENTICATE — SASL surface, mechanisms stubbed until
+            // Phase 3. Accepted during both pre- and post-registration
+            // so clients can negotiate SASL as part of CAP.
+            Command::Authenticate => registration::handle_authenticate(&ctx, msg).await,
 
             // Unknown
             Command::Unknown(cmd) => {

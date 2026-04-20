@@ -127,6 +127,9 @@ pub fn default_advertised_caps() -> HashSet<Capability> {
     // Phase 2.7 — JOIN payload + login/logout broadcast.
     set.insert(Capability::ExtendedJoin);
     set.insert(Capability::AccountNotify);
+    // Phase 2.8 — SASL negotiation surface (mechanisms stubbed until
+    // Phase 3). ls_value() on the cap advertises the mechanism list.
+    set.insert(Capability::Sasl);
     set
 }
 

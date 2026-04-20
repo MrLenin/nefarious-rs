@@ -227,6 +227,13 @@ async fn registration_phase(
                 // Accept and ignore for now (no password auth in Phase 0)
             }
 
+            Command::Authenticate => {
+                // SASL exchange happens during CAP negotiation, before
+                // NICK+USER are allowed to complete registration. Route
+                // to the same handler used post-registration.
+                crate::handlers::registration::handle_authenticate(&ctx, &msg).await;
+            }
+
             Command::Ping => {
                 let token = msg.params.first().map(|s| s.as_str()).unwrap_or("");
                 let c = client.read().await;

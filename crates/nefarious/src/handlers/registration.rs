@@ -92,6 +92,32 @@ pub async fn handle_nick_change(ctx: &HandlerContext, msg: &Message) {
     }
 }
 
+/// Handle the AUTHENTICATE command — SASL negotiation surface.
+///
+/// Phase 2.8 ships the framework only: the mechanism negotiation is
+/// accepted on the wire, but every authentication attempt is
+/// rejected with ERR_SASLFAIL. Phase 3 will replace this with real
+/// PLAIN / EXTERNAL / SCRAM implementations.
+pub async fn handle_authenticate(ctx: &HandlerContext, msg: &Message) {
+    // `AUTHENTICATE *` is the abort form. Acknowledge it cleanly.
+    if msg.params.first().map(|s| s.as_str()) == Some("*") {
+        ctx.send_numeric(
+            crate::numeric::ERR_SASLABORTED,
+            vec!["SASL authentication aborted".into()],
+        )
+        .await;
+        return;
+    }
+
+    // Everything else is answered with SASL failure until Phase 3
+    // wires the actual mechanism handlers.
+    ctx.send_numeric(
+        crate::numeric::ERR_SASLFAIL,
+        vec!["SASL authentication failed".into()],
+    )
+    .await;
+}
+
 /// Handle the CAP command. Implements IRCv3 CAP negotiation (LS/REQ/
 /// ACK/LIST/END) as specified by `nefarious2/ircd/m_cap.c` so a mixed
 /// network can't observe any difference. Pre-registration CAP LS /

@@ -29,6 +29,9 @@ pub enum Command {
     // ACCOUNT token used on the s2s wire).
     Account,
 
+    // IRCv3 SASL authentication exchange
+    Authenticate,
+
     // Channel operations
     Join,
     Part,
@@ -106,6 +109,7 @@ impl Command {
             "WARN" => Command::Warn,
             "NOTE" => Command::Note,
             "ACCOUNT" => Command::Account,
+            "AUTHENTICATE" => Command::Authenticate,
             "JOIN" => Command::Join,
             "PART" => Command::Part,
             "TOPIC" => Command::Topic,
@@ -158,6 +162,7 @@ impl fmt::Display for Command {
             Command::Warn => write!(f, "WARN"),
             Command::Note => write!(f, "NOTE"),
             Command::Account => write!(f, "ACCOUNT"),
+            Command::Authenticate => write!(f, "AUTHENTICATE"),
             Command::Join => write!(f, "JOIN"),
             Command::Part => write!(f, "PART"),
             Command::Topic => write!(f, "TOPIC"),

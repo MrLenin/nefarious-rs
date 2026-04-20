@@ -94,6 +94,17 @@ pub const RPL_ENDOFMOTD: u16 = 376;
 // OPER
 pub const RPL_YOUREOPER: u16 = 381;
 
+// SASL (IRCv3)
+pub const RPL_LOGGEDIN: u16 = 900;
+pub const RPL_LOGGEDOUT: u16 = 901;
+pub const ERR_NICKLOCKED: u16 = 902;
+pub const RPL_SASLSUCCESS: u16 = 903;
+pub const ERR_SASLFAIL: u16 = 904;
+pub const ERR_SASLTOOLONG: u16 = 905;
+pub const ERR_SASLABORTED: u16 = 906;
+pub const ERR_SASLALREADY: u16 = 907;
+pub const RPL_SASLMECHS: u16 = 908;
+
 // Errors
 pub const ERR_NOSUCHNICK: u16 = 401;
 pub const ERR_NOSUCHSERVER: u16 = 402;
