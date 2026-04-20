@@ -161,6 +161,11 @@ pub struct ServerState {
     /// flips a new cap on as its behaviour ships. A REQ for a cap not in
     /// this set gets NAK'd.
     pub advertised_caps: std::collections::HashSet<Capability>,
+    /// Authentication backend. SASL mechanisms in Phase 3.2+ and IAuth
+    /// in 3.6 call into this trait; the default built-in is an empty
+    /// in-memory store. Wrapped in an Arc so handlers can clone a
+    /// reference without borrowing ServerState for the await duration.
+    pub account_store: crate::accounts::SharedAccountStore,
 }
 
 impl ServerState {
@@ -198,6 +203,7 @@ impl ServerState {
             ],
             dns_resolver,
             advertised_caps: default_advertised_caps(),
+            account_store: crate::accounts::empty_in_memory(),
         }
     }
 
@@ -467,6 +473,139 @@ impl ServerState {
     /// Total server count on the network, including this one.
     pub fn server_count(&self) -> usize {
         1 + self.remote_servers.len()
+    }
+
+    /// Mark a local client as logged in to `account`. Updates
+    /// `Client.account`, sends RPL_LOGGEDIN to the client, broadcasts
+    /// IRCv3 `account-notify` to local peers sharing a channel, and
+    /// routes the P10 `AC` token across any S2S link. Symmetric with
+    /// `logout_local`.
+    pub async fn login_local(&self, id: ClientId, account: &crate::accounts::AccountInfo) {
+        let (prefix, nick, channels, src) = {
+            let Some(client_arc) = self.clients.get(&id) else {
+                return;
+            };
+            let mut c = client_arc.write().await;
+            c.account = Some(account.name.clone());
+            (
+                c.prefix(),
+                c.nick.clone(),
+                c.channels.iter().cloned().collect::<std::collections::HashSet<_>>(),
+                crate::tags::SourceInfo::from_local(&c),
+            )
+        };
+
+        // RPL_LOGGEDIN 900 <nick> <prefix> <account> :You are now logged in as <account>
+        if let Some(client_arc) = self.clients.get(&id) {
+            let c = client_arc.read().await;
+            c.send(irc_proto::Message::with_source(
+                &self.server_name,
+                irc_proto::Command::Numeric(crate::numeric::RPL_LOGGEDIN),
+                vec![
+                    nick.clone(),
+                    prefix.clone(),
+                    account.name.clone(),
+                    format!("You are now logged in as {}", account.name),
+                ],
+            ));
+        }
+
+        self.broadcast_account_change(id, &prefix, &account.name, &channels, &src).await;
+        self.route_account_to_s2s(id, Some(&account.name), account.registered_ts).await;
+    }
+
+    /// Mark a local client as logged out. Symmetric with `login_local`.
+    pub async fn logout_local(&self, id: ClientId) {
+        let (prefix, nick, channels, src, was_logged_in) = {
+            let Some(client_arc) = self.clients.get(&id) else {
+                return;
+            };
+            let mut c = client_arc.write().await;
+            let was = c.account.is_some();
+            c.account = None;
+            (
+                c.prefix(),
+                c.nick.clone(),
+                c.channels.iter().cloned().collect::<std::collections::HashSet<_>>(),
+                crate::tags::SourceInfo::from_local(&c),
+                was,
+            )
+        };
+
+        if !was_logged_in {
+            return;
+        }
+
+        if let Some(client_arc) = self.clients.get(&id) {
+            let c = client_arc.read().await;
+            c.send(irc_proto::Message::with_source(
+                &self.server_name,
+                irc_proto::Command::Numeric(crate::numeric::RPL_LOGGEDOUT),
+                vec![
+                    nick.clone(),
+                    prefix.clone(),
+                    "You are now logged out".to_string(),
+                ],
+            ));
+        }
+
+        self.broadcast_account_change(id, &prefix, "*", &channels, &src).await;
+        self.route_account_to_s2s(id, None, chrono::Utc::now().timestamp() as u64).await;
+    }
+
+    /// IRCv3 account-notify fan-out. `account` is `"*"` on logout.
+    async fn broadcast_account_change(
+        &self,
+        source_id: ClientId,
+        source_prefix: &str,
+        account: &str,
+        source_channels: &std::collections::HashSet<String>,
+        src: &crate::tags::SourceInfo,
+    ) {
+        let account_msg = irc_proto::Message::with_source(
+            source_prefix,
+            irc_proto::Command::Account,
+            vec![account.to_string()],
+        );
+        let mut seen: std::collections::HashSet<ClientId> = std::collections::HashSet::new();
+        for chan_name in source_channels {
+            if let Some(channel) = self.get_channel(chan_name) {
+                let chan = channel.read().await;
+                for (&member_id, _) in &chan.members {
+                    if member_id == source_id || !seen.insert(member_id) {
+                        continue;
+                    }
+                    if let Some(member) = self.clients.get(&member_id) {
+                        let m = member.read().await;
+                        if m.has_cap(Capability::AccountNotify) {
+                            m.send_from(account_msg.clone(), src);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Emit the P10 `AC` (account) token across any S2S link so remote
+    /// servers learn about the login/logout. Format matches
+    /// nefarious2/ircd/m_account.c: for login we use the extended
+    /// `AC <numeric> R <account> <ts>`; for logout we use `AC <numeric>
+    /// U`. Accounts are carried as the source user's 5-char numeric.
+    async fn route_account_to_s2s(
+        &self,
+        id: ClientId,
+        account: Option<&str>,
+        ts: u64,
+    ) {
+        let Some(link) = self.get_link() else {
+            return;
+        };
+        let numeric = crate::s2s::routing::local_numeric(self, id);
+        let line = match account {
+            Some(name) => format!("{} AC {numeric} R {name} {ts}", self.numeric),
+            None => format!("{} AC {numeric} U", self.numeric),
+        };
+        link.send_line(line).await;
     }
 
     /// Broadcast `CAP NEW`/`CAP DEL` notifications to every local

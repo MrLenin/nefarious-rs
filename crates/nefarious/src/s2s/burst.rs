@@ -74,6 +74,21 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
         };
 
         link.send_line(line).await;
+
+        // 1b. If the user is logged in, follow the NICK with an AC
+        // (ACCOUNT) token so the remote side records it. Matches
+        // nefarious2/ircd/m_burst.c which sends ACCOUNT during burst
+        // right after the corresponding NICK.
+        if let Some(ref account) = client.account {
+            link.send_line(format!(
+                "{} AC {} R {} {}",
+                our_numeric,
+                client_numeric,
+                account,
+                client.nick_ts,
+            ))
+            .await;
+        }
     }
 
     // 2. Send BURST messages for all channels with local members
