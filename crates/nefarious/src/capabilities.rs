@@ -115,6 +115,9 @@ pub fn default_advertised_caps() -> HashSet<Capability> {
     // Phase 2.4 — batch framing + labeled-response.
     set.insert(Capability::Batch);
     set.insert(Capability::LabeledResponse);
+    // Phase 2.5 — richer NAMES/WHO formatting.
+    set.insert(Capability::MultiPrefix);
+    set.insert(Capability::UserhostInNames);
     set
 }
 

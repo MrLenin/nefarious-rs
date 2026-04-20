@@ -7,6 +7,11 @@ use super::HandlerContext;
 /// Handle WHO command.
 pub async fn handle_who(ctx: &HandlerContext, msg: &Message) {
     let mask = msg.params.first().map(|s| s.as_str()).unwrap_or("*");
+    let multi_prefix = ctx
+        .client
+        .read()
+        .await
+        .has_cap(crate::capabilities::Capability::MultiPrefix);
 
     if mask.starts_with('#') || mask.starts_with('&') {
         // WHO for a channel — include both local and remote members.
@@ -15,7 +20,7 @@ pub async fn handle_who(ctx: &HandlerContext, msg: &Message) {
             for (&member_id, flags) in &chan.members {
                 if let Some(member) = ctx.state.clients.get(&member_id) {
                     let m = member.read().await;
-                    let status = who_status(flags);
+                    let status = who_status(flags, multi_prefix);
                     ctx.send_numeric(
                         RPL_WHOREPLY,
                         vec![
@@ -44,7 +49,7 @@ pub async fn handle_who(ctx: &HandlerContext, msg: &Message) {
                     } else {
                         ctx.state.server_name.clone()
                     };
-                    let status = who_status(flags);
+                    let status = who_status(flags, multi_prefix);
                     ctx.send_numeric(
                         RPL_WHOREPLY,
                         vec![
@@ -110,13 +115,14 @@ pub async fn handle_who(ctx: &HandlerContext, msg: &Message) {
     .await;
 }
 
-fn who_status(flags: &crate::channel::MembershipFlags) -> String {
-    let prefix = if flags.op {
-        "@"
-    } else if flags.voice {
-        "+"
+/// Build the "status" field of an RPL_WHOREPLY row. `multi_prefix`
+/// means the requester negotiated the cap and wants every active
+/// prefix rather than just the highest one.
+fn who_status(flags: &crate::channel::MembershipFlags, multi_prefix: bool) -> String {
+    let prefix = if multi_prefix {
+        flags.all_prefixes()
     } else {
-        ""
+        flags.highest_prefix().to_string()
     };
     format!("H{prefix}")
 }

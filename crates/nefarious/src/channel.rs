@@ -23,6 +23,20 @@ impl MembershipFlags {
             ""
         }
     }
+
+    /// All active prefixes in descending order of rank, for clients
+    /// with the `multi-prefix` capability. When a user is both op and
+    /// voice, we emit `@+` rather than the single highest prefix.
+    pub fn all_prefixes(&self) -> String {
+        let mut out = String::with_capacity(2);
+        if self.op {
+            out.push('@');
+        }
+        if self.voice {
+            out.push('+');
+        }
+        out
+    }
 }
 
 /// Channel modes as a struct.

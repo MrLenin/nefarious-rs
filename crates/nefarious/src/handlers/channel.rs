@@ -660,12 +660,34 @@ async fn send_names(ctx: &HandlerContext, chan_name: &str) {
 
     let chan = channel.read().await;
 
+    // Format knobs come from the requester's negotiated caps:
+    //   multi-prefix      → emit every active prefix (e.g. `@+nick`)
+    //                        instead of only the highest.
+    //   userhost-in-names → emit `nick!user@host` instead of just `nick`.
+    let (multi_prefix, userhost_in_names) = {
+        let c = ctx.client.read().await;
+        (
+            c.has_cap(crate::capabilities::Capability::MultiPrefix),
+            c.has_cap(crate::capabilities::Capability::UserhostInNames),
+        )
+    };
+
     // Build names list
     let mut names = Vec::new();
     for (&member_id, flags) in &chan.members {
         if let Some(member) = ctx.state.clients.get(&member_id) {
             let m = member.read().await;
-            names.push(format!("{}{}", flags.highest_prefix(), m.nick));
+            let prefix = if multi_prefix {
+                flags.all_prefixes()
+            } else {
+                flags.highest_prefix().to_string()
+            };
+            let identity = if userhost_in_names {
+                format!("{}!{}@{}", m.nick, m.user, m.host)
+            } else {
+                m.nick.clone()
+            };
+            names.push(format!("{prefix}{identity}"));
         }
     }
 
