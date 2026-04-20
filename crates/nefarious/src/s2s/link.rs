@@ -148,9 +148,29 @@ pub async fn handle_server_link<S>(
 
     info!("server link established with {remote_name} ({remote_numeric})");
 
-    // Process incoming burst and steady-state messages
-    let mut burst_complete = false;
-    let mut our_burst_sent = false;
+    // P10 burst is bidirectional and concurrent: both sides begin bursting
+    // immediately after the handshake completes, so neither side blocks on
+    // the other's state. Send ours now and keep reading theirs below.
+    super::burst::send_burst(&state, &link).await;
+
+    // Spawn a keepalive task that PINGs the peer every 60s. The task exits
+    // on its own once the outbound channel is closed (link drop), so we
+    // don't need to explicitly abort it.
+    let keepalive_tx = tx.clone();
+    let keepalive_us = our_numeric;
+    let keepalive_peer = remote_numeric;
+    let keepalive_handle = tokio::spawn(async move {
+        let mut tick =
+            tokio::time::interval(std::time::Duration::from_secs(60));
+        tick.tick().await; // discard the immediate first tick
+        loop {
+            tick.tick().await;
+            let ping = format!("{keepalive_us} G :{keepalive_peer}");
+            if keepalive_tx.send(ping).await.is_err() {
+                break;
+            }
+        }
+    });
 
     while let Some(result) = reader.next().await {
         let line = match result {
@@ -187,16 +207,10 @@ pub async fn handle_server_link<S>(
             }
             P10Token::EndOfBurst => {
                 info!("received END_OF_BURST from {remote_name}");
-                burst_complete = true;
-
-                if !our_burst_sent {
-                    // Send our burst
-                    super::burst::send_burst(&state, &link).await;
-                    our_burst_sent = true;
-                }
-
-                // Send EA (end of burst ack)
-                let ea = format!("{} EA", our_numeric);
+                // Ack the remote's burst. Our own burst was dispatched
+                // immediately after the handshake, so there's nothing more
+                // to do here besides sending EA.
+                let ea = format!("{our_numeric} EA");
                 link.send_line(ea).await;
             }
             P10Token::EndOfBurstAck => {
@@ -259,13 +273,10 @@ pub async fn handle_server_link<S>(
     // Clean up — server link is dead
     info!("server link with {remote_name} disconnected");
 
-    // Remove all remote state from this server and its downlinks
-    // Collect all server numerics to remove (the direct link + any servers introduced through it)
-    let servers_to_remove: Vec<ServerNumeric> = state
-        .remote_servers
-        .iter()
-        .map(|entry| *entry.key())
-        .collect();
+    // A dropped link only affects servers reachable *through* this link.
+    // Walk the server tree rooted at `remote_numeric` via the `uplink`
+    // field so other links (if any) keep their servers and users.
+    let servers_to_remove = collect_downstream_servers(&state, remote_numeric).await;
 
     for sn in servers_to_remove {
         // Notify local users about QUIT for each remote user on this server
@@ -305,4 +316,42 @@ pub async fn handle_server_link<S>(
 
     state.links.remove(&remote_numeric);
     writer_handle.abort();
+    keepalive_handle.abort();
+}
+
+/// Collect `root` plus every server that reaches us *through* root — i.e.
+/// the set of servers we lose when the link to `root` drops.
+///
+/// Snapshots the uplink tree first so we don't hold a DashMap iterator
+/// across an `.await` on the inner per-server RwLock.
+async fn collect_downstream_servers(
+    state: &Arc<ServerState>,
+    root: ServerNumeric,
+) -> Vec<ServerNumeric> {
+    let keys: Vec<ServerNumeric> = state
+        .remote_servers
+        .iter()
+        .map(|e| *e.key())
+        .collect();
+
+    let mut tree: Vec<(ServerNumeric, ServerNumeric)> = Vec::with_capacity(keys.len());
+    for k in keys {
+        if let Some(server) = state.remote_servers.get(&k) {
+            let uplink = server.read().await.uplink;
+            tree.push((k, uplink));
+        }
+    }
+
+    let mut descendants = vec![root];
+    let mut i = 0;
+    while i < descendants.len() {
+        let parent = descendants[i];
+        for &(child, uplink) in &tree {
+            if uplink == parent && !descendants.contains(&child) {
+                descendants.push(child);
+            }
+        }
+        i += 1;
+    }
+    descendants
 }

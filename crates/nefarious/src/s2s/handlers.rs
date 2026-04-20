@@ -13,7 +13,9 @@ use crate::state::ServerState;
 
 /// Handle S (SERVER) — remote server introduction during burst.
 pub async fn handle_server(state: &ServerState, msg: &P10Message) {
-    if msg.params.len() < 7 {
+    // SERVER has 8 params: name hop start_ts link_ts protocol numeric_capacity flags :description
+    if msg.params.len() < 8 {
+        warn!("SERVER message too short: {:?}", msg.params);
         return;
     }
 
@@ -23,7 +25,7 @@ pub async fn handle_server(state: &ServerState, msg: &P10Message) {
     let timestamp: u64 = msg.params[3].parse().unwrap_or(0);
     let _protocol = &msg.params[4];
     let numeric_capacity = &msg.params[5];
-    let flags_str = msg.params.get(6).map(|s| s.as_str()).unwrap_or("+");
+    let flags_str = msg.params[6].as_str();
     let description = msg.params.last().unwrap();
 
     let (numeric, _mask) = match p10_proto::numeric::parse_server_numeric_capacity(numeric_capacity)
@@ -91,20 +93,8 @@ pub async fn handle_nick(state: &ServerState, msg: &P10Message) {
 
     let ip_base64 = &msg.params[ip_idx];
 
-    // Numeric is the next field — could be 2 chars (server) + 3 chars (user) = 5 total
-    // Or split into separate params: "AB" "AAA"
-    let numeric = if msg.params.len() > ip_idx + 2 {
-        // Split format: server_yy user_xxx
-        let server_str = &msg.params[ip_idx + 1];
-        let user_str = &msg.params[ip_idx + 2];
-        let combined = format!("{server_str}{user_str}");
-        ClientNumeric::from_str(&combined)
-    } else {
-        // Combined format
-        ClientNumeric::from_str(&msg.params[ip_idx + 1])
-    };
-
-    let numeric = match numeric {
+    // P10 NICK burst uses a single combined 5-char YYXXX numeric (2 server + 3 user).
+    let numeric = match ClientNumeric::from_str(&msg.params[ip_idx + 1]) {
         Some(n) => n,
         None => {
             warn!("invalid NICK numeric: {:?}", msg.params);
@@ -145,6 +135,15 @@ async fn handle_nick_change(state: &ServerState, msg: &P10Message) {
         None => return,
     };
 
+    // Remote nick-change format: `<user_numeric> N <new_nick> <nick_ts>`.
+    // The nick timestamp is load-bearing for future collision resolution
+    // (older TS wins), so capture it alongside the nick itself.
+    let new_nick_ts: u64 = msg
+        .params
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
     let numeric = match ClientNumeric::from_str(origin) {
         Some(n) => n,
         None => return,
@@ -155,6 +154,9 @@ async fn handle_nick_change(state: &ServerState, msg: &P10Message) {
             let mut rc = remote.write().await;
             let old = rc.nick.clone();
             rc.nick = new_nick.clone();
+            if new_nick_ts > 0 {
+                rc.nick_ts = new_nick_ts;
+            }
             old
         };
 
@@ -332,12 +334,12 @@ async fn parse_burst_members(state: &ServerState, chan: &mut Channel, member_str
 
 /// Handle G (PING) from remote server.
 pub async fn handle_ping(state: &ServerState, msg: &P10Message, link: &ServerLink) {
-    // PING format: <origin> G [:<target>]
-    // Response: <our_numeric> Z <target> <origin>
-    let origin = msg.origin.as_deref().unwrap_or("");
-    let target = msg.params.first().map(|s| s.as_str()).unwrap_or("");
-
-    let pong = format!("{} Z {} {}", state.numeric, target, origin);
+    // PING wire: `<pinger> G [<arg>] :<destination>`.
+    // PONG wire (matches nefarious2/ircd/m_ping.c:275): `<us> Z <us> :<pinger>`.
+    // The PONG's first field is our numeric (routing anchor), and the
+    // trailing colon-prefixed param echoes the ping's origin.
+    let pinger = msg.origin.as_deref().unwrap_or("");
+    let pong = format!("{us} Z {us} :{pinger}", us = state.numeric);
     link.send_line(pong).await;
 }
 
@@ -622,6 +624,15 @@ pub async fn handle_mode(state: &ServerState, msg: &P10Message) {
     // Find the source prefix for relaying to local users
     let source_prefix = get_source_prefix(state, msg).await;
 
+    // Apply the mode change to our own channel state BEFORE relaying. Without
+    // this, local op/voice/ban/flag state drifts out of sync with peers and
+    // every subsequent permission check gives the wrong answer.
+    if msg.params.len() >= 2 {
+        let mode_str = msg.params[1].clone();
+        let mode_params: Vec<String> = msg.params[2..].to_vec();
+        apply_remote_channel_mode(state, target, &mode_str, &mode_params).await;
+    }
+
     // Relay the MODE message to local channel members
     if let Some(channel) = state.get_channel(target) {
         let mode_msg = irc_proto::Message::with_source(
@@ -638,10 +649,155 @@ pub async fn handle_mode(state: &ServerState, msg: &P10Message) {
             }
         }
     }
+}
 
-    // TODO: apply mode changes to channel state (op/voice changes, mode flags)
-    // For now we just relay — this means local state might drift, but it's
-    // good enough for Phase 1 basic routing.
+/// Apply a MODE message from a remote server to our channel state.
+///
+/// Op/voice targets in P10 MODE are nicks (not numerics), so resolve them
+/// against both local and remote nick tables. Op/voice on a target we don't
+/// know is silently dropped — the network will resync on the next burst.
+async fn apply_remote_channel_mode(
+    state: &ServerState,
+    chan_name: &str,
+    mode_str: &str,
+    params: &[String],
+) {
+    let channel = match state.get_channel(chan_name) {
+        Some(c) => c,
+        None => return,
+    };
+
+    // Resolve any op/voice nick targets to ids BEFORE taking the channel
+    // write lock, so we never block the channel while awaiting a Client
+    // read lock elsewhere.
+    enum MemberTarget {
+        Local(crate::client::ClientId),
+        Remote(ClientNumeric),
+    }
+    let mut resolved: Vec<MemberTarget> = Vec::new();
+    let mut pi = 0usize;
+    let mut scan_adding = true;
+    for c in mode_str.chars() {
+        match c {
+            '+' => scan_adding = true,
+            '-' => scan_adding = false,
+            'o' | 'v' => {
+                if let Some(nick) = params.get(pi) {
+                    if let Some(client) = state.find_client_by_nick(nick) {
+                        let id = client.read().await.id;
+                        resolved.push(MemberTarget::Local(id));
+                    } else if let Some(remote) = state.find_remote_by_nick(nick) {
+                        let numeric = remote.read().await.numeric;
+                        resolved.push(MemberTarget::Remote(numeric));
+                    }
+                    pi += 1;
+                }
+                let _ = scan_adding;
+            }
+            'k' | 'b' => {
+                // consume param on both + and -
+                if params.get(pi).is_some() {
+                    pi += 1;
+                }
+            }
+            'l' => {
+                if scan_adding && params.get(pi).is_some() {
+                    pi += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut chan = channel.write().await;
+    let mut adding = true;
+    let mut pi = 0usize;
+    let mut ri = 0usize; // resolved-target index
+
+    for c in mode_str.chars() {
+        match c {
+            '+' => adding = true,
+            '-' => adding = false,
+
+            'n' => chan.modes.no_external = adding,
+            't' => chan.modes.topic_ops_only = adding,
+            'm' => chan.modes.moderated = adding,
+            'i' => chan.modes.invite_only = adding,
+            's' => chan.modes.secret = adding,
+            'p' => chan.modes.private = adding,
+
+            'k' => {
+                if adding {
+                    if let Some(key) = params.get(pi) {
+                        chan.modes.key = Some(key.clone());
+                    }
+                } else {
+                    chan.modes.key = None;
+                }
+                if params.get(pi).is_some() {
+                    pi += 1;
+                }
+            }
+            'l' => {
+                if adding {
+                    if let Some(limit_str) = params.get(pi) {
+                        if let Ok(limit) = limit_str.parse::<u32>() {
+                            chan.modes.limit = Some(limit);
+                        }
+                        pi += 1;
+                    }
+                } else {
+                    chan.modes.limit = None;
+                }
+            }
+            'o' | 'v' => {
+                let is_voice = c == 'v';
+                if let Some(target) = resolved.get(ri) {
+                    match target {
+                        MemberTarget::Local(id) => {
+                            if let Some(flags) = chan.members.get_mut(id) {
+                                if is_voice {
+                                    flags.voice = adding;
+                                } else {
+                                    flags.op = adding;
+                                }
+                            }
+                        }
+                        MemberTarget::Remote(numeric) => {
+                            if let Some(flags) = chan.remote_members.get_mut(numeric) {
+                                if is_voice {
+                                    flags.voice = adding;
+                                } else {
+                                    flags.op = adding;
+                                }
+                            }
+                        }
+                    }
+                    ri += 1;
+                }
+                if params.get(pi).is_some() {
+                    pi += 1;
+                }
+            }
+            'b' => {
+                if let Some(mask) = params.get(pi) {
+                    if adding {
+                        chan.bans.push(BanEntry {
+                            mask: mask.clone(),
+                            set_by: "remote".to_string(),
+                            set_at: chrono::Utc::now(),
+                        });
+                    } else {
+                        chan.bans.retain(|b| &b.mask != mask);
+                    }
+                    pi += 1;
+                }
+            }
+            _ => {
+                // unknown mode char — ignore
+            }
+        }
+    }
 }
 
 /// Handle K (KICK) from remote.
