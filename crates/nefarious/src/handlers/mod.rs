@@ -3,6 +3,7 @@ pub mod messaging;
 pub mod mode;
 pub mod query;
 pub mod registration;
+pub mod server_query;
 
 use std::sync::Arc;
 
@@ -50,6 +51,18 @@ impl HandlerContext {
             Command::Userhost => query::handle_userhost(self, msg).await,
             Command::Ison => query::handle_ison(self, msg).await,
             Command::Oper => query::handle_oper(self, msg).await,
+
+            // Server queries
+            Command::Stats => server_query::handle_stats(self, msg).await,
+            Command::Time => server_query::handle_time(self, msg).await,
+            Command::Admin => server_query::handle_admin(self, msg).await,
+            Command::Info => server_query::handle_info(self, msg).await,
+            Command::Links => server_query::handle_links(self, msg).await,
+            Command::Map => server_query::handle_map(self, msg).await,
+            Command::Trace => server_query::handle_trace(self, msg).await,
+
+            // Wallops (operator broadcast)
+            Command::Wallops => messaging::handle_wallops(self, msg).await,
 
             // Registration (nick change after registration)
             Command::Nick => registration::handle_nick_change(self, msg).await,

@@ -51,6 +51,13 @@ pub enum Command {
     Userhost,
     Ison,
 
+    // Server queries (Admin and Info already exist above under Queries)
+    Stats,
+    Time,
+    Links,
+    Map,
+    Trace,
+
     // Numeric reply (three-digit code)
     Numeric(u16),
 
@@ -100,6 +107,11 @@ impl Command {
             "AWAY" => Command::Away,
             "USERHOST" => Command::Userhost,
             "ISON" => Command::Ison,
+            "STATS" => Command::Stats,
+            "TIME" => Command::Time,
+            "LINKS" => Command::Links,
+            "MAP" => Command::Map,
+            "TRACE" => Command::Trace,
             other => Command::Unknown(other.to_string()),
         }
     }
@@ -140,6 +152,11 @@ impl fmt::Display for Command {
             Command::Away => write!(f, "AWAY"),
             Command::Userhost => write!(f, "USERHOST"),
             Command::Ison => write!(f, "ISON"),
+            Command::Stats => write!(f, "STATS"),
+            Command::Time => write!(f, "TIME"),
+            Command::Links => write!(f, "LINKS"),
+            Command::Map => write!(f, "MAP"),
+            Command::Trace => write!(f, "TRACE"),
             Command::Numeric(n) => write!(f, "{n:03}"),
             Command::Unknown(s) => write!(f, "{s}"),
         }

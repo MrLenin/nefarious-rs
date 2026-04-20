@@ -5,6 +5,57 @@ use crate::numeric::*;
 
 use super::HandlerContext;
 
+/// Handle WALLOPS — broadcast an operator-originated message to every
+/// user that has set mode `+w` (wallops-receiver) and forward it onto
+/// the linked server so remote wallops-receivers also see it.
+///
+/// Restricted to local operators because WALLOPS is a trusted channel
+/// for cross-network admin announcements.
+pub async fn handle_wallops(ctx: &HandlerContext, msg: &Message) {
+    let text = match msg.params.first() {
+        Some(m) if !m.is_empty() => m.clone(),
+        _ => {
+            ctx.send_numeric(
+                ERR_NEEDMOREPARAMS,
+                vec!["WALLOPS".into(), "Not enough parameters".into()],
+            )
+            .await;
+            return;
+        }
+    };
+
+    // Operator check.
+    let (prefix, is_oper) = {
+        let c = ctx.client.read().await;
+        (c.prefix(), c.modes.contains(&'o'))
+    };
+    if !is_oper {
+        ctx.send_numeric(
+            ERR_NOPRIVILEGES,
+            vec!["Permission Denied - You're not an IRC operator".into()],
+        )
+        .await;
+        return;
+    }
+
+    let wallops_msg = Message::with_source(&prefix, Command::Wallops, vec![text.clone()]);
+
+    // Deliver to every local +w user.
+    for entry in ctx.state.clients.iter() {
+        let c = entry.value().read().await;
+        if c.modes.contains(&'w') {
+            c.send(wallops_msg.clone());
+        }
+    }
+
+    // Route to the linked server so remote +w users get it too.
+    if let Some(link) = ctx.state.get_link() {
+        let client_id = ctx.client_id().await;
+        let numeric = crate::s2s::routing::local_numeric(&ctx.state, client_id);
+        link.send_line(format!("{numeric} WA :{text}")).await;
+    }
+}
+
 /// Handle PRIVMSG command.
 pub async fn handle_privmsg(ctx: &HandlerContext, msg: &Message) {
     handle_message(ctx, msg, Command::Privmsg).await;

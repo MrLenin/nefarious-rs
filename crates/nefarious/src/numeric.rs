@@ -9,12 +9,43 @@ pub const RPL_CREATED: u16 = 3;
 pub const RPL_MYINFO: u16 = 4;
 pub const RPL_ISUPPORT: u16 = 5;
 
+// Stats
+pub const RPL_STATSLINKINFO: u16 = 211;
+pub const RPL_STATSUPTIME: u16 = 242;
+pub const RPL_ENDOFSTATS: u16 = 219;
+
+// Admin
+pub const RPL_ADMINME: u16 = 256;
+pub const RPL_ADMINLOC1: u16 = 257;
+pub const RPL_ADMINLOC2: u16 = 258;
+pub const RPL_ADMINEMAIL: u16 = 259;
+
 // Lusers
 pub const RPL_LUSERCLIENT: u16 = 251;
 pub const RPL_LUSEROP: u16 = 252;
 pub const RPL_LUSERUNKNOWN: u16 = 253;
 pub const RPL_LUSERCHANNELS: u16 = 254;
 pub const RPL_LUSERME: u16 = 255;
+
+// Time
+pub const RPL_TIME: u16 = 391;
+
+// Links
+pub const RPL_LINKS: u16 = 364;
+pub const RPL_ENDOFLINKS: u16 = 365;
+
+// Info
+pub const RPL_INFO: u16 = 371;
+pub const RPL_ENDOFINFO: u16 = 374;
+
+// Map (Nefarious extension)
+pub const RPL_MAP: u16 = 15;
+pub const RPL_MAPEND: u16 = 17;
+
+// Trace
+pub const RPL_TRACEUSER: u16 = 205;
+pub const RPL_TRACESERVER: u16 = 206;
+pub const RPL_TRACEEND: u16 = 262;
 
 // Userhost/Ison
 pub const RPL_USERHOST: u16 = 302;
