@@ -3,6 +3,7 @@ members = [
     "crates/nefarious",
     "crates/irc-proto",
     "crates/irc-config",
+    "crates/p10-proto",
 ]
 resolver = "2"
 
@@ -28,3 +29,4 @@ futures = "0.3"
 # workspace crates
 irc-proto = { path = "crates/irc-proto" }
 irc-config = { path = "crates/irc-config" }
+p10-proto = { path = "crates/p10-proto" }

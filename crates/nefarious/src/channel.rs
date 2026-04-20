@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use p10_proto::ClientNumeric;
+
 use crate::client::ClientId;
 
 /// Membership flags for a user in a channel.
@@ -102,12 +104,16 @@ pub struct Channel {
     pub topic_time: Option<chrono::DateTime<chrono::Utc>>,
     /// Channel modes.
     pub modes: ChannelModes,
-    /// Members: ClientId → membership flags.
+    /// Local members: ClientId → membership flags.
     pub members: HashMap<ClientId, MembershipFlags>,
+    /// Remote members: ClientNumeric → membership flags (from P10 burst/JOIN).
+    pub remote_members: HashMap<ClientNumeric, MembershipFlags>,
     /// Ban list.
     pub bans: Vec<BanEntry>,
     /// Creation timestamp.
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Creation timestamp as epoch seconds (for P10 burst).
+    pub created_ts: u64,
     /// Invited users (by client ID, cleared on join).
     pub invites: HashSet<ClientId>,
 }
@@ -121,6 +127,7 @@ pub struct BanEntry {
 
 impl Channel {
     pub fn new(name: String) -> Self {
+        let now = chrono::Utc::now();
         Self {
             name,
             topic: None,
@@ -132,8 +139,10 @@ impl Channel {
                 ..Default::default()
             },
             members: HashMap::new(),
+            remote_members: HashMap::new(),
             bans: Vec::new(),
-            created_at: chrono::Utc::now(),
+            created_at: now,
+            created_ts: now.timestamp() as u64,
             invites: HashSet::new(),
         }
     }
@@ -164,9 +173,14 @@ impl Channel {
         self.members.get(id).is_some_and(|f| f.voice)
     }
 
-    /// Check if the channel is empty.
+    /// Check if the channel is empty (no local or remote members).
     pub fn is_empty(&self) -> bool {
-        self.members.is_empty()
+        self.members.is_empty() && self.remote_members.is_empty()
+    }
+
+    /// Total member count (local + remote).
+    pub fn total_members(&self) -> usize {
+        self.members.len() + self.remote_members.len()
     }
 
     /// Check if a client can send to this channel.

@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 irc-proto = { workspace = true }
 irc-config = { workspace = true }
+p10-proto = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tokio-openssl = { workspace = true }

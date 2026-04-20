@@ -3,6 +3,7 @@ mod client;
 mod connection;
 mod handlers;
 mod numeric;
+mod s2s;
 mod server;
 mod state;
 

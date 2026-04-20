@@ -37,10 +37,10 @@ pub async fn run(config: Config, ssl_cert: Option<&Path>, ssl_key: Option<&Path>
         }
     };
 
-    // Bind listeners for each client-facing Port block
+    // Bind listeners for all ports (client and server)
     let mut handles = Vec::new();
 
-    for port_config in config.client_ports() {
+    for port_config in &config.ports {
         if port_config.ssl && ssl_acceptor.is_none() {
             info!("skipping SSL port {} (no certificate)", port_config.port);
             continue;
@@ -63,10 +63,11 @@ pub async fn run(config: Config, ssl_cert: Option<&Path>, ssl_key: Option<&Path>
         let state = Arc::clone(&state);
         let ssl = ssl_acceptor.clone();
         let is_ssl = port_config.ssl;
+        let is_server = port_config.server;
         let port = port_config.port;
 
         let handle = tokio::spawn(async move {
-            accept_loop(listener, state, ssl, is_ssl, port).await;
+            accept_loop(listener, state, ssl, is_ssl, is_server, port).await;
         });
         handles.push(handle);
     }
@@ -88,6 +89,7 @@ async fn accept_loop(
     state: Arc<ServerState>,
     ssl_acceptor: Option<Arc<SslAcceptor>>,
     is_ssl: bool,
+    is_server: bool,
     port: u16,
 ) {
     loop {
@@ -104,6 +106,7 @@ async fn accept_loop(
         if is_ssl {
             if let Some(ref acceptor) = ssl_acceptor {
                 let acceptor = Arc::clone(acceptor);
+                let is_server = is_server;
                 tokio::spawn(async move {
                     let ssl = match openssl::ssl::Ssl::new(acceptor.context()) {
                         Ok(s) => s,
@@ -123,15 +126,75 @@ async fn accept_loop(
                         tracing::debug!("TLS handshake failed on port {port}: {e}");
                         return;
                     }
-                    handle_connection(ssl_stream, addr, state, true, port).await;
+                    if is_server {
+                        handle_server_port(ssl_stream, state).await;
+                    } else {
+                        handle_connection(ssl_stream, addr, state, true, port).await;
+                    }
                 });
             }
+        } else if is_server {
+            tokio::spawn(async move {
+                handle_server_port(stream, state).await;
+            });
         } else {
             tokio::spawn(async move {
                 handle_connection(stream, addr, state, false, port).await;
             });
         }
     }
+}
+
+/// Handle an inbound connection on a server port.
+/// Reads PASS + SERVER, then hands off to the S2S link handler.
+async fn handle_server_port<S>(stream: S, state: Arc<ServerState>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use futures::StreamExt;
+    use tokio_util::codec::{Framed, LinesCodec};
+
+    let mut framed = Framed::new(stream, LinesCodec::new_with_max_length(8192));
+
+    let mut password = String::new();
+    let mut server_params = Vec::new();
+
+    // Read PASS and SERVER lines
+    while let Some(result) = framed.next().await {
+        let line = match result {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!("server port read error: {e}");
+                return;
+            }
+        };
+
+        tracing::debug!("server port recv: {line}");
+
+        if line.starts_with("PASS ") {
+            password = line
+                .strip_prefix("PASS ")
+                .unwrap_or("")
+                .strip_prefix(':')
+                .unwrap_or(&line[5..])
+                .to_string();
+        } else if line.starts_with("SERVER ") {
+            let msg = irc_proto::Message::parse(&line);
+            if let Some(msg) = msg {
+                server_params = msg.params;
+            }
+            break;
+        }
+    }
+
+    if server_params.is_empty() {
+        tracing::error!("server port: no SERVER message received");
+        return;
+    }
+
+    // Extract the raw stream and hand off to S2S handler
+    let stream = framed.into_inner();
+    crate::s2s::link::handle_server_link(stream, state, password, server_params).await;
 }
 
 fn build_ssl_acceptor(

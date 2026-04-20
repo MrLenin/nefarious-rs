@@ -109,6 +109,13 @@ pub async fn handle_join(ctx: &HandlerContext, msg: &Message) {
             Message::with_source(&prefix, Command::Join, vec![chan_name.to_string()]);
         send_to_channel(ctx, chan_name, &join_msg).await;
 
+        // Route to S2S
+        {
+            let chan = channel.read().await;
+            crate::s2s::routing::route_join(&ctx.state, client_id, chan_name, chan.created_ts)
+                .await;
+        }
+
         // Send topic
         send_topic(ctx, chan_name).await;
 
@@ -168,6 +175,9 @@ pub async fn handle_part(ctx: &HandlerContext, msg: &Message) {
         }
         let part_msg = Message::with_source(&prefix, Command::Part, part_params);
         send_to_channel(ctx, chan_name, &part_msg).await;
+
+        // Route to S2S
+        crate::s2s::routing::route_part(&ctx.state, client_id, chan_name, &reason).await;
 
         // Remove from channel
         {

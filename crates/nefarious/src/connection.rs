@@ -82,7 +82,10 @@ pub async fn handle_connection<S>(
     };
 
     let prefix = client.read().await.prefix();
-    let quit_msg = Message::with_source(&prefix, Command::Quit, vec![quit_reason]);
+    let quit_msg = Message::with_source(&prefix, Command::Quit, vec![quit_reason.clone()]);
+
+    // Route QUIT to S2S
+    crate::s2s::routing::route_quit(&state, client_id, &quit_reason).await;
 
     for chan_name in &channels {
         if let Some(channel) = state.get_channel(chan_name) {

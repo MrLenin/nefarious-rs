@@ -66,7 +66,7 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
             return;
         }
 
-        // Send to all channel members except the sender
+        // Send to all local channel members except the sender
         for (&member_id, _) in &chan.members {
             if member_id == client_id {
                 continue;
@@ -76,22 +76,40 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
                 m.send(out_msg.clone());
             }
         }
+
+        // Route to S2S link if there are remote members
+        if !chan.remote_members.is_empty() {
+            drop(chan);
+            crate::s2s::routing::route_privmsg(
+                &ctx.state,
+                client_id,
+                target,
+                text,
+                cmd == Command::Notice,
+            )
+            .await;
+        }
     } else {
-        // Private message to a user
-        match ctx.state.find_client_by_nick(target) {
-            Some(target_client) => {
-                let tc = target_client.read().await;
-                tc.send(out_msg);
-            }
-            None => {
-                if cmd == Command::Privmsg {
-                    ctx.send_numeric(
-                        ERR_NOSUCHNICK,
-                        vec![target.clone(), "No such nick/channel".into()],
-                    )
-                    .await;
-                }
-            }
+        // Private message to a user — check local first, then remote
+        if let Some(target_client) = ctx.state.find_client_by_nick(target) {
+            let tc = target_client.read().await;
+            tc.send(out_msg);
+        } else if ctx.state.find_remote_by_nick(target).is_some() {
+            // Route to S2S link
+            crate::s2s::routing::route_privmsg(
+                &ctx.state,
+                client_id,
+                target,
+                text,
+                cmd == Command::Notice,
+            )
+            .await;
+        } else if cmd == Command::Privmsg {
+            ctx.send_numeric(
+                ERR_NOSUCHNICK,
+                vec![target.clone(), "No such nick/channel".into()],
+            )
+            .await;
         }
     }
 }
