@@ -46,14 +46,16 @@ pub async fn handle_nick_change(ctx: &HandlerContext, msg: &Message) {
         ctx.state.release_nick(&old_nick, client_id);
     }
 
-    // Update the nick on the Client struct.
+    // Update the nick on the Client struct. Capture the new nick_ts so
+    // the S2S routing and any downstream burst use the same timestamp.
+    let nick_ts = chrono::Utc::now().timestamp() as u64;
     {
         let mut client = ctx.client.write().await;
         client.nick = new_nick.clone();
+        client.nick_ts = nick_ts;
     }
 
     // Propagate the nick change to the linked server.
-    let nick_ts = chrono::Utc::now().timestamp() as u64;
     crate::s2s::routing::route_nick_change(&ctx.state, client_id, &new_nick, nick_ts).await;
 
     // Notify the client

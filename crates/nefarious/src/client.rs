@@ -43,6 +43,11 @@ pub struct Client {
     pub connected_at: chrono::DateTime<chrono::Utc>,
     /// Last activity timestamp.
     pub last_active: chrono::DateTime<chrono::Utc>,
+    /// Timestamp of the current nickname as epoch seconds. Used as the
+    /// tiebreaker for P10 nick-TS collision resolution: the side holding
+    /// the nick with the older nick_ts wins. Updated on every successful
+    /// NICK change (including the initial one during registration).
+    pub nick_ts: u64,
     /// Channel for sending messages to this client.
     pub sender: mpsc::Sender<Message>,
     /// Port the client connected on.
@@ -76,6 +81,7 @@ impl Client {
             channels: HashSet::new(),
             connected_at: now,
             last_active: now,
+            nick_ts: now.timestamp() as u64,
             sender,
             listener_port,
             disconnect_signal: Arc::new(Notify::new()),

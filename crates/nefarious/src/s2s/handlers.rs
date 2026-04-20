@@ -110,6 +110,11 @@ pub async fn handle_nick(state: &ServerState, msg: &P10Message) {
     // casefolded nick, the one with the older nick_ts wins. Equal TS → both
     // lose. Without this, two servers introducing the same nick silently
     // corrupt the nick map.
+    //
+    // Whenever our decision drops a user, emit a P10 KILL so every server
+    // on the network converges on the same state. Otherwise we'd silently
+    // remove an entry while the user's own server still believes they're
+    // online.
     match find_nick_owner(state, nick).await {
         Some(NickOwner::Local { id, ts: local_ts }) => {
             use std::cmp::Ordering::*;
@@ -118,17 +123,25 @@ pub async fn handle_nick(state: &ServerState, msg: &P10Message) {
                     warn!(
                         "nick collision on {nick}: remote (ts={nick_ts}) wins over local (ts={local_ts})"
                     );
-                    collision_kill_local(state, id, "Nick collision").await;
+                    let local_nick = collision_kill_local(state, id, "Nick collision").await;
+                    if let Some(n) = local_nick {
+                        crate::s2s::routing::route_kill(state, &n, "Nick collision").await;
+                    }
                 }
                 Greater => {
                     warn!(
                         "nick collision on {nick}: local (ts={local_ts}) wins over remote (ts={nick_ts}); dropping remote"
                     );
+                    crate::s2s::routing::route_kill(state, nick, "Nick collision").await;
                     return;
                 }
                 Equal => {
                     warn!("nick collision tie on {nick} at ts={nick_ts}; killing both");
-                    collision_kill_local(state, id, "Nick collision").await;
+                    let local_nick = collision_kill_local(state, id, "Nick collision").await;
+                    if let Some(n) = local_nick {
+                        crate::s2s::routing::route_kill(state, &n, "Nick collision").await;
+                    }
+                    crate::s2s::routing::route_kill(state, nick, "Nick collision").await;
                     return;
                 }
             }
@@ -140,15 +153,29 @@ pub async fn handle_nick(state: &ServerState, msg: &P10Message) {
                     warn!(
                         "nick collision on {nick}: newer remote (ts={nick_ts}) wins over existing remote (ts={existing_ts})"
                     );
+                    crate::s2s::routing::route_kill(
+                        state,
+                        &existing.to_string(),
+                        "Nick collision",
+                    )
+                    .await;
                     state.remove_remote_client(existing).await;
                 }
                 Greater => {
                     warn!("nick collision on {nick}: existing remote wins; dropping incoming");
+                    crate::s2s::routing::route_kill(state, nick, "Nick collision").await;
                     return;
                 }
                 Equal => {
                     warn!("nick collision tie on {nick}; removing both");
+                    crate::s2s::routing::route_kill(
+                        state,
+                        &existing.to_string(),
+                        "Nick collision",
+                    )
+                    .await;
                     state.remove_remote_client(existing).await;
+                    crate::s2s::routing::route_kill(state, nick, "Nick collision").await;
                     return;
                 }
             }
@@ -187,7 +214,7 @@ async fn find_nick_owner(state: &ServerState, nick: &str) -> Option<NickOwner> {
         let id = *entry;
         drop(entry);
         if let Some(client_arc) = state.clients.get(&id) {
-            let ts = client_arc.read().await.connected_at.timestamp() as u64;
+            let ts = client_arc.read().await.nick_ts;
             return Some(NickOwner::Local { id, ts });
         }
     }
@@ -207,13 +234,19 @@ async fn find_nick_owner(state: &ServerState, nick: &str) -> Option<NickOwner> {
 
 /// Release the nick immediately and ask the client's message loop to exit.
 /// The actual socket close and channel QUIT broadcasts happen when the
-/// loop returns through its normal cleanup path.
-async fn collision_kill_local(state: &ServerState, id: crate::client::ClientId, reason: &str) {
-    if let Some(client_arc) = state.clients.get(&id) {
-        let client = client_arc.read().await;
-        state.release_nick(&client.nick, id);
-        client.request_disconnect(reason);
-    }
+/// loop returns through its normal cleanup path. Returns the victim's old
+/// nick so the caller can propagate a P10 KILL upstream.
+async fn collision_kill_local(
+    state: &ServerState,
+    id: crate::client::ClientId,
+    reason: &str,
+) -> Option<String> {
+    let client_arc = state.clients.get(&id)?;
+    let client = client_arc.read().await;
+    let nick = client.nick.clone();
+    state.release_nick(&nick, id);
+    client.request_disconnect(reason);
+    Some(nick)
 }
 
 /// Handle nick change from remote user.
@@ -244,7 +277,8 @@ async fn handle_nick_change(state: &ServerState, msg: &P10Message) {
 
     // Collision check BEFORE renaming: the new nick may be taken.
     // A remote user is already guaranteed to hold its *current* nick, so
-    // ignore that entry if `find_nick_owner` returns it.
+    // ignore that entry if `find_nick_owner` returns it. Same KILL-on-
+    // decision rule as handle_nick so the rest of the network converges.
     match find_nick_owner(state, new_nick).await {
         Some(NickOwner::Local { id, ts: local_ts }) => {
             use std::cmp::Ordering::*;
@@ -253,17 +287,36 @@ async fn handle_nick_change(state: &ServerState, msg: &P10Message) {
                     warn!(
                         "rename collision on {new_nick}: remote (ts={new_nick_ts}) wins over local (ts={local_ts})"
                     );
-                    collision_kill_local(state, id, "Nick collision").await;
+                    let local_nick =
+                        collision_kill_local(state, id, "Nick collision").await;
+                    if let Some(n) = local_nick {
+                        crate::s2s::routing::route_kill(state, &n, "Nick collision").await;
+                    }
                 }
                 Greater => {
                     warn!(
                         "rename collision on {new_nick}: local wins; dropping remote rename"
                     );
+                    crate::s2s::routing::route_kill(
+                        state,
+                        &numeric.to_string(),
+                        "Nick collision",
+                    )
+                    .await;
                     return;
                 }
                 Equal => {
-                    collision_kill_local(state, id, "Nick collision").await;
-                    // Remote also loses — kill the incoming user entirely.
+                    let local_nick =
+                        collision_kill_local(state, id, "Nick collision").await;
+                    if let Some(n) = local_nick {
+                        crate::s2s::routing::route_kill(state, &n, "Nick collision").await;
+                    }
+                    crate::s2s::routing::route_kill(
+                        state,
+                        &numeric.to_string(),
+                        "Nick collision",
+                    )
+                    .await;
                     state.remove_remote_client(numeric).await;
                     return;
                 }
@@ -273,13 +326,37 @@ async fn handle_nick_change(state: &ServerState, msg: &P10Message) {
             use std::cmp::Ordering::*;
             match new_nick_ts.cmp(&existing_ts) {
                 Less => {
+                    crate::s2s::routing::route_kill(
+                        state,
+                        &existing.to_string(),
+                        "Nick collision",
+                    )
+                    .await;
                     state.remove_remote_client(existing).await;
                 }
                 Greater => {
+                    crate::s2s::routing::route_kill(
+                        state,
+                        &numeric.to_string(),
+                        "Nick collision",
+                    )
+                    .await;
                     return;
                 }
                 Equal => {
+                    crate::s2s::routing::route_kill(
+                        state,
+                        &existing.to_string(),
+                        "Nick collision",
+                    )
+                    .await;
                     state.remove_remote_client(existing).await;
+                    crate::s2s::routing::route_kill(
+                        state,
+                        &numeric.to_string(),
+                        "Nick collision",
+                    )
+                    .await;
                     state.remove_remote_client(numeric).await;
                     return;
                 }
@@ -747,7 +824,64 @@ pub async fn handle_part(state: &ServerState, msg: &P10Message) {
     }
 }
 
-/// Handle Q (QUIT) or D (KILL) from remote.
+/// Handle D (KILL) from remote.
+///
+/// KILL wire: `<killer> D <victim> :<killpath> (<reason>)`. Unlike QUIT
+/// (where the origin IS the user quitting), the origin of a KILL is the
+/// killer and `params[0]` identifies the victim — which is why this is
+/// separate from `handle_quit`.
+pub async fn handle_kill(state: &ServerState, msg: &P10Message) {
+    if msg.params.is_empty() {
+        return;
+    }
+    let victim = &msg.params[0];
+    let reason = msg
+        .params
+        .last()
+        .cloned()
+        .unwrap_or_else(|| "Killed".to_string());
+
+    // Victim might be a numeric or a nick.
+    let resolved_numeric = ClientNumeric::from_str(victim).or_else(|| {
+        state
+            .remote_nicks
+            .get(&irc_casefold(victim))
+            .map(|e| *e)
+    });
+
+    if let Some(numeric) = resolved_numeric {
+        // Remote user killed — broadcast QUIT to channels and drop state.
+        if let Some(remote) = state.remote_clients.get(&numeric) {
+            let rc = remote.read().await;
+            let quit_msg = irc_proto::Message::with_source(
+                &rc.prefix(),
+                irc_proto::Command::Quit,
+                vec![format!("Killed ({reason})")],
+            );
+            for chan_name in &rc.channels {
+                if let Some(channel) = state.get_channel(chan_name) {
+                    let chan = channel.read().await;
+                    for (&member_id, _) in &chan.members {
+                        if let Some(member) = state.clients.get(&member_id) {
+                            let m = member.read().await;
+                            m.send(quit_msg.clone());
+                        }
+                    }
+                }
+            }
+        }
+        state.remove_remote_client(numeric).await;
+        return;
+    }
+
+    // Fall back to local lookup by nick — remote killed one of our users.
+    if let Some(client_arc) = state.find_client_by_nick(victim) {
+        let client = client_arc.read().await;
+        client.request_disconnect(format!("Killed ({reason})"));
+    }
+}
+
+/// Handle Q (QUIT) from remote.
 pub async fn handle_quit(state: &ServerState, msg: &P10Message) {
     let origin = match &msg.origin {
         Some(o) => o,

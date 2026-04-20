@@ -240,7 +240,7 @@ pub async fn handle_server_link<S>(
                 super::handlers::handle_quit(&state, &msg).await;
             }
             P10Token::Kill => {
-                super::handlers::handle_quit(&state, &msg).await;
+                super::handlers::handle_kill(&state, &msg).await;
             }
             P10Token::Mode => {
                 super::handlers::handle_mode(&state, &msg).await;

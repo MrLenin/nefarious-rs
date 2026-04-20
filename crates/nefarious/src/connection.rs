@@ -175,7 +175,11 @@ async fn registration_phase(
                     if !old_nick.is_empty() && !irc_proto::irc_eq(&old_nick, nick) {
                         state.release_nick(&old_nick, id);
                     }
-                    client.write().await.nick = nick.clone();
+                    {
+                        let mut c = client.write().await;
+                        c.nick = nick.clone();
+                        c.nick_ts = chrono::Utc::now().timestamp() as u64;
+                    }
                     got_nick = true;
                 }
             }

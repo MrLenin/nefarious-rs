@@ -44,7 +44,7 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
         };
 
         // N <nick> <hop> <nick_ts> <user> <host> [+<modes>] <ip> <numeric> :<realname>
-        let nick_ts = client.connected_at.timestamp();
+        let nick_ts = client.nick_ts;
         let line = if mode_str.is_empty() {
             format!(
                 "{} N {} 1 {} {} {} {} {} {} :{}",

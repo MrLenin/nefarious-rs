@@ -181,3 +181,21 @@ pub async fn route_invite(
     link.send_line(format!("{numeric} I {target_numeric} {channel}"))
         .await;
 }
+
+/// Announce a P10 KILL originated by this server — used when we settle a
+/// nick-TS collision and need every other server to drop their entry for
+/// the losing user. `victim` is the user's nick or numeric; the killer is
+/// always this server.
+pub async fn route_kill(state: &ServerState, victim: &str, reason: &str) {
+    let link = match state.get_link() {
+        Some(l) => l,
+        None => return,
+    };
+    // Format: `<killer> D <victim> :<killpath> (<reason>)`. We use our own
+    // server numeric as the killpath since the kill originates here.
+    link.send_line(format!(
+        "{us} D {victim} :{us} ({reason})",
+        us = state.numeric
+    ))
+    .await;
+}
