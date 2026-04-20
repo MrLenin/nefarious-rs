@@ -1,3 +1,4 @@
+mod capabilities;
 mod channel;
 mod client;
 mod connection;

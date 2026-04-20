@@ -7,6 +7,8 @@ use tokio::sync::{Notify, mpsc};
 
 use irc_proto::{Command, Message};
 
+use crate::capabilities::Capability;
+
 
 /// Unique client identifier (monotonically increasing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -63,6 +65,17 @@ pub struct Client {
     /// Short reason passed to the QUIT broadcast when we initiate the
     /// disconnect via `disconnect_signal`.
     pub disconnect_reason: std::sync::Mutex<Option<String>>,
+
+    // --- IRCv3 CAP negotiation state ---
+    /// Set while CAP negotiation is in progress. Registration is blocked
+    /// from completing until the client either sends CAP END or never
+    /// starts negotiation at all.
+    pub cap_negotiating: bool,
+    /// CAP version the client announced in `CAP LS <version>`. 0 means
+    /// pre-IRCv3 (no LS ever sent) or v1 (no number after `LS`).
+    pub cap_version: u16,
+    /// The capabilities this client has successfully REQ'd and we ACK'd.
+    pub enabled_caps: HashSet<Capability>,
 }
 
 impl Client {
@@ -91,7 +104,15 @@ impl Client {
             listener_port,
             disconnect_signal: Arc::new(Notify::new()),
             disconnect_reason: std::sync::Mutex::new(None),
+            cap_negotiating: false,
+            cap_version: 0,
+            enabled_caps: HashSet::new(),
         }
+    }
+
+    /// Whether the given capability is active for this client.
+    pub fn has_cap(&self, cap: Capability) -> bool {
+        self.enabled_caps.contains(&cap)
     }
 
     /// Request that the connection task disconnect this client and run

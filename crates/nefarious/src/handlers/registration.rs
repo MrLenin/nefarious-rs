@@ -90,34 +90,217 @@ pub async fn handle_nick_change(ctx: &HandlerContext, msg: &Message) {
     }
 }
 
-/// Handle CAP command (stub — just enough for clients to proceed).
+/// Handle the CAP command. Implements IRCv3 CAP negotiation (LS/REQ/
+/// ACK/LIST/END) as specified by `nefarious2/ircd/m_cap.c` so a mixed
+/// network can't observe any difference. Pre-registration CAP LS /
+/// CAP REQ also flips `Client.cap_negotiating` so the main
+/// `registration_phase` loop blocks from completing USER/NICK until
+/// the client sends CAP END.
 pub async fn handle_cap(ctx: &HandlerContext, msg: &Message) {
-    let subcmd = msg.params.first().map(|s| s.to_ascii_uppercase());
+    use crate::capabilities::Capability;
 
-    match subcmd.as_deref() {
-        Some("LS") => {
-            // Advertise no capabilities for now
-            let client = ctx.client.read().await;
-            client.send(Message::with_source(
-                ctx.server_name(),
+    let subcmd = match msg.params.first() {
+        Some(s) => s.to_ascii_uppercase(),
+        None => return,
+    };
+    let server = ctx.server_name().to_string();
+
+    // Client identifier used in the CAP reply: nick once registration
+    // has set one, `*` before then. Matches nefarious2's
+    // `BadPtr(cli_name(sptr)) ? "*" : cli_name(sptr)` idiom.
+    let target = {
+        let c = ctx.client.read().await;
+        if c.nick.is_empty() {
+            "*".to_string()
+        } else {
+            c.nick.clone()
+        }
+    };
+
+    match subcmd.as_str() {
+        "LS" => {
+            // CAP LS [<version>] — the client declares IRCv3 support
+            // and asks for the advertised capabilities.
+            let version: u16 = msg
+                .params
+                .get(1)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            {
+                let mut c = ctx.client.write().await;
+                c.cap_negotiating = true;
+                c.cap_version = version;
+            }
+            send_cap_list(ctx, &server, &target, "LS", &advertised_list(ctx).await).await;
+        }
+
+        "LIST" => {
+            // CAP LIST — mid-session introspection of enabled caps.
+            let enabled: Vec<String> = {
+                let c = ctx.client.read().await;
+                c.enabled_caps.iter().map(|cap| cap.name().to_string()).collect()
+            };
+            send_cap_list(ctx, &server, &target, "LIST", &enabled).await;
+        }
+
+        "REQ" => {
+            // CAP REQ :<cap1> [<cap2> ...] — atomic: either all caps
+            // are advertised (ACK) or none are applied (NAK).
+            let raw = msg.params.get(1).cloned().unwrap_or_default();
+            let tokens: Vec<&str> = raw.split_whitespace().collect();
+
+            // Mark negotiation as in-progress if we're pre-registration;
+            // a client that jumps straight to REQ without LS is also
+            // mid-CAP-handshake and must send END before we register them.
+            {
+                let mut c = ctx.client.write().await;
+                if !c.is_registered() {
+                    c.cap_negotiating = true;
+                }
+            }
+
+            let mut to_enable: Vec<Capability> = Vec::with_capacity(tokens.len());
+            let mut to_disable: Vec<Capability> = Vec::new();
+            let mut rejected = false;
+            for tok in &tokens {
+                let (neg, name) = if let Some(stripped) = tok.strip_prefix('-') {
+                    (true, stripped)
+                } else {
+                    (false, *tok)
+                };
+                let cap = match Capability::from_name(name) {
+                    Some(c) => c,
+                    None => {
+                        rejected = true;
+                        break;
+                    }
+                };
+                if !neg && !ctx.state.advertised_caps.contains(&cap) {
+                    rejected = true;
+                    break;
+                }
+                if neg {
+                    to_disable.push(cap);
+                } else {
+                    to_enable.push(cap);
+                }
+            }
+
+            if rejected {
+                ctx.client.read().await.send(Message::with_source(
+                    &server,
+                    Command::Cap,
+                    vec![target.clone(), "NAK".into(), raw],
+                ));
+                return;
+            }
+
+            // Apply the full set atomically.
+            {
+                let mut c = ctx.client.write().await;
+                for cap in &to_enable {
+                    c.enabled_caps.insert(*cap);
+                }
+                for cap in &to_disable {
+                    c.enabled_caps.remove(cap);
+                }
+            }
+
+            // ACK echoes the original request verbatim so the client
+            // knows which tokens (and in what order) were applied.
+            ctx.client.read().await.send(Message::with_source(
+                &server,
                 Command::Cap,
-                vec!["*".into(), "LS".into(), "".into()],
+                vec![target.clone(), "ACK".into(), raw],
             ));
         }
-        Some("REQ") => {
-            // Deny all capability requests for now
-            let caps = msg.params.get(1).cloned().unwrap_or_default();
-            let client = ctx.client.read().await;
-            client.send(Message::with_source(
-                ctx.server_name(),
-                Command::Cap,
-                vec!["*".into(), "NAK".into(), caps],
-            ));
+
+        "END" => {
+            // CAP END closes negotiation. If the client has USER+NICK
+            // already queued, the registration loop's check against
+            // cap_negotiating will unblock and complete registration.
+            let mut c = ctx.client.write().await;
+            c.cap_negotiating = false;
         }
-        Some("END") => {
-            // Client finished CAP negotiation — nothing to do
+
+        "ACK" => {
+            // Client-to-server ACK only applies to sticky caps that need
+            // the client to confirm. We don't use sticky yet — no-op.
         }
-        _ => {}
+
+        _ => {
+            // Unknown subcommand — per IRCv3 we silently ignore. Some
+            // servers reply with a standard error; nefarious2 stays quiet.
+        }
+    }
+}
+
+/// Build the list of currently-advertised capability tokens, with
+/// `=<value>` metadata when the cap has any (e.g. `sasl=PLAIN,EXTERNAL`).
+async fn advertised_list(ctx: &HandlerContext) -> Vec<String> {
+    ctx.state
+        .advertised_caps
+        .iter()
+        .map(|cap| match cap.ls_value() {
+            Some(v) => format!("{}={v}", cap.name()),
+            None => cap.name().to_string(),
+        })
+        .collect()
+}
+
+/// Send a CAP list reply (LS / LIST / ACK / NAK). For CAP 302+ long
+/// outputs are split across multiple messages with a `*` marker
+/// between parts; otherwise everything fits in a single line. 400 is a
+/// conservative slice well under the 512-byte RFC limit.
+const CAP_CHUNK_BYTES: usize = 400;
+
+async fn send_cap_list(
+    ctx: &HandlerContext,
+    server: &str,
+    target: &str,
+    subcmd: &str,
+    tokens: &[String],
+) {
+    let version = ctx.client.read().await.cap_version;
+    let use_continuation = version >= 302 && tokens.len() > 1;
+
+    if tokens.is_empty() {
+        ctx.client.read().await.send(Message::with_source(
+            server,
+            Command::Cap,
+            vec![target.to_string(), subcmd.to_string(), String::new()],
+        ));
+        return;
+    }
+
+    let mut buf = String::new();
+    let mut pending: Vec<String> = Vec::new();
+    for token in tokens {
+        let added = if buf.is_empty() { token.len() } else { buf.len() + 1 + token.len() };
+        if added > CAP_CHUNK_BYTES && !buf.is_empty() {
+            pending.push(std::mem::take(&mut buf));
+        }
+        if !buf.is_empty() {
+            buf.push(' ');
+        }
+        buf.push_str(token);
+    }
+    if !buf.is_empty() {
+        pending.push(buf);
+    }
+
+    let last_idx = pending.len() - 1;
+    for (i, chunk) in pending.into_iter().enumerate() {
+        let mut params = vec![target.to_string(), subcmd.to_string()];
+        if use_continuation && i != last_idx {
+            params.push("*".into());
+        }
+        params.push(chunk);
+        ctx.client.read().await.send(Message::with_source(
+            server,
+            Command::Cap,
+            params,
+        ));
     }
 }
 

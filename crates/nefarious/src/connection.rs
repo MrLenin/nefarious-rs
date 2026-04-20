@@ -257,7 +257,14 @@ async fn registration_phase(
         }
 
         if got_nick && got_user {
-            return true;
+            // Hold registration open while IRCv3 CAP negotiation is in
+            // progress — the client must send CAP END before we can
+            // send the welcome burst. Without this gate, CAP LS / REQ
+            // would race the welcome and capabilities that gate
+            // registration (notably SASL) wouldn't work at all.
+            if !client.read().await.cap_negotiating {
+                return true;
+            }
         }
     }
 

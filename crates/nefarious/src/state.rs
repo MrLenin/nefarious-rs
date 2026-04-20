@@ -8,6 +8,7 @@ use irc_config::Config;
 use irc_proto::irc_casefold;
 use p10_proto::{ClientNumeric, ServerNumeric};
 
+use crate::capabilities::{Capability, default_advertised_caps};
 use crate::channel::Channel;
 use crate::client::{Client, ClientId};
 use crate::s2s::types::{RemoteClient, RemoteServer, ServerLink};
@@ -155,6 +156,11 @@ pub struct ServerState {
     /// `None` when the system DNS configuration could not be parsed at
     /// startup (we log a warning and fall back to IP-as-host).
     pub dns_resolver: Option<Arc<TokioResolver>>,
+    /// IRCv3 capabilities the server currently advertises. Built once at
+    /// startup from `default_advertised_caps`; each Phase 2 sub-phase
+    /// flips a new cap on as its behaviour ships. A REQ for a cap not in
+    /// this set gets NAK'd.
+    pub advertised_caps: std::collections::HashSet<Capability>,
 }
 
 impl ServerState {
@@ -191,6 +197,7 @@ impl ServerState {
                 "A Rust implementation of Nefarious IRCd".to_string(),
             ],
             dns_resolver,
+            advertised_caps: default_advertised_caps(),
         }
     }
 
