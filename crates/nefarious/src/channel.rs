@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use irc_proto::irc_casefold;
 use p10_proto::ClientNumeric;
 
 use crate::client::ClientId;
@@ -243,10 +244,10 @@ pub enum JoinCheck {
     Full,
 }
 
-/// Simple IRC wildcard matching (* and ?).
+/// Simple IRC wildcard matching (* and ?), rfc1459-case-insensitive.
 fn wildcard_match(pattern: &str, input: &str) -> bool {
-    let pattern = pattern.to_ascii_lowercase();
-    let input = input.to_ascii_lowercase();
+    let pattern = irc_casefold(pattern);
+    let input = irc_casefold(input);
     wildcard_match_inner(pattern.as_bytes(), input.as_bytes())
 }
 

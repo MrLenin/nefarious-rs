@@ -49,6 +49,14 @@ pub async fn handle_connection<S>(
     let registered = registration_phase(&mut reader, &client, &state).await;
 
     if !registered {
+        // Release any nick reserved during the aborted registration.
+        let (id, nick) = {
+            let c = client.read().await;
+            (c.id, c.nick.clone())
+        };
+        if !nick.is_empty() {
+            state.release_nick(&nick, id);
+        }
         debug!("client {addr} disconnected during registration");
         writer_handle.abort();
         return;
@@ -146,7 +154,13 @@ async fn registration_phase(
                         );
                         continue;
                     }
-                    if state.nick_in_use(nick) {
+                    // Atomic reserve — no TOCTOU window between the usage
+                    // check and taking the nick.
+                    let (id, old_nick) = {
+                        let c = client.read().await;
+                        (c.id, c.nick.clone())
+                    };
+                    if !state.try_reserve_nick(nick, id) {
                         let c = client.read().await;
                         c.send_numeric(
                             &state.server_name,
@@ -154,6 +168,12 @@ async fn registration_phase(
                             vec![nick.clone(), "Nickname is already in use".into()],
                         );
                         continue;
+                    }
+                    // Release any prior reservation from an earlier NICK
+                    // during this same registration, unless it was a
+                    // case-only change.
+                    if !old_nick.is_empty() && !irc_proto::irc_eq(&old_nick, nick) {
+                        state.release_nick(&old_nick, id);
                     }
                     client.write().await.nick = nick.clone();
                     got_nick = true;

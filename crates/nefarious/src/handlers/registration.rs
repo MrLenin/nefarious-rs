@@ -1,4 +1,4 @@
-use irc_proto::{Command, Message};
+use irc_proto::{Command, Message, irc_eq};
 
 use crate::numeric::*;
 
@@ -25,31 +25,36 @@ pub async fn handle_nick_change(ctx: &HandlerContext, msg: &Message) {
     }
 
     let client_id = ctx.client_id().await;
-
-    // Check if nick is already in use by someone else
-    if let Some(existing) = ctx.state.find_client_by_nick(&new_nick) {
-        let existing_id = existing.read().await.id;
-        if existing_id != client_id {
-            ctx.send_numeric(
-                ERR_NICKNAMEINUSE,
-                vec![new_nick, "Nickname is already in use".into()],
-            )
-            .await;
-            return;
-        }
-        // Same user, same nick (maybe case change) — fall through
-    }
-
     let old_prefix = ctx.prefix().await;
     let old_nick = ctx.nick().await;
 
-    // Update the nick
+    // Atomic reserve — closes the TOCTOU between "nick free?" and "take it".
+    // try_reserve_nick is idempotent for the same id, so a case-only change
+    // (e.g. Alice → alice) still succeeds.
+    if !ctx.state.try_reserve_nick(&new_nick, client_id) {
+        ctx.send_numeric(
+            ERR_NICKNAMEINUSE,
+            vec![new_nick, "Nickname is already in use".into()],
+        )
+        .await;
+        return;
+    }
+
+    // Release the old reservation unless this is a case-only rename (same
+    // casefolded key — the reservation we just made is the only entry).
+    if !old_nick.is_empty() && !irc_eq(&old_nick, &new_nick) {
+        ctx.state.release_nick(&old_nick, client_id);
+    }
+
+    // Update the nick on the Client struct.
     {
         let mut client = ctx.client.write().await;
         client.nick = new_nick.clone();
     }
 
-    ctx.state.change_nick(client_id, &old_nick, &new_nick);
+    // Propagate the nick change to the linked server.
+    let nick_ts = chrono::Utc::now().timestamp() as u64;
+    crate::s2s::routing::route_nick_change(&ctx.state, client_id, &new_nick, nick_ts).await;
 
     // Notify the client
     let nick_msg = Message::with_source(&old_prefix, Command::Nick, vec![new_nick.clone()]);

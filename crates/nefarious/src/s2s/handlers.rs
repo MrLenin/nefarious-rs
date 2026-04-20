@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use irc_proto::irc_casefold;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
@@ -157,8 +158,7 @@ async fn handle_nick_change(state: &ServerState, msg: &P10Message) {
             old
         };
 
-        state.remote_nicks.remove(&old_nick.to_ascii_lowercase());
-        state.remote_nicks.insert(new_nick.to_ascii_lowercase(), numeric);
+        state.rename_remote_nick(&old_nick, new_nick, numeric);
 
         // Notify local channel members
         let rc = remote.read().await;
@@ -798,7 +798,7 @@ pub async fn handle_destruct(state: &ServerState, msg: &P10Message) {
         let chan = channel.read().await;
         if chan.members.is_empty() && chan.remote_members.is_empty() {
             drop(chan);
-            state.channels.remove(&chan_name.to_ascii_lowercase());
+            state.channels.remove(&irc_casefold(chan_name));
             debug!("channel {} destroyed", chan_name);
         }
     }

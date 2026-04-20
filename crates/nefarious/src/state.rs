@@ -4,6 +4,7 @@ use dashmap::DashMap;
 use tokio::sync::RwLock;
 
 use irc_config::Config;
+use irc_proto::irc_casefold;
 use p10_proto::{ClientNumeric, ServerNumeric};
 
 use crate::channel::Channel;
@@ -74,13 +75,41 @@ impl ServerState {
         }
     }
 
-    /// Register a client (after NICK+USER complete).
-    pub async fn register_client(&self, client: Arc<RwLock<Client>>, nick: &str) {
+    /// Atomically reserve `nick` for `id`. Returns true if reserved (or
+    /// already held by the same id — idempotent), false if held by a
+    /// different local or remote user.
+    ///
+    /// Used during registration and nick change to close the TOCTOU window
+    /// between "is this nick taken?" and "take this nick".
+    pub fn try_reserve_nick(&self, nick: &str, id: ClientId) -> bool {
+        let key = irc_casefold(nick);
+        if self.remote_nicks.contains_key(&key) {
+            return false;
+        }
+        match self.nicks.entry(key) {
+            dashmap::Entry::Occupied(entry) => *entry.get() == id,
+            dashmap::Entry::Vacant(entry) => {
+                entry.insert(id);
+                true
+            }
+        }
+    }
+
+    /// Release a nick reservation, but only if it still points at `id`.
+    /// Called when a client disconnects before completing registration or
+    /// when a nick change supersedes the old nick.
+    pub fn release_nick(&self, nick: &str, id: ClientId) {
+        let key = irc_casefold(nick);
+        self.nicks.remove_if(&key, |_, v| *v == id);
+    }
+
+    /// Register a client (after NICK+USER complete). The nick must already
+    /// have been reserved via `try_reserve_nick`.
+    pub async fn register_client(&self, client: Arc<RwLock<Client>>, _nick: &str) {
         let id = {
             let c = client.read().await;
             c.id
         };
-        self.nicks.insert(nick.to_ascii_lowercase(), id);
         self.clients.insert(id, client);
     }
 
@@ -90,12 +119,12 @@ impl ServerState {
         let nick = {
             if let Some(client) = self.clients.get(&id) {
                 let c = client.read().await;
-                c.nick.to_ascii_lowercase()
+                irc_casefold(&c.nick)
             } else {
                 return;
             }
         };
-        self.nicks.remove(&nick);
+        self.nicks.remove_if(&nick, |_, v| *v == id);
 
         // Remove from all channels
         let mut empty_channels = Vec::new();
@@ -116,22 +145,16 @@ impl ServerState {
         self.clients.remove(&id);
     }
 
-    /// Look up a client by nick (case-insensitive).
+    /// Look up a client by nick (rfc1459-case-insensitive).
     pub fn find_client_by_nick(&self, nick: &str) -> Option<Arc<RwLock<Client>>> {
-        let id = self.nicks.get(&nick.to_ascii_lowercase())?;
+        let id = self.nicks.get(&irc_casefold(nick))?;
         let client = self.clients.get(&*id)?;
         Some(Arc::clone(client.value()))
     }
 
-    /// Update the nick mapping when a client changes nick.
-    pub fn change_nick(&self, id: ClientId, old_nick: &str, new_nick: &str) {
-        self.nicks.remove(&old_nick.to_ascii_lowercase());
-        self.nicks.insert(new_nick.to_ascii_lowercase(), id);
-    }
-
     /// Get or create a channel.
     pub fn get_or_create_channel(&self, name: &str) -> Arc<RwLock<Channel>> {
-        let key = name.to_ascii_lowercase();
+        let key = irc_casefold(name);
         self.channels
             .entry(key)
             .or_insert_with(|| Arc::new(RwLock::new(Channel::new(name.to_string()))))
@@ -142,7 +165,7 @@ impl ServerState {
     /// Get a channel if it exists.
     pub fn get_channel(&self, name: &str) -> Option<Arc<RwLock<Channel>>> {
         self.channels
-            .get(&name.to_ascii_lowercase())
+            .get(&irc_casefold(name))
             .map(|e| e.value().clone())
     }
 
@@ -160,7 +183,7 @@ impl ServerState {
 
     /// Register a remote client from P10 NICK burst.
     pub fn register_remote_client(&self, client: Arc<RwLock<RemoteClient>>, nick: &str, numeric: ClientNumeric) {
-        self.remote_nicks.insert(nick.to_ascii_lowercase(), numeric);
+        self.remote_nicks.insert(irc_casefold(nick), numeric);
         self.remote_clients.insert(numeric, client);
     }
 
@@ -169,7 +192,7 @@ impl ServerState {
         let nick = {
             if let Some(client) = self.remote_clients.get(&numeric) {
                 let c = client.read().await;
-                c.nick.to_ascii_lowercase()
+                irc_casefold(&c.nick)
             } else {
                 return;
             }
@@ -211,17 +234,23 @@ impl ServerState {
         self.links.remove(&server_numeric);
     }
 
-    /// Find a remote client by nick (case-insensitive).
+    /// Find a remote client by nick (rfc1459-case-insensitive).
     pub fn find_remote_by_nick(&self, nick: &str) -> Option<Arc<RwLock<RemoteClient>>> {
-        let numeric = self.remote_nicks.get(&nick.to_ascii_lowercase())?;
+        let numeric = self.remote_nicks.get(&irc_casefold(nick))?;
         let client = self.remote_clients.get(&*numeric)?;
         Some(Arc::clone(client.value()))
     }
 
     /// Check if a nick is in use by either a local or remote user.
     pub fn nick_in_use(&self, nick: &str) -> bool {
-        let lower = nick.to_ascii_lowercase();
-        self.nicks.contains_key(&lower) || self.remote_nicks.contains_key(&lower)
+        let key = irc_casefold(nick);
+        self.nicks.contains_key(&key) || self.remote_nicks.contains_key(&key)
+    }
+
+    /// Rename a remote user's nick entry in the lookup map.
+    pub fn rename_remote_nick(&self, old_nick: &str, new_nick: &str, numeric: ClientNumeric) {
+        self.remote_nicks.remove(&irc_casefold(old_nick));
+        self.remote_nicks.insert(irc_casefold(new_nick), numeric);
     }
 
     /// Get the first active server link (we only support one for now).
@@ -244,7 +273,7 @@ impl ServerState {
     /// Generate ISUPPORT (005) tokens.
     pub fn isupport_tokens(&self) -> Vec<String> {
         vec![
-            "CASEMAPPING=ascii".to_string(),
+            "CASEMAPPING=rfc1459".to_string(),
             "CHANLIMIT=#:100".to_string(),
             "CHANMODES=b,k,l,imnpst".to_string(),
             "CHANNELLEN=200".to_string(),

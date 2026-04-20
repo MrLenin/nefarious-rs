@@ -55,20 +55,20 @@ impl ServerNumeric {
     }
 
     /// Encode to a 2-character base64 string.
-    pub fn to_string(&self) -> String {
+    pub fn encode(&self) -> String {
         inttobase64(self.0 as u32, 2)
     }
 }
 
 impl std::fmt::Debug for ServerNumeric {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ServerNumeric({}, \"{}\")", self.0, self.to_string())
+        write!(f, "ServerNumeric({}, \"{}\")", self.0, self.encode())
     }
 }
 
 impl std::fmt::Display for ServerNumeric {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_string())
+        f.write_str(&self.encode())
     }
 }
 
@@ -92,20 +92,20 @@ impl ClientNumeric {
     }
 
     /// Encode to a 5-character base64 string.
-    pub fn to_string(&self) -> String {
+    pub fn encode(&self) -> String {
         format!("{}{}", self.server, inttobase64(self.client, 3))
     }
 }
 
 impl std::fmt::Debug for ClientNumeric {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ClientNumeric(\"{}\")", self.to_string())
+        write!(f, "ClientNumeric(\"{}\")", self.encode())
     }
 }
 
 impl std::fmt::Display for ClientNumeric {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_string())
+        write!(f, "{}{}", self.server, inttobase64(self.client, 3))
     }
 }
 

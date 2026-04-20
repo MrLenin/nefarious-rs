@@ -4,7 +4,7 @@ use crate::state::ServerState;
 use p10_proto::inttobase64;
 
 /// Get the P10 numeric string for a local client.
-fn local_numeric(state: &ServerState, client_id: ClientId) -> String {
+pub fn local_numeric(state: &ServerState, client_id: ClientId) -> String {
     let cn = p10_proto::ClientNumeric {
         server: state.numeric,
         client: client_id.0 as u32,
@@ -162,4 +162,22 @@ pub async fn route_mode(
         line.push_str(p);
     }
     link.send_line(line).await;
+}
+
+/// Route a local INVITE to the S2S link. The target numeric identifies the
+/// remote or local user being invited.
+pub async fn route_invite(
+    state: &ServerState,
+    client_id: ClientId,
+    target_numeric: &str,
+    channel: &str,
+) {
+    let link = match state.get_link() {
+        Some(l) => l,
+        None => return,
+    };
+
+    let numeric = local_numeric(state, client_id);
+    link.send_line(format!("{numeric} I {target_numeric} {channel}"))
+        .await;
 }

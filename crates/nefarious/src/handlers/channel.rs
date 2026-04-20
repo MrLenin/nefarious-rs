@@ -1,5 +1,5 @@
 
-use irc_proto::{Command, Message};
+use irc_proto::{Command, Message, irc_casefold};
 
 use crate::channel::{JoinCheck, MembershipFlags};
 use crate::numeric::*;
@@ -195,7 +195,7 @@ pub async fn handle_part(ctx: &HandlerContext, msg: &Message) {
         {
             let chan = channel.read().await;
             if chan.is_empty() {
-                ctx.state.channels.remove(&chan_name.to_ascii_lowercase());
+                ctx.state.channels.remove(&irc_casefold(chan_name));
             }
         }
     }
@@ -279,6 +279,18 @@ pub async fn handle_topic(ctx: &HandlerContext, msg: &Message) {
         vec![chan_name.clone(), new_topic.clone()],
     );
     send_to_channel(ctx, chan_name, &topic_msg).await;
+
+    // Route to S2S
+    let ts = chrono::Utc::now().timestamp() as u64;
+    crate::s2s::routing::route_topic(
+        &ctx.state,
+        client_id,
+        chan_name,
+        new_topic,
+        &prefix,
+        ts,
+    )
+    .await;
 }
 
 /// Handle KICK command.
@@ -373,9 +385,21 @@ pub async fn handle_kick(ctx: &HandlerContext, msg: &Message) {
     let kick_msg = Message::with_source(
         &prefix,
         Command::Kick,
-        vec![chan_name.clone(), target_nick.clone(), reason],
+        vec![chan_name.clone(), target_nick.clone(), reason.clone()],
     );
     send_to_channel(ctx, chan_name, &kick_msg).await;
+
+    // Route to S2S — target is a local user, so its numeric is derivable
+    // from its ClientId via `local_numeric`.
+    let target_numeric = crate::s2s::routing::local_numeric(&ctx.state, target_id);
+    crate::s2s::routing::route_kick(
+        &ctx.state,
+        client_id,
+        chan_name,
+        &target_numeric,
+        &reason,
+    )
+    .await;
 
     // Remove target from channel
     {
@@ -490,6 +514,10 @@ pub async fn handle_invite(ctx: &HandlerContext, msg: &Message) {
             vec![target_nick.clone(), chan_name.clone()],
         ));
     }
+
+    // Route to S2S — local target, derive numeric from its ClientId.
+    let target_numeric = crate::s2s::routing::local_numeric(&ctx.state, target_id);
+    crate::s2s::routing::route_invite(&ctx.state, client_id, &target_numeric, chan_name).await;
 }
 
 /// Handle NAMES command.

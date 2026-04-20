@@ -1,4 +1,4 @@
-use irc_proto::{Command, Message};
+use irc_proto::{Command, Message, irc_eq};
 
 use crate::channel::BanEntry;
 use crate::numeric::*;
@@ -257,10 +257,20 @@ async fn handle_channel_mode(ctx: &HandlerContext, msg: &Message) {
     }
 
     if !mode_change.is_empty() {
-        let mut params = vec![chan_name.clone(), mode_change];
-        params.extend(applied_params);
+        let mut params = vec![chan_name.clone(), mode_change.clone()];
+        params.extend(applied_params.clone());
         let mode_msg = Message::with_source(&prefix, Command::Mode, params);
         send_to_channel(ctx, chan_name, &mode_msg).await;
+
+        // Route to S2S so peers see the same mode change.
+        crate::s2s::routing::route_mode(
+            &ctx.state,
+            client_id,
+            chan_name,
+            &mode_change,
+            &applied_params,
+        )
+        .await;
     }
 }
 
@@ -269,7 +279,7 @@ async fn handle_user_mode(ctx: &HandlerContext, msg: &Message) {
     let nick = ctx.nick().await;
 
     // Can only change your own modes
-    if !target_nick.eq_ignore_ascii_case(&nick) {
+    if !irc_eq(target_nick, &nick) {
         ctx.send_numeric(
             ERR_USERSDONTMATCH,
             vec!["Can't change mode for other users".into()],
