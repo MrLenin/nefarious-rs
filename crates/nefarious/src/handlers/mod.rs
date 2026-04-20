@@ -116,6 +116,10 @@ impl HandlerContext {
             Command::Ison => query::handle_ison(&ctx, msg).await,
             Command::Oper => query::handle_oper(&ctx, msg).await,
 
+            // IRCv3 identity-change commands
+            Command::Setname => query::handle_setname(&ctx, msg).await,
+            Command::Chghost => query::handle_chghost(&ctx, msg).await,
+
             // Server queries
             Command::Stats => server_query::handle_stats(&ctx, msg).await,
             Command::Time => server_query::handle_time(&ctx, msg).await,

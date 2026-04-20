@@ -121,6 +121,8 @@ pub fn default_advertised_caps() -> HashSet<Capability> {
     // Phase 2.6 — notify-style broadcasts for state changes.
     set.insert(Capability::AwayNotify);
     set.insert(Capability::InviteNotify);
+    set.insert(Capability::Chghost);
+    set.insert(Capability::Setname);
     set
 }
 

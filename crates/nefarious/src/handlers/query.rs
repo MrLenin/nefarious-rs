@@ -388,6 +388,128 @@ pub async fn handle_away(ctx: &HandlerContext, msg: &Message) {
     }
 }
 
+/// Handle SETNAME — `SETNAME :<realname>`. Updates the sender's
+/// realname and broadcasts the change to any local user sharing a
+/// channel with them who has `setname` enabled.
+pub async fn handle_setname(ctx: &HandlerContext, msg: &Message) {
+    let name = match msg.params.first() {
+        Some(n) if !n.is_empty() => n.clone(),
+        _ => {
+            ctx.send_numeric(
+                ERR_NEEDMOREPARAMS,
+                vec!["SETNAME".into(), "Not enough parameters".into()],
+            )
+            .await;
+            return;
+        }
+    };
+
+    // 390 chars is the C-reference maximum realname length; match it.
+    if name.len() > 390 {
+        ctx.send_numeric(
+            ERR_NEEDMOREPARAMS,
+            vec!["SETNAME".into(), "Realname is too long".into()],
+        )
+        .await;
+        return;
+    }
+
+    let (prefix, channels, client_id) = {
+        let mut c = ctx.client.write().await;
+        c.realname = name.clone();
+        (
+            c.prefix(),
+            c.channels.iter().cloned().collect::<std::collections::HashSet<_>>(),
+            c.id,
+        )
+    };
+
+    let setname_msg = Message::with_source(&prefix, irc_proto::Command::Setname, vec![name]);
+    let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
+    broadcast_to_shared_channels(
+        &ctx.state,
+        client_id,
+        &channels,
+        crate::capabilities::Capability::Setname,
+        &setname_msg,
+        &src,
+    )
+    .await;
+}
+
+/// Handle CHGHOST — `CHGHOST <target> <newuser> <newhost>`. Operator-
+/// only; changes the target's visible user+host and broadcasts the
+/// change to any local user sharing a channel with the target who
+/// has `chghost` enabled.
+pub async fn handle_chghost(ctx: &HandlerContext, msg: &Message) {
+    if msg.params.len() < 3 {
+        ctx.send_numeric(
+            ERR_NEEDMOREPARAMS,
+            vec!["CHGHOST".into(), "Not enough parameters".into()],
+        )
+        .await;
+        return;
+    }
+
+    // Operator check — matches nefarious2 CHGHOST's privilege guard.
+    let is_oper = ctx.client.read().await.modes.contains(&'o');
+    if !is_oper {
+        ctx.send_numeric(
+            ERR_NOPRIVILEGES,
+            vec!["Permission Denied - You're not an IRC operator".into()],
+        )
+        .await;
+        return;
+    }
+
+    let target_nick = &msg.params[0];
+    let new_user = msg.params[1].clone();
+    let new_host = msg.params[2].clone();
+
+    let target = match ctx.state.find_client_by_nick(target_nick) {
+        Some(t) => t,
+        None => {
+            ctx.send_numeric(
+                ERR_NOSUCHNICK,
+                vec![target_nick.clone(), "No such nick/channel".into()],
+            )
+            .await;
+            return;
+        }
+    };
+
+    // Update target's visible identity and capture the OLD prefix so
+    // the broadcast message shows where they were before the change.
+    let (old_prefix, target_id, channels) = {
+        let mut tc = target.write().await;
+        let old_prefix = tc.prefix();
+        tc.user = new_user.clone();
+        tc.host = new_host.clone();
+        let channels: std::collections::HashSet<String> = tc.channels.iter().cloned().collect();
+        (old_prefix, tc.id, channels)
+    };
+
+    let chghost_msg = Message::with_source(
+        &old_prefix,
+        irc_proto::Command::Chghost,
+        vec![new_user, new_host],
+    );
+    let src = crate::tags::SourceInfo::from_local(&*target.read().await);
+    broadcast_to_shared_channels(
+        &ctx.state,
+        target_id,
+        &channels,
+        crate::capabilities::Capability::Chghost,
+        &chghost_msg,
+        &src,
+    )
+    .await;
+
+    // Echo the change to the target so their client sees the new
+    // identity even without chghost cap (matches C behaviour).
+    target.read().await.send(chghost_msg);
+}
+
 /// Deliver `msg` to every local user (other than `source_id`) who
 /// shares at least one of `source_channels` with the source AND has
 /// `cap` enabled. Per-recipient tag injection is applied via

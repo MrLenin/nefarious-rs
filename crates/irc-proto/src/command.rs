@@ -16,6 +16,10 @@ pub enum Command {
     // IRCv3 batch framing
     Batch,
 
+    // IRCv3 identity changes
+    Chghost,
+    Setname,
+
     // Channel operations
     Join,
     Part,
@@ -87,6 +91,8 @@ impl Command {
             "QUIT" => Command::Quit,
             "ERROR" => Command::Error,
             "BATCH" => Command::Batch,
+            "CHGHOST" => Command::Chghost,
+            "SETNAME" => Command::Setname,
             "JOIN" => Command::Join,
             "PART" => Command::Part,
             "TOPIC" => Command::Topic,
@@ -133,6 +139,8 @@ impl fmt::Display for Command {
             Command::Quit => write!(f, "QUIT"),
             Command::Error => write!(f, "ERROR"),
             Command::Batch => write!(f, "BATCH"),
+            Command::Chghost => write!(f, "CHGHOST"),
+            Command::Setname => write!(f, "SETNAME"),
             Command::Join => write!(f, "JOIN"),
             Command::Part => write!(f, "PART"),
             Command::Topic => write!(f, "TOPIC"),
