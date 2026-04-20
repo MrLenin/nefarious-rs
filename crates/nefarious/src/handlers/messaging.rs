@@ -119,9 +119,16 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
             return;
         }
 
-        // Send to all local channel members except the sender
+        // Send to all local channel members. The sender is skipped by
+        // default, but with `echo-message` they receive their own line
+        // back — with the same tags every other recipient sees.
+        let echo = ctx
+            .client
+            .read()
+            .await
+            .has_cap(crate::capabilities::Capability::EchoMessage);
         for (&member_id, _) in &chan.members {
-            if member_id == client_id {
+            if member_id == client_id && !echo {
                 continue;
             }
             if let Some(member) = ctx.state.clients.get(&member_id) {
@@ -145,8 +152,19 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
     } else {
         // Private message to a user — check local first, then remote
         if let Some(target_client) = ctx.state.find_client_by_nick(target) {
+            // Direct-message echo: when the sender has echo-message, the
+            // message goes to them *in addition to* the target.
+            let echo = ctx
+                .client
+                .read()
+                .await
+                .has_cap(crate::capabilities::Capability::EchoMessage);
             let tc = target_client.read().await;
-            tc.send_from(out_msg, &src);
+            tc.send_from(out_msg.clone(), &src);
+            drop(tc);
+            if echo {
+                ctx.client.read().await.send_from(out_msg, &src);
+            }
         } else if ctx.state.find_remote_by_nick(target).is_some() {
             // Route to S2S link
             crate::s2s::routing::route_privmsg(

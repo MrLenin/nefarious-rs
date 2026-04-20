@@ -110,6 +110,8 @@ pub fn default_advertised_caps() -> HashSet<Capability> {
     // Phase 2.2 — tagged outbound events.
     set.insert(Capability::ServerTime);
     set.insert(Capability::AccountTag);
+    // Phase 2.3 — self-echo of PRIVMSG/NOTICE.
+    set.insert(Capability::EchoMessage);
     set
 }
 
