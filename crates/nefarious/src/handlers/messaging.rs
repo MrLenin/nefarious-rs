@@ -39,12 +39,13 @@ pub async fn handle_wallops(ctx: &HandlerContext, msg: &Message) {
     }
 
     let wallops_msg = Message::with_source(&prefix, Command::Wallops, vec![text.clone()]);
+    let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
 
     // Deliver to every local +w user.
     for entry in ctx.state.clients.iter() {
         let c = entry.value().read().await;
         if c.modes.contains(&'w') {
-            c.send(wallops_msg.clone());
+            c.send_from(wallops_msg.clone(), &src);
         }
     }
 
@@ -86,6 +87,7 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
     let client_id = ctx.client_id().await;
 
     let out_msg = Message::with_source(&prefix, cmd.clone(), vec![target.clone(), text.clone()]);
+    let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
 
     if target.starts_with('#') || target.starts_with('&') {
         // Channel message
@@ -124,7 +126,7 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
             }
             if let Some(member) = ctx.state.clients.get(&member_id) {
                 let m = member.read().await;
-                m.send(out_msg.clone());
+                m.send_from(out_msg.clone(), &src);
             }
         }
 
@@ -144,7 +146,7 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
         // Private message to a user — check local first, then remote
         if let Some(target_client) = ctx.state.find_client_by_nick(target) {
             let tc = target_client.read().await;
-            tc.send(out_msg);
+            tc.send_from(out_msg, &src);
         } else if ctx.state.find_remote_by_nick(target).is_some() {
             // Route to S2S link
             crate::s2s::routing::route_privmsg(

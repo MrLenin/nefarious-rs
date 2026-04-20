@@ -67,10 +67,12 @@ pub async fn handle_nick_change(ctx: &HandlerContext, msg: &Message) {
         client.channels.iter().cloned().collect()
     };
 
+    let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
+
     // Send to the client themselves
     {
         let client = ctx.client.read().await;
-        client.send(nick_msg.clone());
+        client.send_from(nick_msg.clone(), &src);
     }
 
     // Send to all channel members
@@ -83,7 +85,7 @@ pub async fn handle_nick_change(ctx: &HandlerContext, msg: &Message) {
                 }
                 if let Some(member) = ctx.state.clients.get(&member_id) {
                     let m = member.read().await;
-                    m.send(nick_msg.clone());
+                    m.send_from(nick_msg.clone(), &src);
                 }
             }
         }

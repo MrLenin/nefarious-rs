@@ -385,6 +385,7 @@ async fn handle_nick_change(state: &ServerState, msg: &P10Message) {
             irc_proto::Command::Nick,
             vec![new_nick.clone()],
         );
+        let src = crate::tags::SourceInfo::from_remote(&rc);
 
         for chan_name in &rc.channels {
             if let Some(channel) = state.get_channel(chan_name) {
@@ -392,7 +393,7 @@ async fn handle_nick_change(state: &ServerState, msg: &P10Message) {
                 for (&member_id, _) in &chan.members {
                     if let Some(member) = state.clients.get(&member_id) {
                         let m = member.read().await;
-                        m.send(nick_msg.clone());
+                        m.send_from(nick_msg.clone(), &src);
                     }
                 }
             }
@@ -611,16 +612,18 @@ pub async fn handle_privmsg_notice(state: &ServerState, msg: &P10Message) {
     let target = &msg.params[0];
     let text = &msg.params[1];
 
-    // Find the remote sender
-    let sender_prefix = if let Some(numeric) = ClientNumeric::from_str(origin) {
+    // Find the remote sender, capturing the prefix AND the account so
+    // cap-gated tags (@account) resolve correctly per recipient.
+    let (sender_prefix, src) = if let Some(numeric) = ClientNumeric::from_str(origin) {
         if let Some(remote) = state.remote_clients.get(&numeric) {
-            remote.read().await.prefix()
+            let rc = remote.read().await;
+            (rc.prefix(), crate::tags::SourceInfo::from_remote(&rc))
         } else {
             return;
         }
     } else {
-        // Server origin — use server name
-        if let Some(sn) = ServerNumeric::from_str(origin) {
+        // Server origin — use server name, no account.
+        let prefix = if let Some(sn) = ServerNumeric::from_str(origin) {
             if let Some(server) = state.remote_servers.get(&sn) {
                 server.read().await.name.clone()
             } else {
@@ -628,7 +631,8 @@ pub async fn handle_privmsg_notice(state: &ServerState, msg: &P10Message) {
             }
         } else {
             origin.to_string()
-        }
+        };
+        (prefix, crate::tags::SourceInfo::now())
     };
 
     let command = match msg.token {
@@ -649,7 +653,7 @@ pub async fn handle_privmsg_notice(state: &ServerState, msg: &P10Message) {
             for (&member_id, _) in &chan.members {
                 if let Some(member) = state.clients.get(&member_id) {
                     let m = member.read().await;
-                    m.send(irc_msg.clone());
+                    m.send_from(irc_msg.clone(), &src);
                 }
             }
         }
@@ -657,7 +661,7 @@ pub async fn handle_privmsg_notice(state: &ServerState, msg: &P10Message) {
         // Private message to a user — could be nick or numeric
         if let Some(client) = state.find_client_by_nick(target) {
             let c = client.read().await;
-            c.send(irc_msg);
+            c.send_from(irc_msg, &src);
         }
     }
 }
@@ -681,10 +685,10 @@ pub async fn handle_join(state: &ServerState, msg: &P10Message) {
     let chan_name = &msg.params[0];
 
     // Get remote client info for the JOIN message
-    let prefix = if let Some(remote) = state.remote_clients.get(&numeric) {
+    let (prefix, src) = if let Some(remote) = state.remote_clients.get(&numeric) {
         let mut rc = remote.write().await;
         rc.channels.insert(chan_name.to_string());
-        rc.prefix()
+        (rc.prefix(), crate::tags::SourceInfo::from_remote(&rc))
     } else {
         return;
     };
@@ -707,7 +711,7 @@ pub async fn handle_join(state: &ServerState, msg: &P10Message) {
     for (&member_id, _) in &chan.members {
         if let Some(member) = state.clients.get(&member_id) {
             let m = member.read().await;
-            m.send(join_msg.clone());
+            m.send_from(join_msg.clone(), &src);
         }
     }
 }
@@ -732,10 +736,10 @@ pub async fn handle_create(state: &ServerState, msg: &P10Message) {
     let chan_name = &msg.params[0];
     let ts: u64 = msg.params.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
 
-    let prefix = if let Some(remote) = state.remote_clients.get(&numeric) {
+    let (prefix, src) = if let Some(remote) = state.remote_clients.get(&numeric) {
         let mut rc = remote.write().await;
         rc.channels.insert(chan_name.to_string());
-        rc.prefix()
+        (rc.prefix(), crate::tags::SourceInfo::from_remote(&rc))
     } else {
         return;
     };
@@ -767,7 +771,7 @@ pub async fn handle_create(state: &ServerState, msg: &P10Message) {
     for (&member_id, _) in &chan.members {
         if let Some(member) = state.clients.get(&member_id) {
             let m = member.read().await;
-            m.send(join_msg.clone());
+            m.send_from(join_msg.clone(), &src);
         }
     }
 }
@@ -791,10 +795,10 @@ pub async fn handle_part(state: &ServerState, msg: &P10Message) {
     let chan_name = &msg.params[0];
     let reason = msg.params.get(1).cloned().unwrap_or_default();
 
-    let prefix = if let Some(remote) = state.remote_clients.get(&numeric) {
+    let (prefix, src) = if let Some(remote) = state.remote_clients.get(&numeric) {
         let mut rc = remote.write().await;
         rc.channels.remove(chan_name);
-        rc.prefix()
+        (rc.prefix(), crate::tags::SourceInfo::from_remote(&rc))
     } else {
         return;
     };
@@ -813,7 +817,7 @@ pub async fn handle_part(state: &ServerState, msg: &P10Message) {
             for (&member_id, _) in &chan.members {
                 if let Some(member) = state.clients.get(&member_id) {
                     let m = member.read().await;
-                    m.send(part_msg.clone());
+                    m.send_from(part_msg.clone(), &src);
                 }
             }
         }
@@ -858,13 +862,14 @@ pub async fn handle_kill(state: &ServerState, msg: &P10Message) {
                 irc_proto::Command::Quit,
                 vec![format!("Killed ({reason})")],
             );
+            let src = crate::tags::SourceInfo::from_remote(&rc);
             for chan_name in &rc.channels {
                 if let Some(channel) = state.get_channel(chan_name) {
                     let chan = channel.read().await;
                     for (&member_id, _) in &chan.members {
                         if let Some(member) = state.clients.get(&member_id) {
                             let m = member.read().await;
-                            m.send(quit_msg.clone());
+                            m.send_from(quit_msg.clone(), &src);
                         }
                     }
                 }
@@ -902,6 +907,7 @@ pub async fn handle_quit(state: &ServerState, msg: &P10Message) {
             irc_proto::Command::Quit,
             vec![reason],
         );
+        let src = crate::tags::SourceInfo::from_remote(&rc);
 
         // Notify local channel members
         for chan_name in &rc.channels {
@@ -910,7 +916,7 @@ pub async fn handle_quit(state: &ServerState, msg: &P10Message) {
                 for (&member_id, _) in &chan.members {
                     if let Some(member) = state.clients.get(&member_id) {
                         let m = member.read().await;
-                        m.send(quit_msg.clone());
+                        m.send_from(quit_msg.clone(), &src);
                     }
                 }
             }
@@ -934,6 +940,7 @@ pub async fn handle_mode(state: &ServerState, msg: &P10Message) {
 
     // Find the source prefix for relaying to local users
     let source_prefix = get_source_prefix(state, msg).await;
+    let src = source_info_from_origin(state, msg).await;
 
     // Apply the mode change to our own channel state BEFORE relaying. Without
     // this, local op/voice/ban/flag state drifts out of sync with peers and
@@ -956,7 +963,7 @@ pub async fn handle_mode(state: &ServerState, msg: &P10Message) {
         for (&member_id, _) in &chan.members {
             if let Some(member) = state.clients.get(&member_id) {
                 let m = member.read().await;
-                m.send(mode_msg.clone());
+                m.send_from(mode_msg.clone(), &src);
             }
         }
     }
@@ -1162,13 +1169,14 @@ pub async fn handle_kick(state: &ServerState, msg: &P10Message) {
         irc_proto::Command::Kick,
         vec![chan_name.clone(), target_nick, reason],
     );
+    let src = source_info_from_origin(state, msg).await;
 
     if let Some(channel) = state.get_channel(chan_name) {
         let chan = channel.read().await;
         for (&member_id, _) in &chan.members {
             if let Some(member) = state.clients.get(&member_id) {
                 let m = member.read().await;
-                m.send(kick_msg.clone());
+                m.send_from(kick_msg.clone(), &src);
             }
         }
     }
@@ -1206,12 +1214,13 @@ pub async fn handle_topic(state: &ServerState, msg: &P10Message) {
             irc_proto::Command::Topic,
             vec![chan_name.clone(), topic],
         );
+        let src = source_info_from_origin(state, msg).await;
 
         let chan = channel.read().await;
         for (&member_id, _) in &chan.members {
             if let Some(member) = state.clients.get(&member_id) {
                 let m = member.read().await;
-                m.send(topic_msg.clone());
+                m.send_from(topic_msg.clone(), &src);
             }
         }
     }
@@ -1291,4 +1300,18 @@ async fn get_source_prefix(state: &ServerState, msg: &P10Message) -> String {
     }
 
     origin.to_string()
+}
+
+/// Helper: build a SourceInfo from a P10 message's origin for IRCv3
+/// tag attachment. A remote-user origin contributes an account; a
+/// server origin leaves the account None.
+async fn source_info_from_origin(state: &ServerState, msg: &P10Message) -> crate::tags::SourceInfo {
+    if let Some(origin) = &msg.origin {
+        if let Some(numeric) = ClientNumeric::from_str(origin) {
+            if let Some(remote) = state.remote_clients.get(&numeric) {
+                return crate::tags::SourceInfo::from_remote(&*remote.read().await);
+            }
+        }
+    }
+    crate::tags::SourceInfo::now()
 }

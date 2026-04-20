@@ -8,6 +8,7 @@ mod numeric;
 mod s2s;
 mod server;
 mod state;
+mod tags;
 
 use std::path::PathBuf;
 

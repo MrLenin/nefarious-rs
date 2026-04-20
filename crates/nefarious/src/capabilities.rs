@@ -107,6 +107,9 @@ impl Capability {
 pub fn default_advertised_caps() -> HashSet<Capability> {
     let mut set = HashSet::new();
     set.insert(Capability::CapNotify);
+    // Phase 2.2 — tagged outbound events.
+    set.insert(Capability::ServerTime);
+    set.insert(Capability::AccountTag);
     set
 }
 

@@ -260,7 +260,8 @@ async fn handle_channel_mode(ctx: &HandlerContext, msg: &Message) {
         let mut params = vec![chan_name.clone(), mode_change.clone()];
         params.extend(applied_params.clone());
         let mode_msg = Message::with_source(&prefix, Command::Mode, params);
-        send_to_channel(ctx, chan_name, &mode_msg).await;
+        let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
+        send_to_channel(ctx, chan_name, &mode_msg, &src).await;
 
         // Route to S2S so peers see the same mode change.
         crate::s2s::routing::route_mode(

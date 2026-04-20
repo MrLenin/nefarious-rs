@@ -43,6 +43,10 @@ pub struct Client {
     /// the user is present; when `Some`, other users PRIVMSG/NOTICE to this
     /// nick trigger an RPL_AWAY response.
     pub away_message: Option<String>,
+    /// Logged-in account name. Populated by SASL in Phase 3; used here
+    /// to fill the `@account` tag for `account-tag`-enabled recipients
+    /// and the extended-join payload in Phase 2.7.
+    pub account: Option<String>,
     /// Channels this client is in.
     pub channels: HashSet<String>,
     /// Connection timestamp.
@@ -96,6 +100,7 @@ impl Client {
             tls,
             modes: HashSet::new(),
             away_message: None,
+            account: None,
             channels: HashSet::new(),
             connected_at: now,
             last_active: now,
@@ -148,6 +153,15 @@ impl Client {
         if let Err(TrySendError::Full(_)) = self.sender.try_send(msg) {
             self.request_disconnect("SendQ exceeded");
         }
+    }
+
+    /// Send a user-originated event (PRIVMSG, NOTICE, JOIN, PART, …)
+    /// with IRCv3 tags applied for this recipient's enabled caps.
+    /// `src` carries the event metadata (time, source account) the
+    /// tags need; broadcast call sites build one `SourceInfo` per
+    /// event and reuse it across every recipient.
+    pub fn send_from(&self, msg: Message, src: &crate::tags::SourceInfo) {
+        self.send(crate::tags::tagged_for(msg, self, src));
     }
 
     /// Send a numeric reply from the server.

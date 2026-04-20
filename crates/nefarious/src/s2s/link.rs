@@ -295,6 +295,7 @@ pub async fn handle_server_link<S>(
                     irc_proto::Command::Quit,
                     vec![format!("{} {}", state.server_name, remote_name)],
                 );
+                let src = crate::tags::SourceInfo::from_remote(&rc);
 
                 // Notify local channel members
                 for chan_name in &rc.channels {
@@ -303,7 +304,7 @@ pub async fn handle_server_link<S>(
                         for (&member_id, _) in &chan.members {
                             if let Some(member) = state.clients.get(&member_id) {
                                 let m = member.read().await;
-                                m.send(quit_msg.clone());
+                                m.send_from(quit_msg.clone(), &src);
                             }
                         }
                     }

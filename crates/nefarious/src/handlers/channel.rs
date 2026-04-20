@@ -111,7 +111,8 @@ pub async fn handle_join(ctx: &HandlerContext, msg: &Message) {
         // Notify all channel members (including the joiner)
         let join_msg =
             Message::with_source(&prefix, Command::Join, vec![chan_name.to_string()]);
-        send_to_channel(ctx, chan_name, &join_msg).await;
+        let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
+        send_to_channel(ctx, chan_name, &join_msg, &src).await;
 
         // Route to S2S
         {
@@ -178,7 +179,8 @@ pub async fn handle_part(ctx: &HandlerContext, msg: &Message) {
             part_params.push(reason.clone());
         }
         let part_msg = Message::with_source(&prefix, Command::Part, part_params);
-        send_to_channel(ctx, chan_name, &part_msg).await;
+        let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
+        send_to_channel(ctx, chan_name, &part_msg, &src).await;
 
         // Route to S2S
         crate::s2s::routing::route_part(&ctx.state, client_id, chan_name, &reason).await;
@@ -282,7 +284,8 @@ pub async fn handle_topic(ctx: &HandlerContext, msg: &Message) {
         Command::Topic,
         vec![chan_name.clone(), new_topic.clone()],
     );
-    send_to_channel(ctx, chan_name, &topic_msg).await;
+    let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
+    send_to_channel(ctx, chan_name, &topic_msg, &src).await;
 
     // Route to S2S
     let ts = chrono::Utc::now().timestamp() as u64;
@@ -391,7 +394,8 @@ pub async fn handle_kick(ctx: &HandlerContext, msg: &Message) {
         Command::Kick,
         vec![chan_name.clone(), target_nick.clone(), reason.clone()],
     );
-    send_to_channel(ctx, chan_name, &kick_msg).await;
+    let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
+    send_to_channel(ctx, chan_name, &kick_msg, &src).await;
 
     // Route to S2S — target is a local user, so its numeric is derivable
     // from its ClientId via `local_numeric`.
@@ -512,11 +516,15 @@ pub async fn handle_invite(ctx: &HandlerContext, msg: &Message) {
     // Notify target
     {
         let tc = target.read().await;
-        tc.send(Message::with_source(
-            &prefix,
-            Command::Invite,
-            vec![target_nick.clone(), chan_name.clone()],
-        ));
+        let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
+        tc.send_from(
+            Message::with_source(
+                &prefix,
+                Command::Invite,
+                vec![target_nick.clone(), chan_name.clone()],
+            ),
+            &src,
+        );
     }
 
     // Route to S2S — local target, derive numeric from its ClientId.
@@ -576,8 +584,15 @@ pub async fn handle_list(ctx: &HandlerContext, _msg: &Message) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Send a message to all members of a channel.
-pub async fn send_to_channel(ctx: &HandlerContext, chan_name: &str, msg: &Message) {
+/// Send a message to all members of a channel with per-recipient
+/// IRCv3 tag attachment. `src` is the event metadata (time, source
+/// account) used by `send_from`.
+pub async fn send_to_channel(
+    ctx: &HandlerContext,
+    chan_name: &str,
+    msg: &Message,
+    src: &crate::tags::SourceInfo,
+) {
     let channel = match ctx.state.get_channel(chan_name) {
         Some(c) => c,
         None => return,
@@ -587,7 +602,7 @@ pub async fn send_to_channel(ctx: &HandlerContext, chan_name: &str, msg: &Messag
     for (&member_id, _) in &chan.members {
         if let Some(member) = ctx.state.clients.get(&member_id) {
             let m = member.read().await;
-            m.send(msg.clone());
+            m.send_from(msg.clone(), src);
         }
     }
 }

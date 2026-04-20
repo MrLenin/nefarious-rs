@@ -117,6 +117,7 @@ pub async fn handle_connection<S>(
 
     let prefix = client.read().await.prefix();
     let quit_msg = Message::with_source(&prefix, Command::Quit, vec![quit_reason.clone()]);
+    let src = crate::tags::SourceInfo::from_local(&*client.read().await);
 
     // Route QUIT to S2S
     crate::s2s::routing::route_quit(&state, client_id, &quit_reason).await;
@@ -130,7 +131,7 @@ pub async fn handle_connection<S>(
                 }
                 if let Some(member) = state.clients.get(&member_id) {
                     let m = member.read().await;
-                    m.send(quit_msg.clone());
+                    m.send_from(quit_msg.clone(), &src);
                 }
             }
         }
