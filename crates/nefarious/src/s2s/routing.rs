@@ -1,15 +1,25 @@
 use crate::client::ClientId;
 use crate::state::ServerState;
 
-use p10_proto::inttobase64;
-
 /// Get the P10 numeric string for a local client.
+///
+/// Panics in debug if the client is not registered (has no allocated
+/// numeric) — that would be a caller bug. In release we fall back to slot
+/// 0 which is reserved and will never be accepted by a peer, making the
+/// failure visible but non-fatal.
 pub fn local_numeric(state: &ServerState, client_id: ClientId) -> String {
-    let cn = p10_proto::ClientNumeric {
+    let slot = state.numeric_for(client_id).unwrap_or_else(|| {
+        debug_assert!(
+            false,
+            "local_numeric called for client {client_id:?} with no allocated numeric"
+        );
+        0
+    });
+    p10_proto::ClientNumeric {
         server: state.numeric,
-        client: client_id.0 as u32,
-    };
-    cn.to_string()
+        client: slot,
+    }
+    .to_string()
 }
 
 /// Route a local PRIVMSG/NOTICE to the S2S link.

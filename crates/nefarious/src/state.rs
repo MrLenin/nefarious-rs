@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
 use tokio::sync::RwLock;
@@ -10,6 +10,103 @@ use p10_proto::{ClientNumeric, ServerNumeric};
 use crate::channel::Channel;
 use crate::client::{Client, ClientId};
 use crate::s2s::types::{RemoteClient, RemoteServer, ServerLink};
+
+/// P10 client numerics are the 3-char tail of a 5-char YYXXX id, i.e. 18
+/// bits, 262144 slots per server. Previously we derived the numeric from
+/// the monotonically-increasing `ClientId.0 as u32`, which wraps and
+/// collides after the 262144th connection on a long-running server. This
+/// allocator recycles slots by maintaining a stack of released numerics.
+#[derive(Debug)]
+pub struct NumericAllocator {
+    next: u32,
+    freed: Vec<u32>,
+    max: u32,
+}
+
+impl NumericAllocator {
+    pub fn new() -> Self {
+        // Slot 0 is reserved for "no numeric yet"; real numerics start at 1.
+        Self {
+            next: 1,
+            freed: Vec::new(),
+            max: 1 << 18,
+        }
+    }
+
+    /// Returns a fresh or recycled slot, or None if the 18-bit space is
+    /// full. The caller should refuse the connection in that case — it
+    /// matches what the C server does (no numeric → no P10 introduction).
+    pub fn allocate(&mut self) -> Option<u32> {
+        if let Some(n) = self.freed.pop() {
+            return Some(n);
+        }
+        if self.next < self.max {
+            let n = self.next;
+            self.next += 1;
+            return Some(n);
+        }
+        None
+    }
+
+    pub fn release(&mut self, numeric: u32) {
+        if numeric > 0 && numeric < self.max {
+            self.freed.push(numeric);
+        }
+    }
+}
+
+impl Default for NumericAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod allocator_tests {
+    use super::NumericAllocator;
+
+    #[test]
+    fn fresh_slots_are_sequential_starting_at_one() {
+        let mut a = NumericAllocator::new();
+        assert_eq!(a.allocate(), Some(1));
+        assert_eq!(a.allocate(), Some(2));
+        assert_eq!(a.allocate(), Some(3));
+    }
+
+    #[test]
+    fn released_slots_are_reused_before_growing() {
+        let mut a = NumericAllocator::new();
+        let x = a.allocate().unwrap();
+        let y = a.allocate().unwrap();
+        let z = a.allocate().unwrap();
+        a.release(y);
+        // Next allocation reuses y rather than handing out 4.
+        assert_eq!(a.allocate(), Some(y));
+        assert_ne!(a.allocate(), Some(z));
+    }
+
+    #[test]
+    fn returns_none_when_exhausted() {
+        let mut a = NumericAllocator::new();
+        // Shrink the pool so the test doesn't have to allocate 262k slots.
+        a.max = 3;
+        assert_eq!(a.allocate(), Some(1));
+        assert_eq!(a.allocate(), Some(2));
+        assert_eq!(a.allocate(), None);
+        a.release(1);
+        assert_eq!(a.allocate(), Some(1));
+        assert_eq!(a.allocate(), None);
+    }
+
+    #[test]
+    fn release_outside_range_is_ignored() {
+        let mut a = NumericAllocator::new();
+        a.max = 5;
+        a.release(0); // reserved slot
+        a.release(99); // outside pool
+        assert_eq!(a.allocate(), Some(1));
+    }
+}
 
 /// Shared server state, passed around via `Arc<ServerState>`.
 pub struct ServerState {
@@ -31,6 +128,11 @@ pub struct ServerState {
     pub nicks: DashMap<String, ClientId>,
     /// Channels by name (case-insensitive, stored lowercase).
     pub channels: DashMap<String, Arc<RwLock<Channel>>>,
+    /// Pool of 18-bit P10 client numerics, per server.
+    pub numeric_allocator: Mutex<NumericAllocator>,
+    /// ClientId → allocated P10 numeric, for synchronous lookup from
+    /// routing/burst paths without taking the Client's RwLock.
+    pub client_numerics: DashMap<ClientId, u32>,
 
     // --- P10 / S2S state ---
     /// Our P10 server numeric.
@@ -62,6 +164,8 @@ impl ServerState {
             clients: DashMap::new(),
             nicks: DashMap::new(),
             channels: DashMap::new(),
+            numeric_allocator: Mutex::new(NumericAllocator::new()),
+            client_numerics: DashMap::new(),
             numeric: ServerNumeric(config.general.numeric),
             remote_servers: DashMap::new(),
             remote_clients: DashMap::new(),
@@ -104,7 +208,8 @@ impl ServerState {
     }
 
     /// Register a client (after NICK+USER complete). The nick must already
-    /// have been reserved via `try_reserve_nick`.
+    /// have been reserved via `try_reserve_nick` and the P10 numeric
+    /// allocated via `try_allocate_numeric`.
     pub async fn register_client(&self, client: Arc<RwLock<Client>>, _nick: &str) {
         let id = {
             let c = client.read().await;
@@ -113,8 +218,43 @@ impl ServerState {
         self.clients.insert(id, client);
     }
 
+    /// Allocate a P10 client numeric and record it against `id`. Returns
+    /// None when the 18-bit slot space is exhausted (the caller should
+    /// then refuse the connection).
+    pub fn try_allocate_numeric(&self, id: ClientId) -> Option<u32> {
+        let n = self
+            .numeric_allocator
+            .lock()
+            .expect("numeric allocator mutex poisoned")
+            .allocate()?;
+        self.client_numerics.insert(id, n);
+        Some(n)
+    }
+
+    /// Release a previously-allocated P10 numeric back to the pool. Safe
+    /// to call twice; the second call is a no-op because the mapping has
+    /// already been removed.
+    pub fn release_numeric(&self, id: ClientId) {
+        if let Some((_, n)) = self.client_numerics.remove(&id) {
+            self.numeric_allocator
+                .lock()
+                .expect("numeric allocator mutex poisoned")
+                .release(n);
+        }
+    }
+
+    /// Look up the P10 numeric for a local client, if any.
+    pub fn numeric_for(&self, id: ClientId) -> Option<u32> {
+        self.client_numerics.get(&id).map(|e| *e)
+    }
+
     /// Remove a client entirely.
     pub async fn remove_client(&self, id: ClientId) {
+        // Release the P10 numeric before anything else — safe even if the
+        // client entry is gone (release_numeric is a no-op on a missing
+        // mapping).
+        self.release_numeric(id);
+
         // Remove from nick map
         let nick = {
             if let Some(client) = self.clients.get(&id) {

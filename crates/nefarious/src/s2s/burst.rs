@@ -18,11 +18,15 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
             continue;
         }
 
-        // Allocate a client numeric for this user
-        // For simplicity, use the ClientId as the numeric index
+        // Each local client has an allocated 18-bit numeric; skip users
+        // missing one (shouldn't happen for registered users, but be
+        // defensive against a future refactor introducing a window).
+        let Some(slot) = state.numeric_for(client.id) else {
+            continue;
+        };
         let client_numeric = p10_proto::ClientNumeric {
             server: state.numeric,
-            client: client.id.0 as u32,
+            client: slot,
         };
 
         // Encode IP in the P10 wire form. `ip_to_base64` handles v4, v6,
@@ -83,9 +87,12 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
         // Build member list
         let mut members = Vec::new();
         for (&client_id, flags) in &chan.members {
+            let Some(slot) = state.numeric_for(client_id) else {
+                continue;
+            };
             let client_numeric = p10_proto::ClientNumeric {
                 server: state.numeric,
-                client: client_id.0 as u32,
+                client: slot,
             };
             let mut member_str = client_numeric.to_string();
             if flags.op {

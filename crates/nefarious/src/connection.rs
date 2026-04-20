@@ -31,6 +31,17 @@ pub async fn handle_connection<S>(
     let (tx, mut rx) = mpsc::channel::<Message>(256);
 
     let client = Arc::new(RwLock::new(Client::new(addr, tls, listener_port, tx)));
+    let client_id = client.read().await.id;
+
+    // Reserve a P10 client numeric up front so every registered user has
+    // a valid wire id. If the 18-bit slot space is full, refuse the
+    // connection — matches the C server's behaviour.
+    if state.try_allocate_numeric(client_id).is_none() {
+        tracing::error!(
+            "refusing connection from {addr}: P10 numeric allocator exhausted"
+        );
+        return;
+    }
 
     // Frame the stream with IRC codec
     let framed = Framed::new(stream, IrcCodec::new());
@@ -49,7 +60,8 @@ pub async fn handle_connection<S>(
     let registered = registration_phase(&mut reader, &client, &state).await;
 
     if !registered {
-        // Release any nick reserved during the aborted registration.
+        // Release any nick reserved during the aborted registration and
+        // return the P10 numeric to the pool.
         let (id, nick) = {
             let c = client.read().await;
             (c.id, c.nick.clone())
@@ -57,6 +69,7 @@ pub async fn handle_connection<S>(
         if !nick.is_empty() {
             state.release_nick(&nick, id);
         }
+        state.release_numeric(id);
         debug!("client {addr} disconnected during registration");
         writer_handle.abort();
         return;
