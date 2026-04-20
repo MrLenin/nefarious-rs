@@ -106,6 +106,56 @@ pub async fn handle_nick(state: &ServerState, msg: &P10Message) {
 
     debug!("remote user: {nick} ({numeric}) on server {}", numeric.server);
 
+    // P10 nick-TS collision resolution: if another user already owns this
+    // casefolded nick, the one with the older nick_ts wins. Equal TS → both
+    // lose. Without this, two servers introducing the same nick silently
+    // corrupt the nick map.
+    match find_nick_owner(state, nick).await {
+        Some(NickOwner::Local { id, ts: local_ts }) => {
+            use std::cmp::Ordering::*;
+            match nick_ts.cmp(&local_ts) {
+                Less => {
+                    warn!(
+                        "nick collision on {nick}: remote (ts={nick_ts}) wins over local (ts={local_ts})"
+                    );
+                    collision_kill_local(state, id, "Nick collision").await;
+                }
+                Greater => {
+                    warn!(
+                        "nick collision on {nick}: local (ts={local_ts}) wins over remote (ts={nick_ts}); dropping remote"
+                    );
+                    return;
+                }
+                Equal => {
+                    warn!("nick collision tie on {nick} at ts={nick_ts}; killing both");
+                    collision_kill_local(state, id, "Nick collision").await;
+                    return;
+                }
+            }
+        }
+        Some(NickOwner::Remote { numeric: existing, ts: existing_ts }) => {
+            use std::cmp::Ordering::*;
+            match nick_ts.cmp(&existing_ts) {
+                Less => {
+                    warn!(
+                        "nick collision on {nick}: newer remote (ts={nick_ts}) wins over existing remote (ts={existing_ts})"
+                    );
+                    state.remove_remote_client(existing).await;
+                }
+                Greater => {
+                    warn!("nick collision on {nick}: existing remote wins; dropping incoming");
+                    return;
+                }
+                Equal => {
+                    warn!("nick collision tie on {nick}; removing both");
+                    state.remove_remote_client(existing).await;
+                    return;
+                }
+            }
+        }
+        None => {}
+    }
+
     let client = Arc::new(RwLock::new(RemoteClient {
         nick: nick.to_string(),
         numeric,
@@ -121,6 +171,49 @@ pub async fn handle_nick(state: &ServerState, msg: &P10Message) {
     }));
 
     state.register_remote_client(client, nick, numeric);
+}
+
+/// Who currently owns a nick, for TS-based collision resolution.
+enum NickOwner {
+    Local { id: crate::client::ClientId, ts: u64 },
+    Remote { numeric: ClientNumeric, ts: u64 },
+}
+
+async fn find_nick_owner(state: &ServerState, nick: &str) -> Option<NickOwner> {
+    let casefolded = irc_casefold(nick);
+
+    // Local owner?
+    if let Some(entry) = state.nicks.get(&casefolded) {
+        let id = *entry;
+        drop(entry);
+        if let Some(client_arc) = state.clients.get(&id) {
+            let ts = client_arc.read().await.connected_at.timestamp() as u64;
+            return Some(NickOwner::Local { id, ts });
+        }
+    }
+
+    // Remote owner?
+    if let Some(entry) = state.remote_nicks.get(&casefolded) {
+        let numeric = *entry;
+        drop(entry);
+        if let Some(remote_arc) = state.remote_clients.get(&numeric) {
+            let ts = remote_arc.read().await.nick_ts;
+            return Some(NickOwner::Remote { numeric, ts });
+        }
+    }
+
+    None
+}
+
+/// Release the nick immediately and ask the client's message loop to exit.
+/// The actual socket close and channel QUIT broadcasts happen when the
+/// loop returns through its normal cleanup path.
+async fn collision_kill_local(state: &ServerState, id: crate::client::ClientId, reason: &str) {
+    if let Some(client_arc) = state.clients.get(&id) {
+        let client = client_arc.read().await;
+        state.release_nick(&client.nick, id);
+        client.request_disconnect(reason);
+    }
 }
 
 /// Handle nick change from remote user.
@@ -148,6 +241,52 @@ async fn handle_nick_change(state: &ServerState, msg: &P10Message) {
         Some(n) => n,
         None => return,
     };
+
+    // Collision check BEFORE renaming: the new nick may be taken.
+    // A remote user is already guaranteed to hold its *current* nick, so
+    // ignore that entry if `find_nick_owner` returns it.
+    match find_nick_owner(state, new_nick).await {
+        Some(NickOwner::Local { id, ts: local_ts }) => {
+            use std::cmp::Ordering::*;
+            match new_nick_ts.cmp(&local_ts) {
+                Less => {
+                    warn!(
+                        "rename collision on {new_nick}: remote (ts={new_nick_ts}) wins over local (ts={local_ts})"
+                    );
+                    collision_kill_local(state, id, "Nick collision").await;
+                }
+                Greater => {
+                    warn!(
+                        "rename collision on {new_nick}: local wins; dropping remote rename"
+                    );
+                    return;
+                }
+                Equal => {
+                    collision_kill_local(state, id, "Nick collision").await;
+                    // Remote also loses — kill the incoming user entirely.
+                    state.remove_remote_client(numeric).await;
+                    return;
+                }
+            }
+        }
+        Some(NickOwner::Remote { numeric: existing, ts: existing_ts }) if existing != numeric => {
+            use std::cmp::Ordering::*;
+            match new_nick_ts.cmp(&existing_ts) {
+                Less => {
+                    state.remove_remote_client(existing).await;
+                }
+                Greater => {
+                    return;
+                }
+                Equal => {
+                    state.remove_remote_client(existing).await;
+                    state.remove_remote_client(numeric).await;
+                    return;
+                }
+            }
+        }
+        _ => {}
+    }
 
     if let Some(remote) = state.remote_clients.get(&numeric) {
         let old_nick = {
@@ -198,49 +337,77 @@ pub async fn handle_burst(state: &ServerState, msg: &P10Message) {
     let channel_arc = state.get_or_create_channel(chan_name);
     let mut chan = channel_arc.write().await;
 
-    // If the burst timestamp is older, the bursting server's state wins
-    if create_ts > 0 && (chan.created_ts == 0 || create_ts <= chan.created_ts) {
+    // P10 channel-TS collision resolution. The side with the older
+    // `created_ts` is authoritative for modes, bans and op status;
+    // the newer side resets its modes/bans and de-ops its members
+    // (the classic "TS oper burst" behaviour).
+    //
+    //   remote_wins: burst_ts < local_ts  (or we had no prior state)
+    //   local_wins:  burst_ts > local_ts
+    //   tie:         burst_ts == local_ts (both >0) — merge both sides
+    let local_ts = chan.created_ts;
+    let remote_wins = create_ts > 0 && (local_ts == 0 || create_ts < local_ts);
+    let local_wins = local_ts > 0 && create_ts > local_ts;
+
+    if remote_wins {
         chan.created_ts = create_ts;
+        chan.modes = ChannelModes::default();
+        chan.bans.clear();
+        for m in chan.members.values_mut() {
+            m.op = false;
+        }
+        for m in chan.remote_members.values_mut() {
+            m.op = false;
+        }
     }
 
     // Parse remaining params: modes, members, bans
     let mut idx = 2;
 
-    // Parse modes if present
+    // Parse modes if present. Always consume the mode params from the wire
+    // so downstream indexing is correct; only apply them to state when the
+    // local side is NOT the authoritative one.
     if idx < msg.params.len() && msg.params[idx].starts_with('+') {
-        let mode_str = &msg.params[idx];
-        apply_burst_modes(&mut chan, mode_str);
+        let mode_str = msg.params[idx].clone();
         idx += 1;
 
-        // Mode parameters (key, limit)
-        if chan.modes.key.is_some() || chan.modes.limit.is_some() {
-            // Key and limit params follow the mode string
-            if let Some(ref _key) = chan.modes.key {
-                if idx < msg.params.len() && !msg.params[idx].contains(',') && !msg.params[idx].starts_with('%') {
-                    chan.modes.key = Some(msg.params[idx].clone());
-                    idx += 1;
+        if !local_wins {
+            apply_burst_modes(&mut chan, &mode_str);
+        }
+
+        // A key parameter follows if the mode string contains 'k'; a limit
+        // parameter follows if it contains 'l'. Consume each regardless;
+        // only assign to chan.modes when we're taking the remote's state.
+        if mode_str.contains('k') {
+            if let Some(key) = msg.params.get(idx) {
+                if !local_wins {
+                    chan.modes.key = Some(key.clone());
                 }
+                idx += 1;
             }
-            if chan.modes.limit.is_some() {
-                if idx < msg.params.len() {
-                    if let Ok(limit) = msg.params[idx].parse::<u32>() {
+        }
+        if mode_str.contains('l') {
+            if let Some(limit_str) = msg.params.get(idx) {
+                if !local_wins {
+                    if let Ok(limit) = limit_str.parse::<u32>() {
                         chan.modes.limit = Some(limit);
-                        idx += 1;
                     }
                 }
+                idx += 1;
             }
         }
     }
 
-    // Parse members and bans from remaining params
+    // Parse members and bans from remaining params. Members are always
+    // added to the channel roster, but their op/voice flags are only
+    // honoured when we aren't the authoritative side.
+    let accept_status = !local_wins;
     while idx < msg.params.len() {
         let param = &msg.params[idx];
 
         if param.starts_with('%') {
-            // Ban list — everything from % onwards
-            let ban_str = &param[1..];
-            for mask in ban_str.split(' ') {
-                if !mask.is_empty() {
+            if accept_status {
+                for mask in param[1..].split(' ').filter(|s| !s.is_empty()) {
                     chan.bans.push(BanEntry {
                         mask: mask.to_string(),
                         set_by: "burst".to_string(),
@@ -248,11 +415,10 @@ pub async fn handle_burst(state: &ServerState, msg: &P10Message) {
                     });
                 }
             }
-            // Remaining params after % are also bans
             idx += 1;
             while idx < msg.params.len() {
-                for mask in msg.params[idx].split(' ') {
-                    if !mask.is_empty() {
+                if accept_status {
+                    for mask in msg.params[idx].split(' ').filter(|s| !s.is_empty()) {
                         chan.bans.push(BanEntry {
                             mask: mask.to_string(),
                             set_by: "burst".to_string(),
@@ -265,9 +431,10 @@ pub async fn handle_burst(state: &ServerState, msg: &P10Message) {
             break;
         }
 
-        // Member list: comma-separated "ABAAB,ABAAC:o,ABAAD:v"
-        if param.contains(',') || ClientNumeric::from_str(param.split(':').next().unwrap_or("")).is_some() {
-            parse_burst_members(state, &mut chan, param).await;
+        if param.contains(',')
+            || ClientNumeric::from_str(param.split(':').next().unwrap_or("")).is_some()
+        {
+            parse_burst_members(state, &mut chan, param, accept_status).await;
         }
 
         idx += 1;
@@ -300,8 +467,16 @@ fn apply_burst_modes(chan: &mut Channel, mode_str: &str) {
     }
 }
 
-/// Parse burst member list and add to channel.
-async fn parse_burst_members(state: &ServerState, chan: &mut Channel, member_str: &str) {
+/// Parse a burst member list and fold it into the channel roster.
+///
+/// When `accept_status` is false (local side won the TS race), the listed
+/// op/voice bits are discarded — the member joins as a plain participant.
+async fn parse_burst_members(
+    state: &ServerState,
+    chan: &mut Channel,
+    member_str: &str,
+    accept_status: bool,
+) {
     for entry in member_str.split(',') {
         let (numeric_str, mode_str) = match entry.find(':') {
             Some(pos) => (&entry[..pos], &entry[pos + 1..]),
@@ -314,11 +489,13 @@ async fn parse_burst_members(state: &ServerState, chan: &mut Channel, member_str
         };
 
         let mut flags = MembershipFlags::default();
-        for c in mode_str.chars() {
-            match c {
-                'o' | '0' => flags.op = true,
-                'v' => flags.voice = true,
-                _ => {} // oplevel numbers, halfop, etc.
+        if accept_status {
+            for c in mode_str.chars() {
+                match c {
+                    'o' | '0' => flags.op = true,
+                    'v' => flags.voice = true,
+                    _ => {} // oplevel numbers, halfop, etc.
+                }
             }
         }
 

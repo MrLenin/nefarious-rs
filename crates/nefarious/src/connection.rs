@@ -331,30 +331,54 @@ async fn message_loop(
     stream: &mut (impl StreamExt<Item = Result<Message, irc_proto::codec::CodecError>> + Unpin),
     ctx: &HandlerContext,
 ) -> String {
-    while let Some(result) = stream.next().await {
-        let msg = match result {
-            Ok(m) => m,
-            Err(e) => {
-                debug!("codec error: {e}");
-                return format!("Read error: {e}");
+    // Snapshot the disconnect_signal so we can select on it without
+    // holding the client's RwLock across .await points.
+    let disconnect_signal = ctx.client.read().await.disconnect_signal.clone();
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = disconnect_signal.notified() => {
+                let reason = ctx
+                    .client
+                    .read()
+                    .await
+                    .disconnect_reason
+                    .lock()
+                    .ok()
+                    .and_then(|mut slot| slot.take())
+                    .unwrap_or_else(|| "Killed".to_string());
+                return reason;
             }
-        };
+            maybe = stream.next() => {
+                let result = match maybe {
+                    Some(r) => r,
+                    None => return "Connection closed".to_string(),
+                };
 
-        if let Command::Quit = &msg.command {
-            return msg
-                .params
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "Client quit".to_string());
+                let msg = match result {
+                    Ok(m) => m,
+                    Err(e) => {
+                        debug!("codec error: {e}");
+                        return format!("Read error: {e}");
+                    }
+                };
+
+                if let Command::Quit = &msg.command {
+                    return msg
+                        .params
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "Client quit".to_string());
+                }
+
+                {
+                    let mut client = ctx.client.write().await;
+                    client.last_active = chrono::Utc::now();
+                }
+
+                ctx.dispatch(&msg).await;
+            }
         }
-
-        {
-            let mut client = ctx.client.write().await;
-            client.last_active = chrono::Utc::now();
-        }
-
-        ctx.dispatch(&msg).await;
     }
-
-    "Connection closed".to_string()
 }

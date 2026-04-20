@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 use irc_proto::{Command, Message};
 
@@ -46,6 +47,13 @@ pub struct Client {
     pub sender: mpsc::Sender<Message>,
     /// Port the client connected on.
     pub listener_port: u16,
+    /// Notified when the server needs this client's message loop to exit
+    /// (e.g. after losing a P10 nick-TS collision). The loop uses this as
+    /// a `tokio::select!` cancellation branch so cleanup still runs.
+    pub disconnect_signal: Arc<Notify>,
+    /// Short reason passed to the QUIT broadcast when we initiate the
+    /// disconnect via `disconnect_signal`.
+    pub disconnect_reason: std::sync::Mutex<Option<String>>,
 }
 
 impl Client {
@@ -70,7 +78,21 @@ impl Client {
             last_active: now,
             sender,
             listener_port,
+            disconnect_signal: Arc::new(Notify::new()),
+            disconnect_reason: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Request that the connection task disconnect this client and run
+    /// normal cleanup. Used for P10-initiated kicks (nick-TS collision,
+    /// KILL, etc.) where we need to terminate the socket ourselves.
+    pub fn request_disconnect(&self, reason: impl Into<String>) {
+        if let Ok(mut slot) = self.disconnect_reason.lock() {
+            if slot.is_none() {
+                *slot = Some(reason.into());
+            }
+        }
+        self.disconnect_signal.notify_one();
     }
 
     /// Full prefix in nick!user@host format.
