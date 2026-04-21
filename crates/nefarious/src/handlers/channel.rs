@@ -538,27 +538,69 @@ pub async fn handle_invite(ctx: &HandlerContext, msg: &Message) {
         }
     }
 
-    let target = match ctx.state.find_client_by_nick(target_nick) {
-        Some(t) => t,
-        None => {
-            ctx.send_numeric(
-                ERR_NOSUCHNICK,
-                vec![target_nick.clone(), "No such nick/channel".into()],
-            )
-            .await;
-            return;
+    // Resolve the target. A local match takes precedence (standard
+    // IRC semantics — local nick lookups win), but if no local client
+    // has that nick we fall through to the remote nick table. Neither
+    // hit produces ERR_NOSUCHNICK.
+    enum InviteTarget {
+        Local {
+            id: crate::client::ClientId,
+            arc: std::sync::Arc<tokio::sync::RwLock<crate::client::Client>>,
+            canonical_nick: String,
+        },
+        Remote {
+            numeric: p10_proto::ClientNumeric,
+            canonical_nick: String,
+        },
+    }
+
+    let target = if let Some(arc) = ctx.state.find_client_by_nick(target_nick) {
+        let (id, nick) = {
+            let c = arc.read().await;
+            (c.id, c.nick.clone())
+        };
+        InviteTarget::Local {
+            id,
+            arc,
+            canonical_nick: nick,
         }
+    } else if let Some(remote) = ctx.state.find_remote_by_nick(target_nick) {
+        let (numeric, nick) = {
+            let r = remote.read().await;
+            (r.numeric, r.nick.clone())
+        };
+        InviteTarget::Remote {
+            numeric,
+            canonical_nick: nick,
+        }
+    } else {
+        ctx.send_numeric(
+            ERR_NOSUCHNICK,
+            vec![target_nick.clone(), "No such nick/channel".into()],
+        )
+        .await;
+        return;
     };
 
-    let target_id = target.read().await.id;
-
+    // "Already on channel?" check — consult the matching membership
+    // map for the target's locality.
     {
         let chan = channel.read().await;
-        if chan.is_member(&target_id) {
+        let already_on = match &target {
+            InviteTarget::Local { id, .. } => chan.is_member(id),
+            InviteTarget::Remote { numeric, .. } => {
+                chan.remote_members.contains_key(numeric)
+            }
+        };
+        if already_on {
+            let canonical_nick = match &target {
+                InviteTarget::Local { canonical_nick, .. } => canonical_nick,
+                InviteTarget::Remote { canonical_nick, .. } => canonical_nick,
+            };
             ctx.send_numeric(
                 ERR_USERONCHANNEL,
                 vec![
-                    target_nick.clone(),
+                    canonical_nick.clone(),
                     chan_name.clone(),
                     "is already on channel".into(),
                 ],
@@ -568,41 +610,52 @@ pub async fn handle_invite(ctx: &HandlerContext, msg: &Message) {
         }
     }
 
-    // Add to invite list
-    {
+    // Track the invite in chan.invites so the local JOIN check
+    // honours the +i bypass. Only applicable for local targets —
+    // remote users are invite-checked by their own server.
+    if let InviteTarget::Local { id, .. } = &target {
         let mut chan = channel.write().await;
-        chan.invites.insert(target_id);
+        chan.invites.insert(*id);
     }
 
     let prefix = ctx.prefix().await;
 
+    let canonical_nick = match &target {
+        InviteTarget::Local { canonical_nick, .. } => canonical_nick.clone(),
+        InviteTarget::Remote { canonical_nick, .. } => canonical_nick.clone(),
+    };
+
     // Notify inviter
     ctx.send_numeric(
         RPL_INVITING,
-        vec![target_nick.clone(), chan_name.clone()],
+        vec![canonical_nick.clone(), chan_name.clone()],
     )
     .await;
 
     let invite_msg = Message::with_source(
         &prefix,
         Command::Invite,
-        vec![target_nick.clone(), chan_name.clone()],
+        vec![canonical_nick.clone(), chan_name.clone()],
     );
     let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
 
-    // Notify target
-    {
-        let tc = target.read().await;
-        tc.send_from(invite_msg.clone(), &src);
-    }
+    // Direct delivery to a local target. Remote targets receive the
+    // INVITE via the S2S route below (their own server hands it to them).
+    let local_target_id: Option<crate::client::ClientId> = match &target {
+        InviteTarget::Local { id, arc, .. } => {
+            arc.read().await.send_from(invite_msg.clone(), &src);
+            Some(*id)
+        }
+        InviteTarget::Remote { .. } => None,
+    };
 
-    // IRCv3 invite-notify: every channel op with the cap sees the
-    // invite announcement too. Skip the inviter (they'd get a
-    // duplicate) and the target (already notified above).
+    // IRCv3 invite-notify: fan to every channel op with the cap.
+    // Skip the inviter (would echo) and the target if they're local
+    // (already delivered directly).
     if let Some(channel) = ctx.state.get_channel(chan_name) {
         let chan = channel.read().await;
         for (&member_id, flags) in &chan.members {
-            if member_id == client_id || member_id == target_id {
+            if member_id == client_id || Some(member_id) == local_target_id {
                 continue;
             }
             if !flags.op {
@@ -617,9 +670,22 @@ pub async fn handle_invite(ctx: &HandlerContext, msg: &Message) {
         }
     }
 
-    // Route to S2S — local target, derive numeric from its ClientId.
-    let target_numeric = crate::s2s::routing::local_numeric(&ctx.state, target_id);
-    crate::s2s::routing::route_invite(&ctx.state, client_id, &target_numeric, chan_name).await;
+    // Route to S2S so the target's server (local or remote) delivers
+    // the INVITE to its user. For a local target we still route so
+    // other peers can drive their own invite-notify fan-outs.
+    let target_numeric_str = match &target {
+        InviteTarget::Local { id, .. } => {
+            crate::s2s::routing::local_numeric(&ctx.state, *id)
+        }
+        InviteTarget::Remote { numeric, .. } => numeric.to_string(),
+    };
+    crate::s2s::routing::route_invite(
+        &ctx.state,
+        client_id,
+        &target_numeric_str,
+        chan_name,
+    )
+    .await;
 }
 
 /// Handle NAMES command.
