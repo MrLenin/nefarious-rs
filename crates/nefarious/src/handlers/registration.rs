@@ -135,11 +135,11 @@ pub async fn handle_authenticate(ctx: &HandlerContext, msg: &Message) {
     let mechanism = ctx.client.read().await.sasl_mechanism.clone();
     let Some(mech) = mechanism else {
         let mech_upper = param.to_ascii_uppercase();
-        if mech_upper != "PLAIN" {
+        if !matches!(mech_upper.as_str(), "PLAIN" | "EXTERNAL") {
             // Unsupported mechanism. Advertise what we do support and fail.
             ctx.send_numeric(
                 crate::numeric::RPL_SASLMECHS,
-                vec!["PLAIN".into(), "available SASL mechanisms".into()],
+                vec!["PLAIN,EXTERNAL".into(), "available SASL mechanisms".into()],
             )
             .await;
             ctx.send_numeric(
@@ -179,6 +179,7 @@ pub async fn handle_authenticate(ctx: &HandlerContext, msg: &Message) {
 
     match mech.as_str() {
         "PLAIN" => handle_sasl_plain(ctx, &decoded).await,
+        "EXTERNAL" => handle_sasl_external(ctx, &decoded).await,
         _ => {
             // Shouldn't reach here — mechanism was validated above.
             reset_sasl_and_fail(ctx, "mechanism not supported").await;
@@ -237,6 +238,57 @@ async fn handle_sasl_plain(ctx: &HandlerContext, payload: &[u8]) {
 
     // After login_local has emitted RPL_LOGGEDIN + account-notify,
     // the mechanism ends with RPL_SASLSUCCESS.
+    ctx.send_numeric(
+        crate::numeric::RPL_SASLSUCCESS,
+        vec!["SASL authentication successful".into()],
+    )
+    .await;
+
+    ctx.client.write().await.sasl_mechanism = None;
+}
+
+/// Finish SASL EXTERNAL. `payload` is the requested authzid (often
+/// empty); the credential is the peer's TLS certificate CN captured
+/// at handshake time. The account the cert maps to is resolved via
+/// `AccountStore::lookup` — Phase 3.3 accepts any CN that matches an
+/// existing account name, which lets operators set up cert-based
+/// accounts by name without needing a PKI structure.
+async fn handle_sasl_external(ctx: &HandlerContext, payload: &[u8]) {
+    let authzid = match std::str::from_utf8(payload) {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            reset_sasl_and_fail(ctx, "authzid not UTF-8").await;
+            return;
+        }
+    };
+
+    let cn = {
+        let c = ctx.client.read().await;
+        c.tls_cert_cn.clone()
+    };
+
+    let Some(cn) = cn else {
+        reset_sasl_and_fail(ctx, "no TLS client certificate").await;
+        return;
+    };
+
+    // If the client supplied an authzid, it must match the cert CN.
+    // Empty authzid means "log me in as whoever the cert says I am".
+    let account_name = if authzid.is_empty() { cn.clone() } else { authzid };
+    if account_name != cn {
+        reset_sasl_and_fail(ctx, "authzid does not match cert CN").await;
+        return;
+    }
+
+    let store = std::sync::Arc::clone(&ctx.state.account_store);
+    let Some(info) = store.lookup(&account_name).await else {
+        reset_sasl_and_fail(ctx, "cert CN not a known account").await;
+        return;
+    };
+
+    let client_id = ctx.client_id().await;
+    ctx.state.login_local(client_id, &info).await;
+
     ctx.send_numeric(
         crate::numeric::RPL_SASLSUCCESS,
         vec!["SASL authentication successful".into()],

@@ -2,7 +2,8 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
-use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
+use openssl::nid::Nid;
+use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod, SslVerifyMode};
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
@@ -135,10 +136,26 @@ async fn accept_loop(
                         tracing::debug!("TLS handshake failed on port {port}: {e}");
                         return;
                     }
+                    // Pull the client cert's CN, if any, for SASL
+                    // EXTERNAL. The acceptor is configured with
+                    // SSL_VERIFY_PEER + a permissive callback, so the
+                    // cert is surfaced but not validated against any
+                    // CA; the account store is the authority.
+                    let peer_cn = ssl_stream
+                        .ssl()
+                        .peer_certificate()
+                        .and_then(|cert| {
+                            cert.subject_name()
+                                .entries_by_nid(Nid::COMMONNAME)
+                                .next()
+                                .and_then(|e| e.data().as_utf8().ok())
+                                .map(|s| s.to_string())
+                        });
                     if is_server {
                         handle_server_port(ssl_stream, state).await;
                     } else {
-                        handle_connection(ssl_stream, addr, state, true, port).await;
+                        handle_connection(ssl_stream, addr, state, true, port, peer_cn)
+                            .await;
                     }
                 });
             }
@@ -148,7 +165,7 @@ async fn accept_loop(
             });
         } else {
             tokio::spawn(async move {
-                handle_connection(stream, addr, state, false, port).await;
+                handle_connection(stream, addr, state, false, port, None).await;
             });
         }
     }
@@ -237,5 +254,11 @@ fn build_ssl_acceptor(
     builder.set_certificate_chain_file(cert_path)?;
     builder.set_private_key_file(key_path, SslFiletype::PEM)?;
     builder.check_private_key()?;
+    // Request — but do not require — the peer's client certificate so
+    // SASL EXTERNAL has something to bind to. The verify callback
+    // always returns true: we're not pinning a CA chain, the account
+    // store is the authority that decides whether the cert CN maps
+    // to an account.
+    builder.set_verify_callback(SslVerifyMode::PEER, |_preverify_ok, _ctx| true);
     Ok(builder.build())
 }

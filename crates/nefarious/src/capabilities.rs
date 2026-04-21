@@ -93,6 +93,8 @@ impl Capability {
     /// list supported mechanisms.
     pub fn ls_value(self) -> Option<&'static str> {
         match self {
+            // Phase 3.3 ships PLAIN + EXTERNAL; 3.4–3.5 will extend
+            // this list as SCRAM-SHA-256 and OAUTHBEARER land.
             Self::Sasl => Some("PLAIN,EXTERNAL"),
             _ => None,
         }

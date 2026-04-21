@@ -90,6 +90,12 @@ pub struct Client {
     /// `AUTHENTICATE <payload>` line is interpreted as the mechanism's
     /// initial client response.
     pub sasl_mechanism: Option<String>,
+    /// Subject common name extracted from the peer's TLS client
+    /// certificate at handshake time. Populated only when the client
+    /// presented a cert and it parsed as UTF-8. Used by SASL EXTERNAL
+    /// (Phase 3.3) to map the certificate to an account without
+    /// requiring a password.
+    pub tls_cert_cn: Option<String>,
 }
 
 impl Client {
@@ -124,6 +130,7 @@ impl Client {
             enabled_caps: HashSet::new(),
             batch_counter: AtomicU32::new(1),
             sasl_mechanism: None,
+            tls_cert_cn: None,
         }
     }
 

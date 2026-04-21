@@ -22,15 +22,23 @@ pub async fn handle_connection<S>(
     state: Arc<ServerState>,
     tls: bool,
     listener_port: u16,
+    tls_cert_cn: Option<String>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    info!("new connection from {addr} on port {listener_port} (tls={tls})");
+    info!(
+        "new connection from {addr} on port {listener_port} (tls={tls}, cert_cn={})",
+        tls_cert_cn.as_deref().unwrap_or("-")
+    );
 
     // Create the message channel for outbound messages
     let (tx, mut rx) = mpsc::channel::<Message>(256);
 
     let client = Arc::new(RwLock::new(Client::new(addr, tls, listener_port, tx)));
+    {
+        let mut c = client.write().await;
+        c.tls_cert_cn = tls_cert_cn;
+    }
     let client_id = client.read().await.id;
 
     // Reserve a P10 client numeric up front so every registered user has
