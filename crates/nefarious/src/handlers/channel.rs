@@ -739,7 +739,12 @@ async fn send_names(ctx: &HandlerContext, chan_name: &str) {
         )
     };
 
-    // Build names list
+    // Build names list. Include BOTH local members and remote members
+    // (from other servers via P10) so a client on our side actually
+    // sees everyone in the channel. Without the remote branch, users
+    // on the far side of any s2s link are invisible to /NAMES — and
+    // the client-side channel roster stays empty, which in turn
+    // prevents it from rendering PRIVMSGs arriving from those users.
     let mut names = Vec::new();
     for (&member_id, flags) in &chan.members {
         if let Some(member) = ctx.state.clients.get(&member_id) {
@@ -753,6 +758,22 @@ async fn send_names(ctx: &HandlerContext, chan_name: &str) {
                 format!("{}!{}@{}", m.nick, m.user, m.host)
             } else {
                 m.nick.clone()
+            };
+            names.push(format!("{prefix}{identity}"));
+        }
+    }
+    for (&numeric, flags) in &chan.remote_members {
+        if let Some(remote) = ctx.state.remote_clients.get(&numeric) {
+            let r = remote.read().await;
+            let prefix = if multi_prefix {
+                flags.all_prefixes()
+            } else {
+                flags.highest_prefix().to_string()
+            };
+            let identity = if userhost_in_names {
+                format!("{}!{}@{}", r.nick, r.user, r.host)
+            } else {
+                r.nick.clone()
             };
             names.push(format!("{prefix}{identity}"));
         }
