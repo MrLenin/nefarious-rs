@@ -79,10 +79,18 @@ async fn handle_channel_mode(ctx: &HandlerContext, msg: &Message) {
     let mut param_idx = 2;
     let mut adding = true;
 
-    // Track changes for the MODE message we'll broadcast
+    // Track changes for the MODE message we'll broadcast.
+    //
+    // `applied_params` carries nicks for the local client broadcast;
+    // `applied_params_s2s` carries the same parameters in their S2S form
+    // — specifically, o/v/h targets rendered as P10 numerics (local users
+    // get their YYXXX; remote users get their existing YYXXX). The two
+    // diverge only for membership modes where the wire format differs
+    // between the IRC client side and the S2S side.
     let mut applied_add = String::new();
     let mut applied_remove = String::new();
     let mut applied_params: Vec<String> = Vec::new();
+    let mut applied_params_s2s: Vec<String> = Vec::new();
 
     let prefix = ctx.prefix().await;
 
@@ -119,6 +127,7 @@ async fn handle_channel_mode(ctx: &HandlerContext, msg: &Message) {
                         chan.modes.key = Some(key.clone());
                         applied_add.push('k');
                         applied_params.push(key.clone());
+                        applied_params_s2s.push(key.clone());
                         param_idx += 1;
                     }
                 } else {
@@ -140,6 +149,7 @@ async fn handle_channel_mode(ctx: &HandlerContext, msg: &Message) {
                             chan.modes.limit = Some(limit);
                             applied_add.push('l');
                             applied_params.push(limit_str.clone());
+                            applied_params_s2s.push(limit_str.clone());
                         }
                         param_idx += 1;
                     }
@@ -149,42 +159,30 @@ async fn handle_channel_mode(ctx: &HandlerContext, msg: &Message) {
                 }
             }
 
-            // Op (+o)
-            'o' => {
-                if let Some(nick) = msg.params.get(param_idx) {
+            // Op/Voice/Halfop — target can be local OR remote. Resolve the
+            // nick, apply to the matching membership map, and record the
+            // nick for the client broadcast plus the P10 numeric for the
+            // S2S routing.
+            'o' | 'v' | 'h' => {
+                let flag = c;
+                if let Some(nick) = msg.params.get(param_idx).cloned() {
                     param_idx += 1;
-                    if let Some(target) = ctx.state.find_client_by_nick(nick) {
-                        let target_id = target.read().await.id;
-                        let mut chan = channel.write().await;
-                        if let Some(flags) = chan.members.get_mut(&target_id) {
-                            flags.op = adding;
-                            if adding {
-                                applied_add.push('o');
-                            } else {
-                                applied_remove.push('o');
-                            }
-                            applied_params.push(nick.clone());
+                    let applied = apply_membership_mode(
+                        ctx,
+                        &channel,
+                        &nick,
+                        flag,
+                        adding,
+                    )
+                    .await;
+                    if let Some(numeric) = applied {
+                        if adding {
+                            applied_add.push(flag);
+                        } else {
+                            applied_remove.push(flag);
                         }
-                    }
-                }
-            }
-
-            // Voice (+v)
-            'v' => {
-                if let Some(nick) = msg.params.get(param_idx) {
-                    param_idx += 1;
-                    if let Some(target) = ctx.state.find_client_by_nick(nick) {
-                        let target_id = target.read().await.id;
-                        let mut chan = channel.write().await;
-                        if let Some(flags) = chan.members.get_mut(&target_id) {
-                            flags.voice = adding;
-                            if adding {
-                                applied_add.push('v');
-                            } else {
-                                applied_remove.push('v');
-                            }
-                            applied_params.push(nick.clone());
-                        }
+                        applied_params.push(nick);
+                        applied_params_s2s.push(numeric);
                     }
                 }
             }
@@ -202,6 +200,7 @@ async fn handle_channel_mode(ctx: &HandlerContext, msg: &Message) {
                         });
                         applied_add.push('b');
                         applied_params.push(mask.clone());
+                        applied_params_s2s.push(mask.clone());
                     } else {
                         // Query ban list
                         let chan = channel.read().await;
@@ -229,6 +228,7 @@ async fn handle_channel_mode(ctx: &HandlerContext, msg: &Message) {
                     chan.bans.retain(|b| b.mask != *mask);
                     applied_remove.push('b');
                     applied_params.push(mask.clone());
+                    applied_params_s2s.push(mask.clone());
                 }
             }
 
@@ -263,16 +263,67 @@ async fn handle_channel_mode(ctx: &HandlerContext, msg: &Message) {
         let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
         send_to_channel(ctx, chan_name, &mode_msg, &src).await;
 
-        // Route to S2S so peers see the same mode change.
+        // Route to S2S so peers see the same mode change. The S2S variant
+        // of `applied_params` carries o/v/h targets as P10 numerics,
+        // which is what peers expect on the wire.
         crate::s2s::routing::route_mode(
             &ctx.state,
             client_id,
             chan_name,
             &mode_change,
-            &applied_params,
+            &applied_params_s2s,
         )
         .await;
     }
+}
+
+/// Resolve a nick target for o/v/h mode, apply the flag to whichever
+/// membership map holds them (local or remote), and return the target's
+/// P10 numeric as a string for S2S routing. Returns `None` if the nick
+/// doesn't resolve, or if the user isn't a member of the channel — in
+/// either case the mode bit is not applied, not broadcast, and not
+/// routed, matching the C server's silent-ignore behaviour for targets
+/// that aren't on the channel.
+async fn apply_membership_mode(
+    ctx: &HandlerContext,
+    channel: &std::sync::Arc<tokio::sync::RwLock<crate::channel::Channel>>,
+    nick: &str,
+    flag: char,
+    adding: bool,
+) -> Option<String> {
+    let set_flag = |mf: &mut crate::channel::MembershipFlags| match flag {
+        'o' => mf.op = adding,
+        'v' => mf.voice = adding,
+        'h' => mf.halfop = adding,
+        _ => {}
+    };
+
+    if let Some(client_arc) = ctx.state.find_client_by_nick(nick) {
+        let target_id = client_arc.read().await.id;
+        let mut chan = channel.write().await;
+        if let Some(flags) = chan.members.get_mut(&target_id) {
+            set_flag(flags);
+            let numeric = ctx.state.numeric_for(target_id).unwrap_or(0);
+            return Some(
+                p10_proto::ClientNumeric {
+                    server: ctx.state.numeric,
+                    client: numeric,
+                }
+                .to_string(),
+            );
+        }
+        return None;
+    }
+
+    if let Some(remote_arc) = ctx.state.find_remote_by_nick(nick) {
+        let target_numeric = remote_arc.read().await.numeric;
+        let mut chan = channel.write().await;
+        if let Some(flags) = chan.remote_members.get_mut(&target_numeric) {
+            set_flag(flags);
+            return Some(target_numeric.to_string());
+        }
+    }
+    None
 }
 
 async fn handle_user_mode(ctx: &HandlerContext, msg: &Message) {
