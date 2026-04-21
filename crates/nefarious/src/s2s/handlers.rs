@@ -1973,13 +1973,14 @@ pub async fn handle_away(state: &ServerState, msg: &P10Message) {
     }
 }
 
-/// Handle I (INVITE) from a remote user, targeting one of our users.
+/// Handle I (INVITE) from a remote user.
 ///
-/// Wire: `<inviter_numeric> I <target_numeric_or_nick> <channel>`.
-/// Mirrors nefarious2/ircd/m_invite.c: deliver the INVITE to the
-/// invited user, then fan-out invite-notify to every op on the
-/// channel who has the cap enabled. S2S-relay to other peers is a
-/// no-op in the single-uplink topology we currently support.
+/// Wire: `<inviter_numeric> I <target_numeric_or_nick> <channel> [<ts>]`.
+/// Per nefarious2 m_invite.c: deliver the INVITE directly to the target
+/// if we host them, and fan invite-notify out to every channel op on
+/// our side with the cap enabled. Both fan-outs are independent — a
+/// remote-target INVITE still wants the local ops notified so their
+/// clients render the event.
 pub async fn handle_invite(state: &ServerState, msg: &P10Message) {
     if msg.params.len() < 2 {
         return;
@@ -1990,54 +1991,77 @@ pub async fn handle_invite(state: &ServerState, msg: &P10Message) {
     let source_prefix = get_source_prefix(state, msg).await;
     let src = source_info_from_origin(state, msg).await;
 
-    // Resolve the target. P10 carries user targets as numerics; a
-    // numeric whose server field matches ours resolves via the slot
-    // map. Fall back to a raw nick lookup for robustness.
-    let target_arc = if let Some(num) = ClientNumeric::from_str(target_str)
-        .filter(|n| n.server == state.numeric)
-        .and_then(|n| state.client_by_numeric_slot(n.client))
-    {
-        state.clients.get(&num).map(|e| e.clone())
-    } else {
-        state.find_client_by_nick(target_str)
+    // Resolve the target to (display_nick, Option<ClientId>). A local
+    // client is represented by its ClientId; a remote target (or a
+    // target we can't resolve) leaves that slot None. The display nick
+    // is what we render on the wire: we prefer the resolved nick from
+    // the client/remote record so numeric-form targets don't leak into
+    // local clients' view.
+    let (target_nick, local_target_id): (String, Option<crate::client::ClientId>) = {
+        // Local numeric path first.
+        let parsed = ClientNumeric::from_str(target_str);
+        if let Some(id) = parsed
+            .filter(|n| n.server == state.numeric)
+            .and_then(|n| state.client_by_numeric_slot(n.client))
+        {
+            let nick = state
+                .clients
+                .get(&id)
+                .map(|c| c.value().clone());
+            if let Some(arc) = nick {
+                let n = arc.read().await.nick.clone();
+                (n, Some(id))
+            } else {
+                (target_str.to_string(), None)
+            }
+        } else if let Some(num) = parsed {
+            // Remote numeric — resolve to nick for display only.
+            if let Some(remote) = state.remote_clients.get(&num) {
+                (remote.read().await.nick.clone(), None)
+            } else {
+                (target_str.to_string(), None)
+            }
+        } else if let Some(arc) = state.find_client_by_nick(target_str) {
+            let (n, id) = {
+                let c = arc.read().await;
+                (c.nick.clone(), c.id)
+            };
+            (n, Some(id))
+        } else {
+            (target_str.to_string(), None)
+        }
     };
 
-    let Some(target) = target_arc else {
-        warn!(
-            "INVITE from {source_prefix} for {chan_name}: target {target_str} is not a local user"
-        );
-        return;
-    };
-
-    let (target_id, target_nick) = {
-        let t = target.read().await;
-        (t.id, t.nick.clone())
-    };
-
-    // Deliver the INVITE to the target user.
     let invite_msg = irc_proto::Message::with_source(
         &source_prefix,
         irc_proto::Command::Invite,
         vec![target_nick.clone(), chan_name.clone()],
     );
-    target.read().await.send_from(invite_msg.clone(), &src);
 
-    // Track the invite so the target can bypass +i on JOIN. Without
-    // this, a remote op's invite wouldn't actually open the channel
-    // to the invitee — the local JOIN check only consults this set.
-    if let Some(channel) = state.get_channel(chan_name) {
-        let mut chan = channel.write().await;
-        chan.invites.insert(target_id);
+    // Direct delivery + invite-bypass tracking, but only when the
+    // target is one of ours. Without the chan.invites insert, a remote
+    // op's invite would be cosmetic only — JOIN still rejects on +i.
+    if let Some(target_id) = local_target_id {
+        if let Some(target_arc) = state.clients.get(&target_id) {
+            target_arc.read().await.send_from(invite_msg.clone(), &src);
+        }
+        if let Some(channel) = state.get_channel(chan_name) {
+            let mut chan = channel.write().await;
+            chan.invites.insert(target_id);
+        }
     }
 
-    // IRCv3 invite-notify: fan-out to every op on the channel who
-    // has the cap enabled, skipping the target (they got their own
-    // INVITE above). The inviter is remote so they can't be a local
-    // op anyway; no skip needed for them.
+    // IRCv3 invite-notify: fan to every op on the channel with the
+    // cap, regardless of whether the target is local. Skip the target
+    // on the local path (they received it directly above); the inviter
+    // is remote so there's nothing local to skip for them.
     if let Some(channel) = state.get_channel(chan_name) {
         let chan = channel.read().await;
         for (&member_id, flags) in &chan.members {
-            if member_id == target_id || !flags.op {
+            if !flags.op {
+                continue;
+            }
+            if Some(member_id) == local_target_id {
                 continue;
             }
             if let Some(member) = state.clients.get(&member_id) {
