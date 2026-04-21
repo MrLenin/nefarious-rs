@@ -452,6 +452,23 @@ pub async fn handle_kick(ctx: &HandlerContext, msg: &Message) {
         );
         send_to_channel(ctx, chan_name, &kick_msg, &src).await;
 
+        // Remove from chan.remote_members and rc.channels BEFORE routing
+        // the KICK upstream. nefarious2's make_zombie (channel.c:2259-2263)
+        // sends us back an L (PART) acknowledgment for the kicked user,
+        // and the S2S read task runs concurrently — if we route first,
+        // the PART can land in handle_part while the user is still in
+        // chan.remote_members, producing a phantom "has left" right
+        // after the KICK. Removing first makes handle_part's "was this
+        // user still a member?" check reliably return false.
+        {
+            let mut chan = channel.write().await;
+            chan.remote_members.remove(&target_numeric);
+        }
+        {
+            let mut rc = remote.write().await;
+            rc.channels.remove(chan_name);
+        }
+
         // Remote victim — route with their 5-char YYXXX so the
         // upstream peer can find them.
         crate::s2s::routing::route_kick(
@@ -463,14 +480,6 @@ pub async fn handle_kick(ctx: &HandlerContext, msg: &Message) {
         )
         .await;
 
-        {
-            let mut chan = channel.write().await;
-            chan.remote_members.remove(&target_numeric);
-        }
-        {
-            let mut rc = remote.write().await;
-            rc.channels.remove(chan_name);
-        }
         ctx.state.reap_channel_if_empty(chan_name).await;
     } else {
         ctx.send_numeric(

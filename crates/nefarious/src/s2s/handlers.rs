@@ -1256,16 +1256,17 @@ pub async fn handle_part(state: &ServerState, msg: &P10Message) {
         return;
     };
 
-    // When we locally kick a remote user, nefarious2's ms_kick →
-    // make_zombie path (channel.c:2259-2263) sends us back a PART
-    // for the kicked user as an acknowledgment. Re-broadcasting that
-    // PART would show a phantom "has left" right after the KICK.
-    // Suppress the broadcast when the user has already been removed
-    // from chan.remote_members — the KICK handler got there first.
-    // Take the remove as the authoritative "were they still a member?"
-    // check: `.remove()` returns `None` iff they weren't present.
+    // When a remote user is kicked (whether by a local or remote op),
+    // nefarious2's make_zombie path can echo an L (PART) back to every
+    // server that saw the KICK (channel.c:2244-). Re-broadcasting that
+    // PART to local clients produces a phantom "has left" right after
+    // the KICK event. Suppress the broadcast when the user has already
+    // been removed from chan.remote_members — either our handle_kick or
+    // the local kick handler got there first. Use the result of remove()
+    // as the authoritative "were they still a member?" check.
     let part_msg = {
         let Some(channel) = state.get_channel(chan_name) else {
+            warn!("handle_part: channel {chan_name} not found for PART from {numeric}");
             return;
         };
         let was_member = {
@@ -1273,10 +1274,15 @@ pub async fn handle_part(state: &ServerState, msg: &P10Message) {
             chan.remote_members.remove(&numeric).is_some()
         };
         if !was_member {
+            info!(
+                "handle_part: suppressing phantom PART for {numeric} on {chan_name} \
+                 (already removed — probably a KICK acknowledgment)"
+            );
             state.reap_channel_if_empty(chan_name).await;
             return;
         }
 
+        info!("handle_part: relaying PART for {numeric} on {chan_name}");
         let mut part_params = vec![chan_name.clone()];
         if !reason.is_empty() {
             part_params.push(reason);
