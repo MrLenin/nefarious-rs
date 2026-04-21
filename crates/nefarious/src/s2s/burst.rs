@@ -1,4 +1,4 @@
-use tracing::info;
+use tracing::{info, warn};
 
 use p10_proto::numeric::{capacity_to_base64, ip_to_base64};
 
@@ -12,9 +12,13 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
     info!("sending burst to {}", link.name);
 
     // 1. Send NICK messages for all local users
+    let mut nick_count = 0;
+    let mut skipped_unregistered = 0;
+    let mut skipped_no_numeric = 0;
     for entry in state.clients.iter() {
         let client = entry.value().read().await;
         if !client.is_registered() {
+            skipped_unregistered += 1;
             continue;
         }
 
@@ -22,6 +26,12 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
         // missing one (shouldn't happen for registered users, but be
         // defensive against a future refactor introducing a window).
         let Some(slot) = state.numeric_for(client.id) else {
+            warn!(
+                "burst: skipping registered client {nick} (id={id:?}) — no P10 numeric allocated",
+                nick = client.nick,
+                id = client.id
+            );
+            skipped_no_numeric += 1;
             continue;
         };
         let client_numeric = p10_proto::ClientNumeric {
@@ -74,6 +84,7 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
         };
 
         link.send_line(line).await;
+        nick_count += 1;
 
         // 1b. If the user is logged in, follow the NICK with an AC
         // (ACCOUNT) token so the remote side records it. Matches
@@ -91,7 +102,12 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
         }
     }
 
+    info!(
+        "burst: sent {nick_count} NICK lines; skipped {skipped_unregistered} unregistered + {skipped_no_numeric} missing-numeric"
+    );
+
     // 2. Send BURST messages for all channels with local members
+    let mut channel_count = 0;
     for entry in state.channels.iter() {
         let chan = entry.value().read().await;
 
@@ -103,6 +119,11 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
         let mut members = Vec::new();
         for (&client_id, flags) in &chan.members {
             let Some(slot) = state.numeric_for(client_id) else {
+                warn!(
+                    "burst: #{chan} member id={id:?} has no P10 numeric — channel BURST will omit them",
+                    chan = chan.name,
+                    id = client_id
+                );
                 continue;
             };
             let client_numeric = p10_proto::ClientNumeric {
@@ -144,7 +165,9 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
         }
 
         link.send_line(line).await;
+        channel_count += 1;
     }
+    info!("burst: sent {channel_count} channel BURST lines");
 
     // 3. Send END_OF_BURST
     let eb = format!("{} EB", our_numeric);
