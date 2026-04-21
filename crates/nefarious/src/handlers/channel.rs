@@ -372,68 +372,111 @@ pub async fn handle_kick(ctx: &HandlerContext, msg: &Message) {
         }
     }
 
-    // Find target
-    let target = match ctx.state.find_client_by_nick(target_nick) {
-        Some(t) => t,
-        None => {
-            ctx.send_numeric(
-                ERR_NOSUCHNICK,
-                vec![target_nick.clone(), "No such nick/channel".into()],
-            )
-            .await;
-            return;
-        }
+    // Find target — could be a local Client or a remote user on a
+    // linked server.
+    let local_target = ctx.state.find_client_by_nick(target_nick);
+    let remote_target = if local_target.is_none() {
+        ctx.state.find_remote_by_nick(target_nick)
+    } else {
+        None
     };
 
-    let target_id = target.read().await.id;
-
-    {
-        let chan = channel.read().await;
-        if !chan.is_member(&target_id) {
-            ctx.send_numeric(
-                ERR_USERNOTINCHANNEL,
-                vec![
-                    target_nick.clone(),
-                    chan_name.clone(),
-                    "They aren't on that channel".into(),
-                ],
-            )
-            .await;
-            return;
-        }
-    }
-
     let prefix = ctx.prefix().await;
-
-    // Notify channel
-    let kick_msg = Message::with_source(
-        &prefix,
-        Command::Kick,
-        vec![chan_name.clone(), target_nick.clone(), reason.clone()],
-    );
     let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
-    send_to_channel(ctx, chan_name, &kick_msg, &src).await;
 
-    // Route to S2S — target is a local user, so its numeric is derivable
-    // from its ClientId via `local_numeric`.
-    let target_numeric = crate::s2s::routing::local_numeric(&ctx.state, target_id);
-    crate::s2s::routing::route_kick(
-        &ctx.state,
-        client_id,
-        chan_name,
-        &target_numeric,
-        &reason,
-    )
-    .await;
+    if let Some(target) = local_target {
+        let target_id = target.read().await.id;
+        {
+            let chan = channel.read().await;
+            if !chan.is_member(&target_id) {
+                ctx.send_numeric(
+                    ERR_USERNOTINCHANNEL,
+                    vec![
+                        target_nick.clone(),
+                        chan_name.clone(),
+                        "They aren't on that channel".into(),
+                    ],
+                )
+                .await;
+                return;
+            }
+        }
 
-    // Remove target from channel
-    {
-        let mut chan = channel.write().await;
-        chan.remove_member(&target_id);
-    }
-    {
-        let mut tc = target.write().await;
-        tc.channels.remove(chan_name);
+        let kick_msg = Message::with_source(
+            &prefix,
+            Command::Kick,
+            vec![chan_name.clone(), target_nick.clone(), reason.clone()],
+        );
+        send_to_channel(ctx, chan_name, &kick_msg, &src).await;
+
+        let target_numeric = crate::s2s::routing::local_numeric(&ctx.state, target_id);
+        crate::s2s::routing::route_kick(
+            &ctx.state,
+            client_id,
+            chan_name,
+            &target_numeric,
+            &reason,
+        )
+        .await;
+
+        {
+            let mut chan = channel.write().await;
+            chan.remove_member(&target_id);
+        }
+        {
+            let mut tc = target.write().await;
+            tc.channels.remove(chan_name);
+        }
+    } else if let Some(remote) = remote_target {
+        let target_numeric = remote.read().await.numeric;
+        {
+            let chan = channel.read().await;
+            if !chan.remote_members.contains_key(&target_numeric) {
+                ctx.send_numeric(
+                    ERR_USERNOTINCHANNEL,
+                    vec![
+                        target_nick.clone(),
+                        chan_name.clone(),
+                        "They aren't on that channel".into(),
+                    ],
+                )
+                .await;
+                return;
+            }
+        }
+
+        let kick_msg = Message::with_source(
+            &prefix,
+            Command::Kick,
+            vec![chan_name.clone(), target_nick.clone(), reason.clone()],
+        );
+        send_to_channel(ctx, chan_name, &kick_msg, &src).await;
+
+        // Remote victim — route with their 5-char YYXXX so the
+        // upstream peer can find them.
+        crate::s2s::routing::route_kick(
+            &ctx.state,
+            client_id,
+            chan_name,
+            &target_numeric.to_string(),
+            &reason,
+        )
+        .await;
+
+        {
+            let mut chan = channel.write().await;
+            chan.remote_members.remove(&target_numeric);
+        }
+        {
+            let mut rc = remote.write().await;
+            rc.channels.remove(chan_name);
+        }
+    } else {
+        ctx.send_numeric(
+            ERR_NOSUCHNICK,
+            vec![target_nick.clone(), "No such nick/channel".into()],
+        )
+        .await;
     }
 }
 
