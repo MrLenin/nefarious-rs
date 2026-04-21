@@ -77,32 +77,43 @@ pub async fn handle_nick(state: &ServerState, msg: &P10Message) {
     let user = &msg.params[3];
     let host = &msg.params[4];
 
-    // Parse modes and find IP/numeric positions
-    // Modes start at params[5], might be "+xyz" or just the IP if no modes
-    let (modes, ip_idx) = if msg.params[5].starts_with('+') {
-        let modes: HashSet<char> = msg.params[5][1..].chars().collect();
-        (modes, 6)
+    // Modes are the 6th param when present (prefixed with '+'). They're
+    // optional — a minimal NICK line has no modes column.
+    let modes = if msg.params[5].starts_with('+') {
+        msg.params[5][1..].chars().collect::<HashSet<char>>()
     } else {
-        (HashSet::new(), 5)
+        HashSet::new()
     };
 
-    if msg.params.len() <= ip_idx + 1 {
+    // In nefarious2's P10 NICK burst the tail is always:
+    //   … <ip_base64> <YYXXX numeric> :<realname>
+    // i.e. `parv[parc-2]` is the numeric and `parv[parc-3]` is the
+    // IPv4/IPv6 base64 — regardless of how many extension fields (the
+    // `account:ts`, spoofhost, second spoofhost, etc.) appear between
+    // `host` and the IP. Indexing forward from `host` would have us
+    // treat an extension field as the numeric and end up registering
+    // every remote user under the first 5 characters of whatever their
+    // extension string starts with (a cloaked-host prefix in the common
+    // case). Parse from the end instead.
+    //
+    // See `nefarious2/ircd/m_nick.c:304`:
+    //   parv[parc-3] = IP#
+    //   parv[parc-2] = YXX, numeric nick
+    //   parv[parc-1] = info
+    let parc = msg.params.len();
+    if parc < 3 {
         warn!("NICK message missing IP/numeric: {:?}", msg.params);
         return;
     }
-
-    let ip_base64 = &msg.params[ip_idx];
-
-    // P10 NICK burst uses a single combined 5-char YYXXX numeric (2 server + 3 user).
-    let numeric = match ClientNumeric::from_str(&msg.params[ip_idx + 1]) {
+    let ip_base64 = &msg.params[parc - 3];
+    let numeric = match ClientNumeric::from_str(&msg.params[parc - 2]) {
         Some(n) => n,
         None => {
             warn!("invalid NICK numeric: {:?}", msg.params);
             return;
         }
     };
-
-    let realname = msg.params.last().unwrap().to_string();
+    let realname = msg.params[parc - 1].to_string();
 
     info!("remote user: {nick} ({numeric}) on server {}", numeric.server);
 
