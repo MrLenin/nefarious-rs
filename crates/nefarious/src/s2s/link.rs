@@ -312,6 +312,12 @@ pub async fn handle_server_link<S>(
             P10Token::Invite => {
                 super::handlers::handle_invite(&state, &msg).await;
             }
+            P10Token::BouncerSession => {
+                super::handlers::handle_bouncer_session(&state, &msg).await;
+            }
+            P10Token::BouncerTransfer => {
+                super::handlers::handle_bouncer_transfer(&state, &msg).await;
+            }
             P10Token::Squit => {
                 info!("received SQUIT from {remote_name}");
                 break;

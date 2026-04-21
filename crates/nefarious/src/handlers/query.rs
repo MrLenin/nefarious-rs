@@ -39,6 +39,10 @@ pub async fn handle_who(ctx: &HandlerContext, msg: &Message) {
             for (&numeric, flags) in &chan.remote_members {
                 if let Some(remote) = ctx.state.remote_clients.get(&numeric) {
                     let r = remote.read().await;
+                    // Aliases are network-invisible (see send_names).
+                    if r.is_alias {
+                        continue;
+                    }
                     let server_name = ctx
                         .state
                         .remote_servers

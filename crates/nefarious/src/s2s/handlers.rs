@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 use p10_proto::{ClientNumeric, P10Message, ServerNumeric};
 
 use crate::channel::{BanEntry, Channel, ChannelModes, MembershipFlags};
-use crate::s2s::types::{RemoteClient, RemoteServer, ServerFlags, ServerLink};
+use crate::s2s::types::{BouncerSession, RemoteClient, RemoteServer, ServerFlags, ServerLink};
 use crate::state::ServerState;
 
 /// Handle S (SERVER) — remote server introduction during burst.
@@ -223,6 +223,8 @@ pub async fn handle_nick(state: &ServerState, msg: &P10Message) {
         nick_ts,
         channels: HashSet::new(),
         away_message: None,
+        is_alias: false,
+        primary: None,
     }));
 
     state.register_remote_client(client, nick, numeric);
@@ -881,7 +883,16 @@ async fn parse_burst_members(
         // to broadcast the synthetic JOIN/AWAY without holding the
         // remote's write lock while awaiting on per-recipient sends.
         let Some(remote_arc) = state.remote_clients.get(&numeric) else {
-            warn!("burst member {numeric}: NOT FOUND in remote_clients — skipping JOIN/MODE emit");
+            // Expected state for bouncer aliases that we haven't been
+            // introduced to via BX C yet (or for the stale-alias path
+            // where nefarious2's bounce_burst omits the BX C on relink).
+            // Keep the membership in chan.remote_members — MODE/KICK/PART
+            // for that numeric remain addressable — but skip the
+            // synthetic JOIN/MODE emit since we have no visible identity
+            // to attach.
+            debug!(
+                "burst member {numeric}: no RemoteClient — assuming alias; skipping JOIN/MODE emit"
+            );
             continue;
         };
         let (prefix, src, account, realname, away_message) = {
@@ -2091,6 +2102,330 @@ async fn source_info_from_origin(state: &ServerState, msg: &P10Message) -> crate
         }
     }
     crate::tags::SourceInfo::now()
+}
+
+/// Handle BS (BOUNCER_SESSION) from a remote server.
+///
+/// Wire: `<origin> BS <subcmd> <account> <sessid> [params…]`. Baseline
+/// scope tracks only enough to interpret BX P (numeric-swap promote):
+///
+/// - `C` — Create. Records the (account, sessid) entry; primary is
+///   left None until a subsequent BS A attaches a numeric.
+/// - `A` — Attach. The 5th param is a 3-char `XXX` client numeric,
+///   meant to be combined with the session's origin server (2-char
+///   `YY`) to form a full `YYXXX`. We use the message origin's server
+///   portion as that YY.
+/// - `D` — Detach. Clears the primary pointer (session enters holding
+///   state on the authoritative side; we only need to forget the
+///   numeric).
+/// - `X` — Destroy. Removes the session entry entirely.
+/// - Other subcommands (`U`, `T`, …) are accepted silently; baseline
+///   behaviour doesn't depend on them.
+pub async fn handle_bouncer_session(state: &ServerState, msg: &P10Message) {
+    if msg.params.len() < 3 {
+        return;
+    }
+    let subcmd = match msg.params[0].chars().next() {
+        Some(c) => c,
+        None => return,
+    };
+    let account = msg.params[1].clone();
+    let sessid = msg.params[2].clone();
+    let key = (account.clone(), sessid.clone());
+
+    match subcmd {
+        'C' => {
+            state
+                .bouncer_sessions
+                .entry(key)
+                .or_insert(BouncerSession {
+                    account,
+                    sessid,
+                    primary: None,
+                });
+            debug!("BS C: registered bouncer session");
+        }
+        'A' => {
+            let Some(xxx) = msg.params.get(3) else {
+                return;
+            };
+            // The XXX attaches to the session's server-of-origin YY. The
+            // P10 line's origin is that server's numeric; combine and
+            // parse as a full ClientNumeric.
+            let origin = msg.origin.as_deref().unwrap_or("");
+            let full = format!("{origin}{xxx}");
+            let Some(numeric) = ClientNumeric::from_str(&full) else {
+                warn!("BS A: cannot parse {full} as client numeric");
+                return;
+            };
+            state
+                .bouncer_sessions
+                .entry(key)
+                .and_modify(|s| s.primary = Some(numeric))
+                .or_insert(BouncerSession {
+                    account,
+                    sessid,
+                    primary: Some(numeric),
+                });
+            debug!("BS A: session primary → {numeric}");
+        }
+        'D' => {
+            state
+                .bouncer_sessions
+                .entry(key)
+                .and_modify(|s| s.primary = None);
+            debug!("BS D: session detached");
+        }
+        'X' => {
+            state.bouncer_sessions.remove(&key);
+            debug!("BS X: session destroyed");
+        }
+        _ => {
+            debug!("BS {subcmd}: unhandled subcommand (baseline)");
+        }
+    }
+}
+
+/// Handle BX (BOUNCER_TRANSFER) from a remote server.
+///
+/// Wire formats (per nefarious2 bouncer_session.c):
+///
+/// - `BX C <primary> <alias> <account> <sessid> [<modes>] :<channels>`
+///   Register a new alias numeric that shadows `<primary>`. Alias is
+///   network-invisible: shares identity with the primary and is
+///   addressable only by its numeric.
+/// - `BX X <alias>` — Destroy alias.
+/// - `BX P <old> <new> <sessid> <nick>` — Promote: the numeric-swap
+///   path. Transfer every channel membership from `<old>` to `<new>`,
+///   transfer `rc.channels` from old to new, silently remove `<old>`
+///   from client state, and (if `<new>` was an alias) clear its
+///   alias marker so it becomes visible. No QUIT is emitted — the C
+///   side uses FLAG_KILLED to suppress S2S QUIT for this reason.
+///
+/// Other subcommands (`N`, `U`, `E`, `K`) are accepted silently; they
+/// don't affect the desync-avoidance baseline.
+pub async fn handle_bouncer_transfer(state: &ServerState, msg: &P10Message) {
+    if msg.params.is_empty() {
+        return;
+    }
+    let subcmd = match msg.params[0].chars().next() {
+        Some(c) => c,
+        None => return,
+    };
+
+    match subcmd {
+        'C' => handle_bx_create(state, msg).await,
+        'X' => handle_bx_destroy(state, msg).await,
+        'P' => handle_bx_promote(state, msg).await,
+        _ => debug!("BX {subcmd}: unhandled subcommand (baseline)"),
+    }
+}
+
+async fn handle_bx_create(state: &ServerState, msg: &P10Message) {
+    if msg.params.len() < 5 {
+        return;
+    }
+    let Some(primary) = ClientNumeric::from_str(&msg.params[1]) else {
+        return;
+    };
+    let Some(alias) = ClientNumeric::from_str(&msg.params[2]) else {
+        return;
+    };
+    let account = msg.params[3].clone();
+
+    // Pull identity from primary. If primary isn't known locally we
+    // can't render the alias, but we still record the alias entry so
+    // that later MODE/KICK for that numeric land — the alias is
+    // network-invisible anyway.
+    let (nick, user, host, realname, modes, acct) =
+        if let Some(p) = state.remote_clients.get(&primary) {
+            let pr = p.read().await;
+            (
+                pr.nick.clone(),
+                pr.user.clone(),
+                pr.host.clone(),
+                pr.realname.clone(),
+                pr.modes.clone(),
+                pr.account.clone(),
+            )
+        } else {
+            (
+                account.clone(),
+                account.clone(),
+                "bouncer".to_string(),
+                account.clone(),
+                HashSet::new(),
+                Some(account.clone()),
+            )
+        };
+
+    // If there's already a client at this numeric (e.g. it was
+    // introduced via NICK and is being re-stated as an alias), convert
+    // in place so any channel memberships already attached to it
+    // survive. Otherwise build a fresh RemoteClient.
+    if let Some(existing) = state.remote_clients.get(&alias) {
+        let mut rc = existing.write().await;
+        let old_nick = rc.nick.clone();
+        rc.is_alias = true;
+        rc.primary = Some(primary);
+        rc.nick = nick;
+        rc.user = user;
+        rc.host = host;
+        rc.realname = realname;
+        rc.account = acct;
+        drop(rc);
+        // An alias isn't in the nick hash — remove the stale mapping
+        // if we put one there during its NICK introduction.
+        state.remote_nicks.remove(&irc_casefold(&old_nick));
+        debug!("BX C: converted {alias} to alias of {primary}");
+        return;
+    }
+
+    let new_alias = Arc::new(RwLock::new(RemoteClient {
+        nick,
+        numeric: alias,
+        server: alias.server,
+        user,
+        host,
+        realname,
+        ip_base64: String::new(),
+        modes,
+        account: acct,
+        nick_ts: 0,
+        channels: HashSet::new(),
+        away_message: None,
+        is_alias: true,
+        primary: Some(primary),
+    }));
+    state.register_remote_alias(new_alias, alias);
+    debug!("BX C: registered alias {alias} → primary {primary}");
+}
+
+async fn handle_bx_destroy(state: &ServerState, msg: &P10Message) {
+    if msg.params.len() < 2 {
+        return;
+    }
+    let Some(alias) = ClientNumeric::from_str(&msg.params[1]) else {
+        return;
+    };
+    // Strip the alias from every channel it shadowed, then drop the
+    // client record itself. No nick-map removal needed — aliases
+    // never had a nick entry.
+    for entry in state.channels.iter() {
+        let mut chan = entry.value().write().await;
+        chan.remote_members.remove(&alias);
+    }
+    state.remote_clients.remove(&alias);
+    debug!("BX X: destroyed alias {alias}");
+}
+
+async fn handle_bx_promote(state: &ServerState, msg: &P10Message) {
+    // BX P <old> <new> <sessid> <nick>
+    if msg.params.len() < 5 {
+        return;
+    }
+    let Some(old) = ClientNumeric::from_str(&msg.params[1]) else {
+        return;
+    };
+    let Some(new) = ClientNumeric::from_str(&msg.params[2]) else {
+        return;
+    };
+    let sessid = msg.params[3].clone();
+    let nick = msg.params[4].clone();
+
+    if old == new {
+        // Idempotent — sometimes the originating server sends old==new
+        // when it can't determine the prior primary at SQUIT time.
+        debug!("BX P: old==new ({old}); ignoring");
+        return;
+    }
+
+    // Determine whether `new` is currently an alias. That changes the
+    // semantics: an alias promotion just clears the alias flag and
+    // copies mode bits; a non-alias swap transfers memberships bodily.
+    let new_was_alias = if let Some(nr) = state.remote_clients.get(&new) {
+        nr.read().await.is_alias
+    } else {
+        false
+    };
+
+    // Walk every channel where `old` has a membership and transfer
+    // the flags to `new`. On the alias path, `new` already has a
+    // CHFL_ALIAS-style ghost membership that we promote; on the swap
+    // path, `new` has no membership so we insert one.
+    let mut transferred_channels: Vec<String> = Vec::new();
+    for entry in state.channels.iter() {
+        let chan_name = entry.key().clone();
+        let mut chan = entry.value().write().await;
+        let old_flags = chan.remote_members.remove(&old);
+        if let Some(flags) = old_flags {
+            // If `new` already has a (ghost) membership entry, merge —
+            // take the max of old flags OR'd with whatever `new` had.
+            let entry_flags = chan.remote_members.entry(new).or_insert(MembershipFlags::default());
+            entry_flags.op |= flags.op;
+            entry_flags.halfop |= flags.halfop;
+            entry_flags.voice |= flags.voice;
+            entry_flags.oplevel = entry_flags.oplevel.max(flags.oplevel);
+            transferred_channels.push(chan_name);
+        }
+    }
+
+    // Move rc.channels bookkeeping. Old's set goes to new's.
+    if let Some(old_arc) = state.remote_clients.get(&old) {
+        let old_channels = {
+            let rc = old_arc.read().await;
+            rc.channels.clone()
+        };
+        drop(old_arc);
+        if let Some(new_arc) = state.remote_clients.get(&new) {
+            let mut nr = new_arc.write().await;
+            nr.channels.extend(old_channels.iter().cloned());
+            // Promote: clear alias marker so /NAMES starts rendering.
+            if new_was_alias {
+                nr.is_alias = false;
+                nr.primary = None;
+            }
+            if !nick.is_empty() && nr.nick != nick {
+                nr.nick = nick.clone();
+            }
+            // Insert into the nick hash if we weren't there (alias
+            // promotion path) or if the nick changed.
+            state
+                .remote_nicks
+                .insert(irc_casefold(&nr.nick), nr.numeric);
+        }
+    }
+
+    // Drop `old` silently: no QUIT emitted to local clients (matches
+    // C's FLAG_KILLED suppression). The nick map mapping for `old`
+    // was either absent (alias) or stale; clear it defensively.
+    if let Some(old_arc) = state.remote_clients.get(&old) {
+        let old_nick = old_arc.read().await.nick.clone();
+        drop(old_arc);
+        state
+            .remote_nicks
+            .remove_if(&irc_casefold(&old_nick), |_, v| *v == old);
+    }
+    state.remote_clients.remove(&old);
+
+    // Update the session's primary pointer so subsequent BS lookups
+    // find the new numeric.
+    if let Some(account) = state
+        .bouncer_sessions
+        .iter()
+        .find(|e| e.key().1 == sessid)
+        .map(|e| e.key().0.clone())
+    {
+        state
+            .bouncer_sessions
+            .entry((account, sessid))
+            .and_modify(|s| s.primary = Some(new));
+    }
+
+    debug!(
+        "BX P: promoted {old} → {new} (alias_path={new_was_alias}, {} channels transferred)",
+        transferred_channels.len()
+    );
 }
 
 /// Propagate a forwarded `EB` (End of Burst) from a remote server to

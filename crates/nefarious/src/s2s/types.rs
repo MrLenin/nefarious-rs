@@ -78,6 +78,33 @@ pub struct RemoteClient {
     /// CAP-gated AWAY emit during channel burst join so clients with
     /// `away-notify` learn the state without a /WHO round-trip.
     pub away_message: Option<String>,
+    /// Bouncer-alias marker. Aliases are network-invisible: they share
+    /// nick/ident/host with their primary, aren't registered in
+    /// `ServerState.remote_nicks`, and are filtered out of NAMES/WHO.
+    /// They participate in channel rosters only so MODE/KICK/PART for
+    /// the alias numeric remain addressable. Introduced by `BX C`,
+    /// cleared by `BX P` when the alias is promoted to primary.
+    pub is_alias: bool,
+    /// When `is_alias`, the primary numeric this alias shadows. When
+    /// the primary is visible to us, a NAMES/WHO hit on this alias
+    /// resolves to the primary's RemoteClient entry.
+    pub primary: Option<ClientNumeric>,
+}
+
+/// A bouncer session tracked across the network.
+///
+/// Keyed by `(account, sessid)` in `ServerState.bouncer_sessions`. The
+/// `primary` numeric is whichever client is currently the active
+/// connection for this session; aliases referencing the session live
+/// in `RemoteClient` with `is_alias=true`. Baseline scope only carries
+/// what we need to interpret `BX P` promotions (numeric-swap path);
+/// hold-timer state, channel lists, and stats are deferred to a later
+/// expansion.
+#[derive(Debug, Clone)]
+pub struct BouncerSession {
+    pub account: String,
+    pub sessid: String,
+    pub primary: Option<ClientNumeric>,
 }
 
 impl RemoteClient {

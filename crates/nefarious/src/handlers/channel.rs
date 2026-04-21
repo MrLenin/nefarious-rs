@@ -824,6 +824,13 @@ async fn send_names(ctx: &HandlerContext, chan_name: &str) {
     for (&numeric, flags) in &chan.remote_members {
         if let Some(remote) = ctx.state.remote_clients.get(&numeric) {
             let r = remote.read().await;
+            // Bouncer aliases are network-invisible — they share
+            // identity with their primary and would render as a
+            // duplicate entry in NAMES. Skip them; the primary is
+            // listed via its own membership (or via BjAAA etc.).
+            if r.is_alias {
+                continue;
+            }
             let prefix = if multi_prefix {
                 flags.all_prefixes()
             } else {
@@ -836,6 +843,9 @@ async fn send_names(ctx: &HandlerContext, chan_name: &str) {
             };
             names.push(format!("{prefix}{identity}"));
         }
+        // No RemoteClient: silently skip. Either the numeric is an
+        // alias we haven't been introduced to via BX C, or upstream
+        // state is stale; either way, we can't render an identity.
     }
 
     // Symbol: = (public), * (private), @ (secret)

@@ -11,7 +11,7 @@ use p10_proto::{ClientNumeric, ServerNumeric};
 use crate::capabilities::{Capability, default_advertised_caps};
 use crate::channel::Channel;
 use crate::client::{Client, ClientId};
-use crate::s2s::types::{RemoteClient, RemoteServer, ServerLink};
+use crate::s2s::types::{BouncerSession, RemoteClient, RemoteServer, ServerLink};
 
 /// P10 client numerics are the 3-char tail of a 5-char YYXXX id, i.e. 18
 /// bits, 262144 slots per server. Previously we derived the numeric from
@@ -147,6 +147,11 @@ pub struct ServerState {
     pub remote_nicks: DashMap<String, ClientNumeric>,
     /// Active server links by numeric.
     pub links: DashMap<ServerNumeric, Arc<ServerLink>>,
+    /// Bouncer sessions by (account, sessid). Populated from P10 BS
+    /// tokens during burst and steady state. Keeps the session→primary
+    /// mapping that BX P (numeric swap) consults during a session
+    /// transfer. Keyed case-sensitively since sessids are opaque.
+    pub bouncer_sessions: DashMap<(String, String), BouncerSession>,
 
     /// Server configuration.
     pub config: Arc<Config>,
@@ -196,6 +201,7 @@ impl ServerState {
             remote_clients: DashMap::new(),
             remote_nicks: DashMap::new(),
             links: DashMap::new(),
+            bouncer_sessions: DashMap::new(),
             config: Arc::new(config),
             motd: vec![
                 "Welcome to nefarious-rs".to_string(),
@@ -364,6 +370,15 @@ impl ServerState {
     /// Register a remote client from P10 NICK burst.
     pub fn register_remote_client(&self, client: Arc<RwLock<RemoteClient>>, nick: &str, numeric: ClientNumeric) {
         self.remote_nicks.insert(irc_casefold(nick), numeric);
+        self.remote_clients.insert(numeric, client);
+    }
+
+    /// Register a remote alias for a bouncer session. Aliases share
+    /// identity with their primary but are network-invisible: they
+    /// live in `remote_clients` only so MODE/KICK/PART for their
+    /// numeric stay addressable, but are NOT inserted into
+    /// `remote_nicks` and are filtered from NAMES/WHO responses.
+    pub fn register_remote_alias(&self, client: Arc<RwLock<RemoteClient>>, numeric: ClientNumeric) {
         self.remote_clients.insert(numeric, client);
     }
 

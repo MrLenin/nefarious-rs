@@ -52,6 +52,10 @@ pub enum P10Token {
     // Metadata
     Metadata,
 
+    // Bouncer (nefarious2-specific)
+    BouncerSession,  // BS — session lifecycle (account, sessid, channels)
+    BouncerTransfer, // BX — alias create/destroy/promote (numeric swap)
+
     // Unknown token
     Unknown(String),
 }
@@ -103,6 +107,9 @@ impl P10Token {
 
             "MD" => P10Token::Metadata,
 
+            "BS" => P10Token::BouncerSession,
+            "BX" => P10Token::BouncerTransfer,
+
             // Also accept full command names
             "PASS" => P10Token::Pass,
             "SERVER" => P10Token::Server,
@@ -131,6 +138,8 @@ impl P10Token {
             "EOB_ACK" => P10Token::EndOfBurstAck,
             "GLINE" => P10Token::Gline,
             "METADATA" => P10Token::Metadata,
+            "BOUNCER_SESSION" => P10Token::BouncerSession,
+            "BOUNCER_TRANSFER" => P10Token::BouncerTransfer,
 
             other => P10Token::Unknown(other.to_string()),
         }
@@ -174,6 +183,8 @@ impl P10Token {
             P10Token::Jupe => "JU",
             P10Token::Zline => "ZL",
             P10Token::Metadata => "MD",
+            P10Token::BouncerSession => "BS",
+            P10Token::BouncerTransfer => "BX",
             P10Token::Unknown(s) => s,
         }
     }
