@@ -9,7 +9,12 @@ use crate::client::ClientId;
 #[derive(Debug, Clone, Default)]
 pub struct MembershipFlags {
     pub op: bool,
+    pub halfop: bool,
     pub voice: bool,
+    /// P10 oplevel (0..=999). `None` when the member is not an op, or
+    /// when the peer did not advertise oplevel support (in which case
+    /// we treat the op as MAXOPLEVEL-equivalent for dispatch).
+    pub oplevel: Option<u16>,
 }
 
 impl MembershipFlags {
@@ -17,6 +22,8 @@ impl MembershipFlags {
     pub fn highest_prefix(&self) -> &str {
         if self.op {
             "@"
+        } else if self.halfop {
+            "%"
         } else if self.voice {
             "+"
         } else {
@@ -28,9 +35,12 @@ impl MembershipFlags {
     /// with the `multi-prefix` capability. When a user is both op and
     /// voice, we emit `@+` rather than the single highest prefix.
     pub fn all_prefixes(&self) -> String {
-        let mut out = String::with_capacity(2);
+        let mut out = String::with_capacity(3);
         if self.op {
             out.push('@');
+        }
+        if self.halfop {
+            out.push('%');
         }
         if self.voice {
             out.push('+');
@@ -125,6 +135,8 @@ pub struct Channel {
     pub remote_members: HashMap<ClientNumeric, MembershipFlags>,
     /// Ban list.
     pub bans: Vec<BanEntry>,
+    /// Ban exception list (nefarious2 +e).
+    pub excepts: Vec<BanEntry>,
     /// Creation timestamp.
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Creation timestamp as epoch seconds (for P10 burst).
@@ -156,6 +168,7 @@ impl Channel {
             members: HashMap::new(),
             remote_members: HashMap::new(),
             bans: Vec::new(),
+            excepts: Vec::new(),
             created_at: now,
             created_ts: now.timestamp() as u64,
             invites: HashSet::new(),

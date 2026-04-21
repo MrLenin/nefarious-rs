@@ -73,6 +73,11 @@ pub struct RemoteClient {
     pub account: Option<String>,
     pub nick_ts: u64,
     pub channels: HashSet<String>,
+    /// AWAY text set by the remote side. `None` when the user is
+    /// present; `Some(msg)` when they have AWAY set. Used for
+    /// CAP-gated AWAY emit during channel burst join so clients with
+    /// `away-notify` learn the state without a /WHO round-trip.
+    pub away_message: Option<String>,
 }
 
 impl RemoteClient {

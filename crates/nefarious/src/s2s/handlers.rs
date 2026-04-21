@@ -222,6 +222,7 @@ pub async fn handle_nick(state: &ServerState, msg: &P10Message) {
         account: None,
         nick_ts,
         channels: HashSet::new(),
+        away_message: None,
     }));
 
     state.register_remote_client(client, nick, numeric);
@@ -437,10 +438,40 @@ pub async fn handle_burst(state: &ServerState, msg: &P10Message) {
     }
 
     let chan_name = &msg.params[0];
-    let create_ts: u64 = msg.params[1].parse().unwrap_or(0);
+    let create_ts_raw: u64 = msg.params[1].parse().unwrap_or(0);
 
     let channel_arc = state.get_or_create_channel(chan_name);
     let mut chan = channel_arc.write().await;
+
+    // Zannel (empty-channel) TS fuzz — mirrors nefarious2/ircd/m_burst.c:252-298.
+    //
+    // A zannel BURST has only `B <chan> <ts>` with no mode or member
+    // params. If the two sides' TSes differ by at most 4s and exactly
+    // one side has users, nudge the losing side's TS toward the winner
+    // so cycling an empty channel during a netsplit doesn't deop people
+    // on reunion. Without this, one `/cycle` during a split is enough
+    // to unexpectedly deop everyone.
+    let local_ts = chan.created_ts;
+    let local_empty = chan.members.is_empty() && chan.remote_members.is_empty();
+    let is_zannel_burst = msg.params.len() == 2;
+
+    let create_ts = if local_ts > 0 && is_zannel_burst {
+        if create_ts_raw < local_ts && local_ts <= create_ts_raw + 4 && !local_empty {
+            // Remote's TS is older (would normally deop our side) but
+            // they're zannel and we have users — pretend remote matches
+            // us so we don't de-op anyone.
+            local_ts
+        } else if local_ts < create_ts_raw && create_ts_raw <= local_ts + 4 && local_empty {
+            // We're empty and our TS is older — adopt remote's TS so
+            // both sides agree on the channel age.
+            chan.created_ts = create_ts_raw;
+            create_ts_raw
+        } else {
+            create_ts_raw
+        }
+    } else {
+        create_ts_raw
+    };
 
     // P10 channel-TS collision resolution. The side with the older
     // `created_ts` is authoritative for modes, bans and op status;
@@ -450,21 +481,107 @@ pub async fn handle_burst(state: &ServerState, msg: &P10Message) {
     //   remote_wins: burst_ts < local_ts  (or we had no prior state)
     //   local_wins:  burst_ts > local_ts
     //   tie:         burst_ts == local_ts (both >0) — merge both sides
-    let local_ts = chan.created_ts;
     let remote_wins = create_ts > 0 && (local_ts == 0 || create_ts < local_ts);
     let local_wins = local_ts > 0 && create_ts > local_ts;
+
+    info!(
+        "burst TS: chan={} local_ts={} burst_ts={} remote_wins={} local_wins={} accept_status={}",
+        chan_name, local_ts, create_ts, remote_wins, local_wins, !local_wins
+    );
 
     if remote_wins {
         chan.created_ts = create_ts;
         chan.modes = ChannelModes::default();
         chan.bans.clear();
+        chan.excepts.clear();
+
+        // Collect which local members had op/halfop/voice before we
+        // wipe them — we need their nicks to broadcast MODE -ohv after
+        // the state change so clients drop the @ / % / + prefix.
+        let mut deop_nicks: Vec<(crate::client::ClientId, bool, bool, bool)> = Vec::new();
+        for (&id, m) in &chan.members {
+            if m.op || m.halfop || m.voice {
+                deop_nicks.push((id, m.op, m.halfop, m.voice));
+            }
+        }
+
         for m in chan.members.values_mut() {
             m.op = false;
+            m.halfop = false;
+            m.voice = false;
+            m.oplevel = None;
         }
         for m in chan.remote_members.values_mut() {
             m.op = false;
+            m.halfop = false;
+            m.voice = false;
+            m.oplevel = None;
+        }
+
+        // Broadcast MODE -o/-h/-v for every local member we just
+        // de-privileged, so IRC clients drop their `@`/`%`/`+`
+        // prefixes. Without this the server state and the client's
+        // rendered roster diverge — the user appears as op on their
+        // client but the server no longer grants them that access.
+        // (Mirrors MODEBUF_DEST_CHANNEL | MODE_DEL in m_burst.c:363.)
+        if !deop_nicks.is_empty() {
+            let src = crate::tags::SourceInfo::now();
+            for (id, had_op, had_halfop, had_voice) in &deop_nicks {
+                let nick = if let Some(client) = state.clients.get(id) {
+                    client.read().await.nick.clone()
+                } else {
+                    continue;
+                };
+                let mut flags = String::from("-");
+                let mut count = 0;
+                if *had_op    { flags.push('o'); count += 1; }
+                if *had_halfop { flags.push('h'); count += 1; }
+                if *had_voice  { flags.push('v'); count += 1; }
+                let mut params = vec![chan_name.clone(), flags];
+                for _ in 0..count { params.push(nick.clone()); }
+                let mode_msg = irc_proto::Message::with_source(
+                    &state.server_name,
+                    irc_proto::Command::Mode,
+                    params,
+                );
+                for (&mid, _) in &chan.members {
+                    if let Some(member) = state.clients.get(&mid) {
+                        let m = member.read().await;
+                        m.send_from(mode_msg.clone(), &src);
+                    }
+                }
+            }
+        }
+
+        // Topic wipeout — the topic was set under our (now-losing) TS
+        // regime, so drop it. Broadcast the empty topic to local
+        // members so clients update their UI. (m_burst.c:380-386.)
+        if chan.topic.is_some() {
+            chan.topic = None;
+            chan.topic_setter = None;
+            chan.topic_time = None;
+            let topic_msg = irc_proto::Message::with_source(
+                &state.server_name,
+                irc_proto::Command::Topic,
+                vec![chan_name.clone(), String::new()],
+            );
+            let src = crate::tags::SourceInfo::now();
+            for (&member_id, _) in &chan.members {
+                if let Some(member) = state.clients.get(&member_id) {
+                    let m = member.read().await;
+                    m.send_from(topic_msg.clone(), &src);
+                }
+            }
         }
     }
+
+    // Snapshot which remote members were already present BEFORE the
+    // burst touched the roster, so we can distinguish "burst-joined"
+    // from "already-joined via a prior CREATE/JOIN". The post-burst
+    // MODE emit uses this to avoid re-announcing op/voice for members
+    // we already knew about — matches the CHFL_BURST_JOINED /
+    // CHFL_BURST_ALREADY_OPPED gating in m_burst.c:700-709.
+    let pre_existing: HashSet<ClientNumeric> = chan.remote_members.keys().copied().collect();
 
     // Parse remaining params: modes, members, bans
     let mut idx = 2;
@@ -511,25 +628,18 @@ pub async fn handle_burst(state: &ServerState, msg: &P10Message) {
         let param = &msg.params[idx];
 
         if param.starts_with('%') {
+            // Ban and ban-exception list. The '~' token switches from
+            // bans to excepts (nefarious2 FEAT_EXCEPTS); earlier tokens
+            // are bans, everything after the '~' is a ban exception.
+            let mut in_excepts = false;
+            let first_chunk = &param[1..];
             if accept_status {
-                for mask in param[1..].split(' ').filter(|s| !s.is_empty()) {
-                    chan.bans.push(BanEntry {
-                        mask: mask.to_string(),
-                        set_by: "burst".to_string(),
-                        set_at: chrono::Utc::now(),
-                    });
-                }
+                absorb_ban_list(&mut chan, first_chunk, &mut in_excepts);
             }
             idx += 1;
             while idx < msg.params.len() {
                 if accept_status {
-                    for mask in msg.params[idx].split(' ').filter(|s| !s.is_empty()) {
-                        chan.bans.push(BanEntry {
-                            mask: mask.to_string(),
-                            set_by: "burst".to_string(),
-                            set_at: chrono::Utc::now(),
-                        });
-                    }
+                    absorb_ban_list(&mut chan, &msg.params[idx], &mut in_excepts);
                 }
                 idx += 1;
             }
@@ -539,19 +649,43 @@ pub async fn handle_burst(state: &ServerState, msg: &P10Message) {
         if param.contains(',')
             || ClientNumeric::from_str(param.split(':').next().unwrap_or("")).is_some()
         {
-            parse_burst_members(state, &mut chan, param, accept_status).await;
+            parse_burst_members(state, &mut chan, param, accept_status, &pre_existing).await;
         }
 
         idx += 1;
     }
 
     debug!(
-        "burst: {} - {} remote members, {} bans, modes={}",
+        "burst: {} - {} remote members, {} bans, {} excepts, modes={}",
         chan_name,
         chan.remote_members.len(),
         chan.bans.len(),
+        chan.excepts.len(),
         chan.modes.to_mode_string()
     );
+}
+
+/// Absorb a whitespace-delimited chunk of ban/except tokens from a
+/// burst `%`-param into the channel. A bare `~` toggles the stream
+/// into ban-exception mode for the remainder of the burst (matches
+/// nefarious2/ircd/m_burst.c:408-413).
+fn absorb_ban_list(chan: &mut Channel, chunk: &str, in_excepts: &mut bool) {
+    for token in chunk.split(' ').filter(|s| !s.is_empty()) {
+        if token == "~" {
+            *in_excepts = true;
+            continue;
+        }
+        let entry = BanEntry {
+            mask: token.to_string(),
+            set_by: "burst".to_string(),
+            set_at: chrono::Utc::now(),
+        };
+        if *in_excepts {
+            chan.excepts.push(entry);
+        } else {
+            chan.bans.push(entry);
+        }
+    }
 }
 
 /// Parse burst mode string and apply to channel.
@@ -574,23 +708,45 @@ fn apply_burst_modes(chan: &mut Channel, mode_str: &str) {
 
 /// Parse a burst member list and fold it into the channel roster.
 ///
-/// When `accept_status` is false (local side won the TS race), the listed
-/// op/voice bits are discarded — the member joins as a plain participant.
+/// The P10 wire format for a burst member token is
+/// `<numeric>[:<mode-chunk>]`, where the mode chunk is optional and is
+/// re-used by every subsequent member in the list until the next
+/// chunk appears (per m_burst.c). Supported chunk flags:
 ///
-/// After adding a member we also emit a synthetic JOIN to every local
-/// channel member so their IRC clients see the remote user appear. Without
-/// this, burst silently populates `remote_members` but produces no wire
-/// event on the local sockets, so clients (which track channel rosters
-/// via JOIN/PART notifications, not by re-requesting NAMES) never learn
-/// about the remote participant until they happen to refresh — or until
-/// the remote user leaves and rejoins, which is exactly the "rejoin
-/// reveals the user" behaviour that exposed this bug.
+/// - `o` — chanop (legacy, pre-oplevel; equivalent to `MAXOPLEVEL`)
+/// - `h` — halfop
+/// - `v` — voice
+/// - digits — oplevel (either absolute after a reset, or cumulative
+///   delta when only digits follow a prior chanop chunk)
+///
+/// When `accept_status` is false (local side won the TS race) we
+/// discard the status bits and the member joins as a plain
+/// participant, but we still track the membership.
+///
+/// We also emit a synthetic JOIN (CAP-gated into extended-join and
+/// plain variants) to every local member so their IRC clients see the
+/// remote user appear, plus a synthetic MODE for op/halfop/voice so
+/// the prefix renders. For away users, emit a CAP-gated AWAY line so
+/// clients with `away-notify` learn the state without a /WHO.
+///
+/// `pre_existing` is the set of remote-member numerics that were in
+/// the channel *before* this burst param — we use it to suppress the
+/// post-burst MODE emission for members who were already in the
+/// channel as ops/voices via a prior CREATE/JOIN (matches CHFL_BURST_
+/// ALREADY_OPPED tracking in m_burst.c:700-709).
 async fn parse_burst_members(
     state: &ServerState,
     chan: &mut Channel,
     member_str: &str,
     accept_status: bool,
+    pre_existing: &HashSet<ClientNumeric>,
 ) {
+    // Sticky status, updated whenever a member token carries a `:chunk`.
+    let mut sticky_op = false;
+    let mut sticky_halfop = false;
+    let mut sticky_voice = false;
+    let mut sticky_oplevel: Option<u16> = None;
+
     for entry in member_str.split(',') {
         let (numeric_str, mode_str) = match entry.find(':') {
             Some(pos) => (&entry[..pos], &entry[pos + 1..]),
@@ -602,51 +758,202 @@ async fn parse_burst_members(
             None => continue,
         };
 
-        let mut flags = MembershipFlags::default();
-        if accept_status {
-            for c in mode_str.chars() {
+        // Update sticky status from the chunk, if any.
+        if !mode_str.is_empty() && accept_status {
+            let mut op = false;
+            let mut halfop = false;
+            let mut voice = false;
+            let mut absolute_oplevel: Option<u16> = None;
+            let mut cumulative_delta: u16 = 0;
+            let mut saw_digits = false;
+            let mut digits_are_absolute = true;
+
+            let mut chars = mode_str.chars().peekable();
+            while let Some(c) = chars.next() {
                 match c {
-                    'o' | '0' => flags.op = true,
-                    'v' => flags.voice = true,
-                    _ => {} // oplevel numbers, halfop, etc.
+                    'o' => {
+                        op = true;
+                        // Pre-oplevel 'o' behaves like MAXOPLEVEL.
+                        absolute_oplevel = Some(MAX_OPLEVEL);
+                    }
+                    'h' => {
+                        halfop = true;
+                        digits_are_absolute = true;
+                    }
+                    'v' => {
+                        voice = true;
+                        digits_are_absolute = true;
+                    }
+                    d if d.is_ascii_digit() => {
+                        // Multi-digit number; consume subsequent digits.
+                        let mut n: u32 = (d as u32) - ('0' as u32);
+                        while let Some(&next) = chars.peek() {
+                            if let Some(val) = next.to_digit(10) {
+                                n = n.saturating_mul(10).saturating_add(val);
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
+                        let n = n.min(MAX_OPLEVEL as u32) as u16;
+                        op = true;
+                        saw_digits = true;
+                        if digits_are_absolute {
+                            absolute_oplevel = Some(n);
+                            digits_are_absolute = false;
+                        } else {
+                            cumulative_delta = cumulative_delta.saturating_add(n);
+                        }
+                    }
+                    _ => {
+                        // Unknown flag — tolerate & ignore.
+                    }
+                }
+            }
+
+            // Resolve the level: absolute if we saw one (fresh 'o' or
+            // first digit-run), otherwise previous sticky level plus
+            // cumulative delta.
+            let resolved_level = if let Some(abs) = absolute_oplevel {
+                Some(abs.saturating_add(cumulative_delta).min(MAX_OPLEVEL))
+            } else if saw_digits {
+                sticky_oplevel
+                    .map(|prev| prev.saturating_add(cumulative_delta).min(MAX_OPLEVEL))
+                    .or(Some(cumulative_delta.min(MAX_OPLEVEL)))
+            } else {
+                None
+            };
+
+            sticky_op = op;
+            sticky_halfop = halfop;
+            sticky_voice = voice;
+            if let Some(lvl) = resolved_level {
+                sticky_oplevel = Some(lvl);
+            } else if !op {
+                sticky_oplevel = None;
+            }
+        }
+
+        let flags = if accept_status {
+            MembershipFlags {
+                op: sticky_op,
+                halfop: sticky_halfop,
+                voice: sticky_voice,
+                oplevel: if sticky_op { sticky_oplevel } else { None },
+            }
+        } else {
+            MembershipFlags::default()
+        };
+
+        let was_pre_existing = pre_existing.contains(&numeric);
+        let prior_had_op = was_pre_existing
+            && chan
+                .remote_members
+                .get(&numeric)
+                .is_some_and(|f| f.op);
+        let prior_had_halfop = was_pre_existing
+            && chan
+                .remote_members
+                .get(&numeric)
+                .is_some_and(|f| f.halfop);
+        let prior_had_voice = was_pre_existing
+            && chan
+                .remote_members
+                .get(&numeric)
+                .is_some_and(|f| f.voice);
+
+        let is_op = flags.op;
+        let is_halfop = flags.halfop;
+        let is_voice = flags.voice;
+
+        let mode_label = if mode_str.is_empty() { "(sticky)".to_string() } else { mode_str.to_string() };
+        info!(
+            "burst member {numeric}: sticky_op={sticky_op} sticky_halfop={sticky_halfop} sticky_voice={sticky_voice} \
+             accept_status={accept_status} is_op={is_op} was_pre_existing={was_pre_existing} \
+             prior_had_op={prior_had_op} mode_chunk={mode_label}"
+        );
+
+        chan.remote_members.insert(numeric, flags);
+
+        // Track channel on the remote client and capture what we need
+        // to broadcast the synthetic JOIN/AWAY without holding the
+        // remote's write lock while awaiting on per-recipient sends.
+        let Some(remote_arc) = state.remote_clients.get(&numeric) else {
+            info!("burst member {numeric}: NOT FOUND in remote_clients — skipping JOIN/MODE emit");
+            continue;
+        };
+        let (prefix, src, account, realname, away_message) = {
+            let mut rc = remote_arc.write().await;
+            rc.channels.insert(chan.name.clone());
+            (
+                rc.prefix(),
+                crate::tags::SourceInfo::from_remote(&rc),
+                rc.account.clone(),
+                rc.realname.clone(),
+                rc.away_message.clone(),
+            )
+        };
+        drop(remote_arc);
+
+        // Only emit the synthetic JOIN for members who weren't already
+        // in the channel via a prior CREATE/JOIN. Re-announcing JOIN
+        // for a known member would confuse clients into tracking a
+        // second entry.
+        if !was_pre_existing {
+            let plain_join = irc_proto::Message::with_source(
+                &prefix,
+                irc_proto::Command::Join,
+                vec![chan.name.clone()],
+            );
+            let ext_account = account.as_deref().unwrap_or("*").to_string();
+            let extended_join = irc_proto::Message::with_source(
+                &prefix,
+                irc_proto::Command::Join,
+                vec![chan.name.clone(), ext_account, realname.clone()],
+            );
+            for (&member_id, _) in &chan.members {
+                if let Some(member) = state.clients.get(&member_id) {
+                    let m = member.read().await;
+                    let msg =
+                        if m.has_cap(crate::capabilities::Capability::ExtendedJoin) {
+                            extended_join.clone()
+                        } else {
+                            plain_join.clone()
+                        };
+                    m.send_from(msg, &src);
+                }
+            }
+
+            // AWAY-notify emission for clients with the `away-notify`
+            // cap. `away_message` is None for users who aren't away;
+            // the emit becomes live once a future P10 AWAY token
+            // handler starts populating this field.
+            if let Some(away) = &away_message {
+                let away_msg = irc_proto::Message::with_source(
+                    &prefix,
+                    irc_proto::Command::Away,
+                    vec![away.clone()],
+                );
+                for (&member_id, _) in &chan.members {
+                    if let Some(member) = state.clients.get(&member_id) {
+                        let m = member.read().await;
+                        if m.has_cap(crate::capabilities::Capability::AwayNotify) {
+                            m.send_from(away_msg.clone(), &src);
+                        }
+                    }
                 }
             }
         }
 
-        let is_op = flags.op;
-        let is_voice = flags.voice;
-        chan.remote_members.insert(numeric, flags);
+        // Post-burst synthetic MODE: announce op/halfop/voice that
+        // we didn't already know about. For pre-existing members we
+        // only emit deltas (new bits we didn't have before) — for
+        // fresh burst-joined members we emit whatever bits they have.
+        let gained_op = is_op && !prior_had_op;
+        let gained_halfop = is_halfop && !prior_had_halfop;
+        let gained_voice = is_voice && !prior_had_voice;
 
-        // Track channel on the remote client and capture what we need
-        // to broadcast the synthetic JOIN without holding the remote's
-        // write lock while awaiting on per-recipient sends.
-        let Some(remote_arc) = state.remote_clients.get(&numeric) else {
-            continue;
-        };
-        let (prefix, src) = {
-            let mut rc = remote_arc.write().await;
-            rc.channels.insert(chan.name.clone());
-            (rc.prefix(), crate::tags::SourceInfo::from_remote(&rc))
-        };
-        drop(remote_arc);
-
-        let join_msg = irc_proto::Message::with_source(
-            &prefix,
-            irc_proto::Command::Join,
-            vec![chan.name.clone()],
-        );
-        for (&member_id, _) in &chan.members {
-            if let Some(member) = state.clients.get(&member_id) {
-                let m = member.read().await;
-                m.send_from(join_msg.clone(), &src);
-            }
-        }
-
-        // If the bursted member carries op/voice, emit a synthetic
-        // MODE so local clients render the `@` / `+` prefix. Without
-        // this, the JOIN lands the user in the channel but their
-        // prefix stays blank until the client forces a /names refresh.
-        if is_op || is_voice {
+        if gained_op || gained_halfop || gained_voice {
             let remote_nick = {
                 if let Some(remote) = state.remote_clients.get(&numeric) {
                     remote.read().await.nick.clone()
@@ -654,17 +961,21 @@ async fn parse_burst_members(
                     continue;
                 }
             };
-            let mut mode_str = String::from("+");
+            let mut mode_flags = String::from("+");
             let mut applied = 0;
-            if is_op {
-                mode_str.push('o');
+            if gained_op {
+                mode_flags.push('o');
                 applied += 1;
             }
-            if is_voice {
-                mode_str.push('v');
+            if gained_halfop {
+                mode_flags.push('h');
                 applied += 1;
             }
-            let mut mode_params = vec![chan.name.clone(), mode_str];
+            if gained_voice {
+                mode_flags.push('v');
+                applied += 1;
+            }
+            let mut mode_params = vec![chan.name.clone(), mode_flags];
             for _ in 0..applied {
                 mode_params.push(remote_nick.clone());
             }
@@ -683,6 +994,11 @@ async fn parse_burst_members(
         }
     }
 }
+
+/// P10 MAXOPLEVEL — the ceiling for cumulative oplevels during burst.
+/// Matches `MAXOPLEVEL` in nefarious2/include/channel.h (999 for the
+/// current tree; the cap is "everyone can deop me" semantics).
+const MAX_OPLEVEL: u16 = 999;
 
 /// Handle G (PING) from remote server.
 pub async fn handle_ping(state: &ServerState, msg: &P10Message, link: &ServerLink) {
@@ -1253,11 +1569,24 @@ pub async fn handle_kick(state: &ServerState, msg: &P10Message) {
     // which is why the target needs to render as *our user's nick*
     // on the wire broadcast — otherwise channel members see the kick
     // directed at a raw numeric like "BiAAB" instead of "ibutsu__".
-    let target_nick;
+    // Resolve the target's display nick AND classify the removal we need
+    // to perform after the wire broadcast. The broadcast must happen
+    // *before* the removal so the kicked local user still receives
+    // their own KICK line (the local handler in handlers/channel.rs
+    // applies the same ordering).
     let parsed_numeric = ClientNumeric::from_str(target_str);
+    let target_nick;
+    enum KickTarget {
+        RemoteNumeric(ClientNumeric),
+        LocalClient(crate::client::ClientId),
+        Unknown,
+    }
+    let removal: KickTarget;
 
     if let Some(numeric) = parsed_numeric.filter(|n| state.remote_clients.contains_key(n)) {
-        // Case 1: remote user being kicked.
+        // Case 1: remote user being kicked. Their channels set is
+        // maintained here — safe to clear now, since remote clients
+        // aren't in chan.members (the broadcast target iter).
         if let Some(remote) = state.remote_clients.get(&numeric) {
             let mut rc = remote.write().await;
             target_nick = rc.nick.clone();
@@ -1265,50 +1594,38 @@ pub async fn handle_kick(state: &ServerState, msg: &P10Message) {
         } else {
             target_nick = target_str.to_string();
         }
-        if let Some(channel) = state.get_channel(chan_name) {
-            let mut chan = channel.write().await;
-            chan.remote_members.remove(&numeric);
-        }
+        removal = KickTarget::RemoteNumeric(numeric);
     } else if let Some(client_id) = parsed_numeric
         .filter(|n| n.server == state.numeric)
         .and_then(|n| state.client_by_numeric_slot(n.client))
     {
         // Case 2: remote operator kicking one of our users by numeric.
         let nick = if let Some(client) = state.clients.get(&client_id) {
-            let mut c = client.write().await;
-            c.channels.remove(chan_name);
-            c.nick.clone()
+            client.read().await.nick.clone()
         } else {
             target_str.to_string()
         };
         target_nick = nick;
-        if let Some(channel) = state.get_channel(chan_name) {
-            let mut chan = channel.write().await;
-            chan.remove_member(&client_id);
-        }
+        removal = KickTarget::LocalClient(client_id);
     } else if let Some(client) = state.find_client_by_nick(target_str) {
         // Case 3: target came through as a nick (legacy) for a local
         // user.
         target_nick = target_str.to_string();
-        let client_id = {
-            let mut c = client.write().await;
-            c.channels.remove(chan_name);
-            c.id
-        };
-        if let Some(channel) = state.get_channel(chan_name) {
-            let mut chan = channel.write().await;
-            chan.remove_member(&client_id);
-        }
+        let client_id = client.read().await.id;
+        removal = KickTarget::LocalClient(client_id);
     } else {
         // Case 4: unknown target. Still broadcast so members see the
         // wire event; upstream is presumably authoritative.
         target_nick = target_str.to_string();
+        removal = KickTarget::Unknown;
         warn!(
             "K from {source_prefix} for {chan_name}: target {target_str} is neither a known remote numeric nor a local user"
         );
     }
 
-    // Notify local channel members
+    // Broadcast the KICK to every current channel member (including
+    // the kicked local user, who is still in chan.members at this
+    // point) so every client sees the kick event.
     let kick_msg = irc_proto::Message::with_source(
         &source_prefix,
         irc_proto::Command::Kick,
@@ -1324,6 +1641,27 @@ pub async fn handle_kick(state: &ServerState, msg: &P10Message) {
                 m.send_from(kick_msg.clone(), &src);
             }
         }
+    }
+
+    // Now apply the state removal.
+    match removal {
+        KickTarget::RemoteNumeric(numeric) => {
+            if let Some(channel) = state.get_channel(chan_name) {
+                let mut chan = channel.write().await;
+                chan.remote_members.remove(&numeric);
+            }
+        }
+        KickTarget::LocalClient(client_id) => {
+            if let Some(channel) = state.get_channel(chan_name) {
+                let mut chan = channel.write().await;
+                chan.remove_member(&client_id);
+            }
+            if let Some(client) = state.clients.get(&client_id) {
+                let mut c = client.write().await;
+                c.channels.remove(chan_name);
+            }
+        }
+        KickTarget::Unknown => {}
     }
 }
 
@@ -1493,4 +1831,50 @@ async fn source_info_from_origin(state: &ServerState, msg: &P10Message) -> crate
         }
     }
     crate::tags::SourceInfo::now()
+}
+
+/// Propagate a forwarded `EB` (End of Burst) from a remote server to
+/// every outbound link except the one it arrived on (`skip`).
+///
+/// Mirrors `sendcmdto_serv_butone(sptr, CMD_END_OF_BURST, cptr, "")` in
+/// m_endburst.c:124. Currently nefarious-rs only supports a single
+/// uplink, so this is a no-op — the plumbing is here for when we grow
+/// multi-server fan-out.
+pub async fn propagate_end_of_burst(
+    state: &ServerState,
+    msg: &P10Message,
+    skip: ServerNumeric,
+) {
+    let origin = match &msg.origin {
+        Some(o) => o.clone(),
+        None => return,
+    };
+    let wire = format!("{origin} EB");
+    for entry in state.links.iter() {
+        if *entry.key() != skip {
+            entry.value().send_line(wire.clone()).await;
+        }
+    }
+}
+
+/// Propagate a forwarded `EA` (End of Burst Ack) to every outbound
+/// link except the one it arrived on (`skip`).
+///
+/// Mirrors `sendcmdto_serv_butone(sptr, CMD_END_OF_BURST_ACK, cptr, "")` in
+/// m_endburst.c:224.
+pub async fn propagate_end_of_burst_ack(
+    state: &ServerState,
+    msg: &P10Message,
+    skip: ServerNumeric,
+) {
+    let origin = match &msg.origin {
+        Some(o) => o.clone(),
+        None => return,
+    };
+    let wire = format!("{origin} EA");
+    for entry in state.links.iter() {
+        if *entry.key() != skip {
+            entry.value().send_line(wire.clone()).await;
+        }
+    }
 }

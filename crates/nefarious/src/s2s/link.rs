@@ -209,17 +209,67 @@ pub async fn handle_server_link<S>(
                 super::handlers::handle_burst(&state, &msg).await;
             }
             P10Token::EndOfBurst => {
-                info!("received END_OF_BURST from {remote_name}");
-                // Ack the remote's burst. Our own burst was dispatched
-                // immediately after the handshake, so there's nothing more
-                // to do here besides sending EA.
-                let ea = format!("{our_numeric} EA");
-                link.send_line(ea).await;
+                // The EB origin may be our direct peer (the server that
+                // just finished sending us its burst), or it may be a
+                // remote server whose EB our peer is forwarding on its
+                // behalf. Per m_endburst.c:131 we only send EA when the
+                // originator is directly connected (`MyConnect(sptr)`).
+                //
+                // In P10, the origin of a forwarded EB is the *remote*
+                // server's numeric, not our direct peer's numeric. So
+                // `msg.origin == Some(remote_numeric)` iff it's direct.
+                let origin_is_direct_peer = msg
+                    .origin
+                    .as_deref()
+                    .and_then(|o| ServerNumeric::from_str(o))
+                    .map(|n| n == remote_numeric)
+                    .unwrap_or(false);
+
+                if origin_is_direct_peer {
+                    info!("END_OF_BURST from direct peer {remote_name} — sending EA");
+                    let ea = format!("{our_numeric} EA");
+                    link.send_line(ea).await;
+                } else {
+                    let origin = msg.origin.as_deref().unwrap_or("?");
+                    info!("END_OF_BURST from remote {origin} (via {remote_name}) — no EA");
+                    // Propagate EB to our other links so they can
+                    // respond. The forwarded form keeps the original
+                    // server's numeric as the origin.
+                    super::handlers::propagate_end_of_burst(
+                        &state,
+                        &msg,
+                        remote_numeric,
+                    )
+                    .await;
+                }
             }
             P10Token::EndOfBurstAck => {
-                info!("received END_OF_BURST_ACK from {remote_name}");
-                link.set_state(LinkState::Active);
-                info!("server link with {remote_name} is now ACTIVE");
+                // EA also travels with the *acknowledging* server's
+                // numeric as its origin and is forwarded to all other
+                // links (m_endburst.c:224). Only the direct-peer EA
+                // marks our link Active.
+                let origin_is_direct_peer = msg
+                    .origin
+                    .as_deref()
+                    .and_then(|o| ServerNumeric::from_str(o))
+                    .map(|n| n == remote_numeric)
+                    .unwrap_or(false);
+
+                let origin = msg.origin.as_deref().unwrap_or("?");
+                info!("END_OF_BURST_ACK from {origin} (via {remote_name})");
+
+                if origin_is_direct_peer {
+                    link.set_state(LinkState::Active);
+                    info!("server link with {remote_name} is now ACTIVE");
+                }
+
+                // Propagate EA to other links regardless.
+                super::handlers::propagate_end_of_burst_ack(
+                    &state,
+                    &msg,
+                    remote_numeric,
+                )
+                .await;
             }
             P10Token::Ping => {
                 super::handlers::handle_ping(&state, &msg, &link).await;
