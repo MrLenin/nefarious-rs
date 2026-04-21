@@ -1274,7 +1274,7 @@ pub async fn handle_part(state: &ServerState, msg: &P10Message) {
             chan.remote_members.remove(&numeric).is_some()
         };
         if !was_member {
-            info!(
+            debug!(
                 "handle_part: suppressing phantom PART for {numeric} on {chan_name} \
                  (already removed — probably a KICK acknowledgment)"
             );
@@ -1282,7 +1282,7 @@ pub async fn handle_part(state: &ServerState, msg: &P10Message) {
             return;
         }
 
-        info!("handle_part: relaying PART for {numeric} on {chan_name}");
+        debug!("handle_part: relaying PART for {numeric} on {chan_name}");
         let mut part_params = vec![chan_name.clone()];
         if !reason.is_empty() {
             part_params.push(reason);

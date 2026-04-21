@@ -185,10 +185,9 @@ pub async fn handle_server_link<S>(
             continue;
         }
 
-        // Temporarily info-level so mismatched wire traffic is visible
-        // in stock `docker logs` without needing RUST_LOG=debug. Move
-        // back to `debug!` once the s2s link is boringly stable.
-        info!("S2S recv: {line}");
+        // Every inbound wire line — deployments should run with
+        // RUST_LOG=debug (or similar) so this shows up in `docker logs`.
+        debug!("S2S recv: {line}");
 
         let msg = match P10Message::parse(&line) {
             Some(m) => m,
