@@ -14,6 +14,7 @@ pub enum P10Token {
     Quit,
     Kill,
     Account,
+    Away,
 
     // Channel lifecycle
     Burst,
@@ -70,6 +71,7 @@ impl P10Token {
             "Q" => P10Token::Quit,
             "D" => P10Token::Kill,
             "AC" => P10Token::Account,
+            "A" => P10Token::Away,
 
             "B" => P10Token::Burst,
             "C" => P10Token::Create,
@@ -112,6 +114,7 @@ impl P10Token {
             "QUIT" => P10Token::Quit,
             "KILL" => P10Token::Kill,
             "ACCOUNT" => P10Token::Account,
+            "AWAY" => P10Token::Away,
             "BURST" => P10Token::Burst,
             "CREATE" => P10Token::Create,
             "DESTRUCT" => P10Token::Destruct,
@@ -146,6 +149,7 @@ impl P10Token {
             P10Token::Quit => "Q",
             P10Token::Kill => "D",
             P10Token::Account => "AC",
+            P10Token::Away => "A",
             P10Token::Burst => "B",
             P10Token::Create => "C",
             P10Token::Destruct => "DE",

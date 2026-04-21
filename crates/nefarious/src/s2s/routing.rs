@@ -192,6 +192,28 @@ pub async fn route_invite(
         .await;
 }
 
+/// Route a local AWAY state change to the S2S link.
+///
+/// Wire format per nefarious2/ircd/m_away.c: `<user> A :<msg>` when
+/// setting, `<user> A` (no trailing) when clearing. Sent on every
+/// AWAY change so peers can relay away-notify to their own clients.
+pub async fn route_away(
+    state: &ServerState,
+    client_id: ClientId,
+    away_message: Option<&str>,
+) {
+    let link = match state.get_link() {
+        Some(l) => l,
+        None => return,
+    };
+    let numeric = local_numeric(state, client_id);
+    let line = match away_message {
+        Some(msg) => format!("{numeric} A :{msg}"),
+        None => format!("{numeric} A"),
+    };
+    link.send_line(line).await;
+}
+
 /// Announce a P10 KILL originated by this server — used when we settle a
 /// nick-TS collision and need every other server to drop their entry for
 /// the losing user. `victim` is the user's nick or numeric; the killer is

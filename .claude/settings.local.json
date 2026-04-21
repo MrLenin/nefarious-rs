@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:gist.github.com)",
+      "Bash(git clone *)",
+      "Read(//c/Users/johne/source/repos/nefarious2//**)",
+      "Read(//c/Users/johne/source/repos/nefarious2/include//**)",
+      "Read(//c/Users/johne/source/repos/nefarious2/ircd//**)",
+      "Read(//c/Users/johne/.cargo/**)",
+      "Read(//c/Users/johne//**)",
+      "Read(//c/Users/johne/**)",
+      "Read(//c//**)",
+      "Bash(export PATH=\"/c/Users/johne/.cargo/bin:$PATH\")",
+      "Bash(cargo build *)",
+      "Bash(cargo check *)",
+      "Bash(cargo test *)",
+      "Bash(export OPENSSL_DIR=\"C:\\\\Program Files\\\\OpenSSL\")",
+      "Bash(cargo clippy *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(cargo search *)",
+      "Bash(cargo doc *)",
+      "Bash(cargo fetch *)",
+      "Bash(xargs grep *)",
+      "PowerShell($env:PATH = \"$env:USERPROFILE\\\\.cargo\\\\bin;C:\\\\Program Files\\\\OpenSSL\\\\bin;$env:PATH\"; $env:OPENSSL_DIR = \"C:\\\\Program Files\\\\OpenSSL\"; cargo build -p nefarious 2>&1 | Select-Object -First 30)",
+      "PowerShell($env:PATH = \"$env:USERPROFILE\\\\.cargo\\\\bin;C:\\\\Program Files\\\\OpenSSL\\\\bin;$env:PATH\"; $env:OPENSSL_DIR = \"C:\\\\Program Files\\\\OpenSSL\"; cargo build -p nefarious 2>&1 | Select-Object -Last 5)"
+    ]
+  }
+}

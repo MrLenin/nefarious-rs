@@ -1904,6 +1904,141 @@ pub async fn handle_account(state: &ServerState, msg: &P10Message) {
     }
 }
 
+/// Handle A (AWAY) from a remote user.
+///
+/// Wire: `<user> A [:<msg>]`. Trailing param present means "set away
+/// with this message"; absent means "clear away". Updates the remote
+/// client's `away_message` and fans an AWAY line out to every local
+/// user sharing a channel with them who has `away-notify` enabled.
+pub async fn handle_away(state: &ServerState, msg: &P10Message) {
+    let origin = match &msg.origin {
+        Some(o) => o,
+        None => return,
+    };
+    let numeric = match ClientNumeric::from_str(origin) {
+        Some(n) => n,
+        None => return,
+    };
+
+    let new_state = msg.params.first().cloned().filter(|s| !s.is_empty());
+
+    let Some(remote) = state.remote_clients.get(&numeric) else {
+        return;
+    };
+    let (prefix, channels, src) = {
+        let mut rc = remote.write().await;
+        rc.away_message = new_state.clone();
+        (
+            rc.prefix(),
+            rc.channels.clone(),
+            crate::tags::SourceInfo::from_remote(&rc),
+        )
+    };
+    drop(remote);
+
+    let away_params = match &new_state {
+        Some(m) => vec![m.clone()],
+        None => Vec::new(),
+    };
+    let away_msg =
+        irc_proto::Message::with_source(&prefix, irc_proto::Command::Away, away_params);
+
+    let mut seen = std::collections::HashSet::new();
+    for chan_name in &channels {
+        if let Some(channel) = state.get_channel(chan_name) {
+            let chan = channel.read().await;
+            for (&member_id, _) in &chan.members {
+                if !seen.insert(member_id) {
+                    continue;
+                }
+                if let Some(member) = state.clients.get(&member_id) {
+                    let m = member.read().await;
+                    if m.has_cap(crate::capabilities::Capability::AwayNotify) {
+                        m.send_from(away_msg.clone(), &src);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Handle I (INVITE) from a remote user, targeting one of our users.
+///
+/// Wire: `<inviter_numeric> I <target_numeric_or_nick> <channel>`.
+/// Mirrors nefarious2/ircd/m_invite.c: deliver the INVITE to the
+/// invited user, then fan-out invite-notify to every op on the
+/// channel who has the cap enabled. S2S-relay to other peers is a
+/// no-op in the single-uplink topology we currently support.
+pub async fn handle_invite(state: &ServerState, msg: &P10Message) {
+    if msg.params.len() < 2 {
+        return;
+    }
+    let target_str = &msg.params[0];
+    let chan_name = &msg.params[1];
+
+    let source_prefix = get_source_prefix(state, msg).await;
+    let src = source_info_from_origin(state, msg).await;
+
+    // Resolve the target. P10 carries user targets as numerics; a
+    // numeric whose server field matches ours resolves via the slot
+    // map. Fall back to a raw nick lookup for robustness.
+    let target_arc = if let Some(num) = ClientNumeric::from_str(target_str)
+        .filter(|n| n.server == state.numeric)
+        .and_then(|n| state.client_by_numeric_slot(n.client))
+    {
+        state.clients.get(&num).map(|e| e.clone())
+    } else {
+        state.find_client_by_nick(target_str)
+    };
+
+    let Some(target) = target_arc else {
+        warn!(
+            "INVITE from {source_prefix} for {chan_name}: target {target_str} is not a local user"
+        );
+        return;
+    };
+
+    let (target_id, target_nick) = {
+        let t = target.read().await;
+        (t.id, t.nick.clone())
+    };
+
+    // Deliver the INVITE to the target user.
+    let invite_msg = irc_proto::Message::with_source(
+        &source_prefix,
+        irc_proto::Command::Invite,
+        vec![target_nick.clone(), chan_name.clone()],
+    );
+    target.read().await.send_from(invite_msg.clone(), &src);
+
+    // Track the invite so the target can bypass +i on JOIN. Without
+    // this, a remote op's invite wouldn't actually open the channel
+    // to the invitee — the local JOIN check only consults this set.
+    if let Some(channel) = state.get_channel(chan_name) {
+        let mut chan = channel.write().await;
+        chan.invites.insert(target_id);
+    }
+
+    // IRCv3 invite-notify: fan-out to every op on the channel who
+    // has the cap enabled, skipping the target (they got their own
+    // INVITE above). The inviter is remote so they can't be a local
+    // op anyway; no skip needed for them.
+    if let Some(channel) = state.get_channel(chan_name) {
+        let chan = channel.read().await;
+        for (&member_id, flags) in &chan.members {
+            if member_id == target_id || !flags.op {
+                continue;
+            }
+            if let Some(member) = state.clients.get(&member_id) {
+                let m = member.read().await;
+                if m.has_cap(crate::capabilities::Capability::InviteNotify) {
+                    m.send_from(invite_msg.clone(), &src);
+                }
+            }
+        }
+    }
+}
+
 /// Handle DE (DESTRUCT) — channel destruction.
 pub async fn handle_destruct(state: &ServerState, msg: &P10Message) {
     if msg.params.is_empty() {

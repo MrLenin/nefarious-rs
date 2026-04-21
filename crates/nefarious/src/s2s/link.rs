@@ -306,6 +306,12 @@ pub async fn handle_server_link<S>(
             P10Token::Account => {
                 super::handlers::handle_account(&state, &msg).await;
             }
+            P10Token::Away => {
+                super::handlers::handle_away(&state, &msg).await;
+            }
+            P10Token::Invite => {
+                super::handlers::handle_invite(&state, &msg).await;
+            }
             P10Token::Squit => {
                 info!("received SQUIT from {remote_name}");
                 break;

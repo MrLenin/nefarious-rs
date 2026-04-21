@@ -376,6 +376,12 @@ pub async fn handle_away(ctx: &HandlerContext, msg: &Message) {
     )
     .await;
 
+    // Propagate to S2S so remote servers can drive their own
+    // away-notify emissions (and so /WHOIS on a remote side shows
+    // the 301 "away" numeric). Matches nefarious2 m_away.c:260-326
+    // which always emits CMD_AWAY to every peer on state change.
+    crate::s2s::routing::route_away(&ctx.state, client_id, new_state.as_deref()).await;
+
     if new_state.is_some() {
         ctx.send_numeric(
             RPL_NOWAWAY,
