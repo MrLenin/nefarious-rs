@@ -104,7 +104,7 @@ pub async fn handle_nick(state: &ServerState, msg: &P10Message) {
 
     let realname = msg.params.last().unwrap().to_string();
 
-    debug!("remote user: {nick} ({numeric}) on server {}", numeric.server);
+    info!("remote user: {nick} ({numeric}) on server {}", numeric.server);
 
     // P10 nick-TS collision resolution: if another user already owns this
     // casefolded nick, the one with the older nick_ts wins. Equal TS → both
@@ -619,6 +619,9 @@ pub async fn handle_privmsg_notice(state: &ServerState, msg: &P10Message) {
             let rc = remote.read().await;
             (rc.prefix(), crate::tags::SourceInfo::from_remote(&rc))
         } else {
+            warn!(
+                "dropping PRIVMSG/NOTICE to {target}: unknown remote origin numeric {numeric}"
+            );
             return;
         }
     } else {
@@ -690,8 +693,13 @@ pub async fn handle_join(state: &ServerState, msg: &P10Message) {
         rc.channels.insert(chan_name.to_string());
         (rc.prefix(), crate::tags::SourceInfo::from_remote(&rc))
     } else {
+        warn!(
+            "dropping JOIN for {chan_name}: unknown remote user numeric {numeric}"
+        );
         return;
     };
+
+    info!("remote JOIN: {prefix} → {chan_name}");
 
     let channel = state.get_or_create_channel(chan_name);
     {
@@ -741,8 +749,13 @@ pub async fn handle_create(state: &ServerState, msg: &P10Message) {
         rc.channels.insert(chan_name.to_string());
         (rc.prefix(), crate::tags::SourceInfo::from_remote(&rc))
     } else {
+        warn!(
+            "dropping CREATE for {chan_name}: unknown remote user numeric {numeric}"
+        );
         return;
     };
+
+    info!("remote CREATE: {prefix} → {chan_name}");
 
     let channel = state.get_or_create_channel(chan_name);
     {
