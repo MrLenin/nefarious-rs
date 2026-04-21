@@ -613,6 +613,8 @@ async fn parse_burst_members(
             }
         }
 
+        let is_op = flags.op;
+        let is_voice = flags.voice;
         chan.remote_members.insert(numeric, flags);
 
         // Track channel on the remote client and capture what we need
@@ -637,6 +639,46 @@ async fn parse_burst_members(
             if let Some(member) = state.clients.get(&member_id) {
                 let m = member.read().await;
                 m.send_from(join_msg.clone(), &src);
+            }
+        }
+
+        // If the bursted member carries op/voice, emit a synthetic
+        // MODE so local clients render the `@` / `+` prefix. Without
+        // this, the JOIN lands the user in the channel but their
+        // prefix stays blank until the client forces a /names refresh.
+        if is_op || is_voice {
+            let remote_nick = {
+                if let Some(remote) = state.remote_clients.get(&numeric) {
+                    remote.read().await.nick.clone()
+                } else {
+                    continue;
+                }
+            };
+            let mut mode_str = String::from("+");
+            let mut applied = 0;
+            if is_op {
+                mode_str.push('o');
+                applied += 1;
+            }
+            if is_voice {
+                mode_str.push('v');
+                applied += 1;
+            }
+            let mut mode_params = vec![chan.name.clone(), mode_str];
+            for _ in 0..applied {
+                mode_params.push(remote_nick.clone());
+            }
+            let mode_msg = irc_proto::Message::with_source(
+                &state.server_name,
+                irc_proto::Command::Mode,
+                mode_params,
+            );
+            let mode_src = crate::tags::SourceInfo::now();
+            for (&member_id, _) in &chan.members {
+                if let Some(member) = state.clients.get(&member_id) {
+                    let m = member.read().await;
+                    m.send_from(mode_msg.clone(), &mode_src);
+                }
             }
         }
     }
@@ -1199,42 +1241,55 @@ pub async fn handle_kick(state: &ServerState, msg: &P10Message) {
     let source_prefix = get_source_prefix(state, msg).await;
 
     // The target can arrive on the wire as either a 5-char P10 numeric
-    // or a nick. `ClientNumeric::from_str` happily accepts any 8-char
-    // nick that happens to start with two base64 bytes ("ibutsu__"
-    // among them), so don't rely on the parse alone — confirm the
-    // numeric actually exists in state.remote_clients before committing
-    // to that branch. If it doesn't resolve to either a known remote
-    // user or a local nick, fall back to emitting the broadcast with
-    // the raw target string so channel members still see the KICK even
-    // when we can't update our own roster.
+    // or a nick. `ClientNumeric::from_str` happily accepts any nick
+    // ≥5 chars whose first two bytes are in the base64 alphabet, so
+    // don't rely on the parse alone. Dispatch in order:
+    //   1. parsed numeric belongs to a remote user we know   (common)
+    //   2. parsed numeric belongs to us (server == our own
+    //      numeric, slot resolves in `client_numerics`)       (our user)
+    //   3. raw string resolves as a local nick                (legacy)
+    //   4. no match — warn and pass through the raw string
+    // Cases 2 and 3 both cover "remote op kicked one of our users",
+    // which is why the target needs to render as *our user's nick*
+    // on the wire broadcast — otherwise channel members see the kick
+    // directed at a raw numeric like "BiAAB" instead of "ibutsu__".
     let target_nick;
-    let mut resolved_remote: Option<ClientNumeric> = None;
-    let mut resolved_local = false;
+    let parsed_numeric = ClientNumeric::from_str(target_str);
 
-    if let Some(numeric) = ClientNumeric::from_str(target_str) {
-        if state.remote_clients.contains_key(&numeric) {
-            resolved_remote = Some(numeric);
-        }
-    }
-
-    if let Some(numeric) = resolved_remote {
-        // Remote user being kicked — commit the removal.
+    if let Some(numeric) = parsed_numeric.filter(|n| state.remote_clients.contains_key(n)) {
+        // Case 1: remote user being kicked.
         if let Some(remote) = state.remote_clients.get(&numeric) {
             let mut rc = remote.write().await;
             target_nick = rc.nick.clone();
             rc.channels.remove(chan_name);
         } else {
-            // Race: disappeared between contains_key and get.
             target_nick = target_str.to_string();
         }
         if let Some(channel) = state.get_channel(chan_name) {
             let mut chan = channel.write().await;
             chan.remote_members.remove(&numeric);
         }
+    } else if let Some(client_id) = parsed_numeric
+        .filter(|n| n.server == state.numeric)
+        .and_then(|n| state.client_by_numeric_slot(n.client))
+    {
+        // Case 2: remote operator kicking one of our users by numeric.
+        let nick = if let Some(client) = state.clients.get(&client_id) {
+            let mut c = client.write().await;
+            c.channels.remove(chan_name);
+            c.nick.clone()
+        } else {
+            target_str.to_string()
+        };
+        target_nick = nick;
+        if let Some(channel) = state.get_channel(chan_name) {
+            let mut chan = channel.write().await;
+            chan.remove_member(&client_id);
+        }
     } else if let Some(client) = state.find_client_by_nick(target_str) {
-        // Local user being kicked by a remote operator.
+        // Case 3: target came through as a nick (legacy) for a local
+        // user.
         target_nick = target_str.to_string();
-        resolved_local = true;
         let client_id = {
             let mut c = client.write().await;
             c.channels.remove(chan_name);
@@ -1245,15 +1300,13 @@ pub async fn handle_kick(state: &ServerState, msg: &P10Message) {
             chan.remove_member(&client_id);
         }
     } else {
-        // Neither a known numeric nor a local nick — just carry the
-        // raw target through to the broadcast so channel members get
-        // the wire event, and trust upstream to have the roster.
+        // Case 4: unknown target. Still broadcast so members see the
+        // wire event; upstream is presumably authoritative.
         target_nick = target_str.to_string();
         warn!(
-            "K from {source_prefix} for {chan_name}: target {target_str} is neither a known remote numeric nor a local nick"
+            "K from {source_prefix} for {chan_name}: target {target_str} is neither a known remote numeric nor a local user"
         );
     }
-    let _ = resolved_local;
 
     // Notify local channel members
     let kick_msg = irc_proto::Message::with_source(

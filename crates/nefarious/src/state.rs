@@ -276,6 +276,18 @@ impl ServerState {
         self.client_numerics.get(&id).map(|e| *e)
     }
 
+    /// Reverse of `numeric_for`: given a P10 client numeric slot,
+    /// return the owning local `ClientId`. O(n) scan over the local
+    /// client table; callers are expected to hit this rarely (remote
+    /// KICK/KILL/INVITE resolution where the s2s peer refers to one
+    /// of our users by their 5-char numeric).
+    pub fn client_by_numeric_slot(&self, slot: u32) -> Option<ClientId> {
+        self.client_numerics
+            .iter()
+            .find(|e| *e.value() == slot)
+            .map(|e| *e.key())
+    }
+
     /// Remove a client entirely.
     pub async fn remove_client(&self, id: ClientId) {
         // Release the P10 numeric before anything else — safe even if the
