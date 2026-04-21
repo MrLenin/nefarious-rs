@@ -1056,14 +1056,13 @@ pub async fn handle_privmsg_notice(state: &ServerState, msg: &P10Message) {
         _ => irc_proto::Command::Notice,
     };
 
-    let irc_msg = irc_proto::Message::with_source(
-        &sender_prefix,
-        command,
-        vec![target.clone(), text.clone()],
-    );
-
     if target.starts_with('#') || target.starts_with('&') {
-        // Channel message — deliver to local members
+        // Channel message — target is a channel name, safe to use verbatim.
+        let irc_msg = irc_proto::Message::with_source(
+            &sender_prefix,
+            command,
+            vec![target.clone(), text.clone()],
+        );
         if let Some(channel) = state.get_channel(target) {
             let chan = channel.read().await;
             for (&member_id, _) in &chan.members {
@@ -1074,10 +1073,32 @@ pub async fn handle_privmsg_notice(state: &ServerState, msg: &P10Message) {
             }
         }
     } else {
-        // Private message to a user — could be nick or numeric
-        if let Some(client) = state.find_client_by_nick(target) {
-            let c = client.read().await;
-            c.send_from(irc_msg, &src);
+        // Private message. P10 allows numeric targets; resolve to the
+        // recipient's actual nick so clients don't see a raw numeric.
+        let (recipient_nick, client_arc) =
+            if let Some(id) = ClientNumeric::from_str(target)
+                .and_then(|num| state.client_by_numeric_slot(num.client))
+            {
+                if let Some(arc) = state.clients.get(&id) {
+                    let nick = arc.read().await.nick.clone();
+                    (nick, Some(arc.clone()))
+                } else {
+                    return;
+                }
+            } else if let Some(arc) = state.find_client_by_nick(target) {
+                let nick = arc.read().await.nick.clone();
+                (nick, Some(arc))
+            } else {
+                return;
+            };
+
+        if let Some(arc) = client_arc {
+            let irc_msg = irc_proto::Message::with_source(
+                &sender_prefix,
+                command,
+                vec![recipient_nick, text.clone()],
+            );
+            arc.read().await.send_from(irc_msg, &src);
         }
     }
 }
