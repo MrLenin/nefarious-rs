@@ -406,11 +406,20 @@ async fn handle_user_mode(ctx: &HandlerContext, msg: &Message) {
     }
 
     if !mode_change.is_empty() {
-        let client = ctx.client.read().await;
-        client.send(Message::with_source(
-            &nick,
-            Command::Mode,
-            vec![nick.clone(), mode_change],
-        ));
+        {
+            let client = ctx.client.read().await;
+            client.send(Message::with_source(
+                &nick,
+                Command::Mode,
+                vec![nick.clone(), mode_change.clone()],
+            ));
+        }
+
+        // Propagate to S2S so peers see the user-mode change
+        // (nefarious2 send_umode_out in ircd/s_user.c). The M token
+        // is shared with channel MODE; the receiving side disambiguates
+        // on whether the first param starts with `#`/`&`.
+        let client_id = ctx.client.read().await.id;
+        crate::s2s::routing::route_user_mode(&ctx.state, client_id, &nick, &mode_change).await;
     }
 }

@@ -280,6 +280,40 @@ pub async fn route_away(
     link.send_line(line).await;
 }
 
+/// Route a local SETNAME (realname change) to the S2S link.
+///
+/// Wire: `<user> SR :<realname>`. Peers update their remote_client
+/// realname and fan out `:prefix SETNAME :<realname>` to local channel
+/// peers with the `setname` cap.
+pub async fn route_setname(state: &ServerState, client_id: ClientId, realname: &str) {
+    let link = match state.get_link() {
+        Some(l) => l,
+        None => return,
+    };
+    let numeric = local_numeric(state, client_id);
+    link.send_line(format!("{numeric} SR :{realname}")).await;
+}
+
+/// Route a local user-mode change (e.g. +i, +w, -o) to the S2S link.
+///
+/// Wire: `<user> M <nick> <modestring>`. Shares the `M` token with
+/// channel MODE; the target being a nick rather than `#channel`
+/// distinguishes the two on the receiving side. Matches nefarious2
+/// send_umode_out in ircd/s_user.c.
+pub async fn route_user_mode(
+    state: &ServerState,
+    client_id: ClientId,
+    nick: &str,
+    mode_str: &str,
+) {
+    let link = match state.get_link() {
+        Some(l) => l,
+        None => return,
+    };
+    let numeric = local_numeric(state, client_id);
+    link.send_line(format!("{numeric} M {nick} {mode_str}")).await;
+}
+
 /// Announce a P10 KILL originated by this server — used when we settle a
 /// nick-TS collision and need every other server to drop their entry for
 /// the losing user. `victim` is the user's nick or numeric; the killer is

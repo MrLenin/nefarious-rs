@@ -1419,7 +1419,12 @@ pub async fn handle_mode(state: &ServerState, msg: &P10Message) {
 
     let target = &msg.params[0];
     if !target.starts_with('#') && !target.starts_with('&') {
-        // User mode change — ignore for now
+        // User-mode change — apply to the remote user's flag set so
+        // WHOIS, USERHOST and friends reflect the right state. No
+        // broadcast to local clients: per RFC, user modes are visible
+        // to the user themselves (and to opers via WHOIS), not fanned
+        // out to channel peers.
+        handle_remote_user_mode(state, msg).await;
         return;
     }
 
@@ -1908,6 +1913,106 @@ pub async fn handle_account(state: &ServerState, msg: &P10Message) {
                         if m.has_cap(crate::capabilities::Capability::AccountNotify) {
                             m.send_from(account_msg.clone(), &src);
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Apply a remote user-mode change (`<user> M <nick> <modestring>`)
+/// to the relevant RemoteClient. Purely internal state — we don't fan
+/// out to local clients because user modes aren't broadcastable.
+async fn handle_remote_user_mode(state: &ServerState, msg: &P10Message) {
+    if msg.params.len() < 2 {
+        return;
+    }
+    let origin = match &msg.origin {
+        Some(o) => o,
+        None => return,
+    };
+    let numeric = match ClientNumeric::from_str(origin) {
+        Some(n) => n,
+        None => return,
+    };
+    let mode_str = &msg.params[1];
+
+    let Some(remote) = state.remote_clients.get(&numeric) else {
+        return;
+    };
+    let mut rc = remote.write().await;
+    let mut adding = true;
+    for c in mode_str.chars() {
+        match c {
+            '+' => adding = true,
+            '-' => adding = false,
+            // Recognised umode flags — matches what the C side propagates.
+            // The full set is broader (x, n, g, h, k, R, I, etc.); we
+            // track what we actually store on RemoteClient.
+            flag if flag.is_alphabetic() => {
+                if adding {
+                    rc.modes.insert(flag);
+                } else {
+                    rc.modes.remove(&flag);
+                }
+            }
+            _ => {}
+        }
+    }
+    debug!("remote user mode: {numeric} now {:?}", rc.modes);
+}
+
+/// Handle SR (SETNAME) from a remote user.
+///
+/// Wire: `<user> SR :<realname>`. Update the remote_client realname
+/// and fan `:prefix SETNAME :<realname>` out to every local user
+/// sharing a channel with them who has the `setname` cap.
+pub async fn handle_setname(state: &ServerState, msg: &P10Message) {
+    if msg.params.is_empty() {
+        return;
+    }
+    let origin = match &msg.origin {
+        Some(o) => o,
+        None => return,
+    };
+    let numeric = match ClientNumeric::from_str(origin) {
+        Some(n) => n,
+        None => return,
+    };
+    let new_realname = msg.params[0].clone();
+
+    let Some(remote) = state.remote_clients.get(&numeric) else {
+        return;
+    };
+    let (prefix, channels, src) = {
+        let mut rc = remote.write().await;
+        rc.realname = new_realname.clone();
+        (
+            rc.prefix(),
+            rc.channels.clone(),
+            crate::tags::SourceInfo::from_remote(&rc),
+        )
+    };
+    drop(remote);
+
+    let setname_msg = irc_proto::Message::with_source(
+        &prefix,
+        irc_proto::Command::Setname,
+        vec![new_realname],
+    );
+
+    let mut seen = std::collections::HashSet::new();
+    for chan_name in &channels {
+        if let Some(channel) = state.get_channel(chan_name) {
+            let chan = channel.read().await;
+            for (&member_id, _) in &chan.members {
+                if !seen.insert(member_id) {
+                    continue;
+                }
+                if let Some(member) = state.clients.get(&member_id) {
+                    let m = member.read().await;
+                    if m.has_cap(crate::capabilities::Capability::Setname) {
+                        m.send_from(setname_msg.clone(), &src);
                     }
                 }
             }

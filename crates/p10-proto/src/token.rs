@@ -56,6 +56,9 @@ pub enum P10Token {
     BouncerSession,  // BS — session lifecycle (account, sessid, channels)
     BouncerTransfer, // BX — alias create/destroy/promote (numeric swap)
 
+    // IRCv3 setname cap (nefarious2 uses token SR for realname changes)
+    Setname,
+
     // Unknown token
     Unknown(String),
 }
@@ -110,6 +113,8 @@ impl P10Token {
             "BS" => P10Token::BouncerSession,
             "BX" => P10Token::BouncerTransfer,
 
+            "SR" => P10Token::Setname,
+
             // Also accept full command names
             "PASS" => P10Token::Pass,
             "SERVER" => P10Token::Server,
@@ -140,6 +145,7 @@ impl P10Token {
             "METADATA" => P10Token::Metadata,
             "BOUNCER_SESSION" => P10Token::BouncerSession,
             "BOUNCER_TRANSFER" => P10Token::BouncerTransfer,
+            "SETNAME" => P10Token::Setname,
 
             other => P10Token::Unknown(other.to_string()),
         }
@@ -185,6 +191,7 @@ impl P10Token {
             P10Token::Metadata => "MD",
             P10Token::BouncerSession => "BS",
             P10Token::BouncerTransfer => "BX",
+            P10Token::Setname => "SR",
             P10Token::Unknown(s) => s,
         }
     }

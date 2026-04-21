@@ -434,7 +434,7 @@ pub async fn handle_setname(ctx: &HandlerContext, msg: &Message) {
         )
     };
 
-    let setname_msg = Message::with_source(&prefix, irc_proto::Command::Setname, vec![name]);
+    let setname_msg = Message::with_source(&prefix, irc_proto::Command::Setname, vec![name.clone()]);
     let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
     broadcast_to_shared_channels(
         &ctx.state,
@@ -445,6 +445,12 @@ pub async fn handle_setname(ctx: &HandlerContext, msg: &Message) {
         &src,
     )
     .await;
+
+    // Propagate to S2S so peers can refresh their remote_client
+    // realname and fan setname-notify out to their own channel peers.
+    // Matches nefarious2 m_setname.c which emits CMD_SETNAME to servers
+    // on every realname change.
+    crate::s2s::routing::route_setname(&ctx.state, client_id, &name).await;
 }
 
 /// Handle CHGHOST — `CHGHOST <target> <newuser> <newhost>`. Operator-
