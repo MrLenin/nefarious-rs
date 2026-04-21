@@ -110,6 +110,12 @@ pub fn default_advertised_caps() -> HashSet<Capability> {
     let mut set = HashSet::new();
     set.insert(Capability::CapNotify);
     // Phase 2.2 — tagged outbound events.
+    //
+    // `message-tags` is the umbrella capability that governs whether
+    // a client accepts server-generated tags on inbound messages. The
+    // IRCv3 `msgid` spec requires it as a prerequisite: we MUST NOT
+    // emit `@msgid=…` to clients that haven't negotiated message-tags.
+    set.insert(Capability::MessageTags);
     set.insert(Capability::ServerTime);
     set.insert(Capability::AccountTag);
     // Phase 2.3 — self-echo of PRIVMSG/NOTICE.
