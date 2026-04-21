@@ -190,7 +190,7 @@ pub async fn handle_part(ctx: &HandlerContext, msg: &Message) {
             }
         }
 
-        // Notify channel before removing
+        // Notify channel before removing (local client broadcast)
         let mut part_params = vec![chan_name.to_string()];
         if !reason.is_empty() {
             part_params.push(reason.clone());
@@ -199,20 +199,24 @@ pub async fn handle_part(ctx: &HandlerContext, msg: &Message) {
         let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
         send_to_channel(ctx, chan_name, &part_msg, &src).await;
 
-        // Route to S2S
-        crate::s2s::routing::route_part(&ctx.state, client_id, chan_name, &reason).await;
-
-        // Remove from channel
+        // Mutate local state BEFORE routing to S2S. The S2S read task
+        // runs concurrently; if we routed first, a fast peer echo
+        // (e.g. any returning PART/state-sync token) could land in a
+        // handler that reads our channel state mid-update. Mirrors
+        // the handle_kick race fix: membership write happens first,
+        // wire emission second.
         {
             let mut chan = channel.write().await;
             chan.remove_member(&client_id);
         }
-
-        // Remove from client's channel list
         {
             let mut client = ctx.client.write().await;
             client.channels.remove(chan_name);
         }
+
+        // Route to S2S now that local state matches what we're telling
+        // peers.
+        crate::s2s::routing::route_part(&ctx.state, client_id, chan_name, &reason).await;
 
         // Clean up empty channel
         {
@@ -282,6 +286,14 @@ pub async fn handle_topic(ctx: &HandlerContext, msg: &Message) {
 
     let prefix = ctx.prefix().await;
 
+    // Capture one timestamp and use it for both the stored topic_time
+    // and the S2S TOPIC emission, so our local state matches exactly
+    // what peers see on the wire. Separate `Utc::now()` calls for the
+    // store and the route could drift by microseconds and cause a
+    // spurious TS mismatch if a peer later echoed a TOPIC back.
+    let ts_now = chrono::Utc::now();
+    let ts_epoch = ts_now.timestamp() as u64;
+
     {
         let mut chan = channel.write().await;
         if new_topic.is_empty() {
@@ -291,7 +303,7 @@ pub async fn handle_topic(ctx: &HandlerContext, msg: &Message) {
         } else {
             chan.topic = Some(new_topic.clone());
             chan.topic_setter = Some(prefix.clone());
-            chan.topic_time = Some(chrono::Utc::now());
+            chan.topic_time = Some(ts_now);
         }
     }
 
@@ -304,15 +316,14 @@ pub async fn handle_topic(ctx: &HandlerContext, msg: &Message) {
     let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
     send_to_channel(ctx, chan_name, &topic_msg, &src).await;
 
-    // Route to S2S
-    let ts = chrono::Utc::now().timestamp() as u64;
+    // Route to S2S using the same timestamp we stored.
     crate::s2s::routing::route_topic(
         &ctx.state,
         client_id,
         chan_name,
         new_topic,
         &prefix,
-        ts,
+        ts_epoch,
     )
     .await;
 }
