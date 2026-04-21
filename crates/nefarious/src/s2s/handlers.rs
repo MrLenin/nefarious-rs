@@ -576,6 +576,15 @@ fn apply_burst_modes(chan: &mut Channel, mode_str: &str) {
 ///
 /// When `accept_status` is false (local side won the TS race), the listed
 /// op/voice bits are discarded — the member joins as a plain participant.
+///
+/// After adding a member we also emit a synthetic JOIN to every local
+/// channel member so their IRC clients see the remote user appear. Without
+/// this, burst silently populates `remote_members` but produces no wire
+/// event on the local sockets, so clients (which track channel rosters
+/// via JOIN/PART notifications, not by re-requesting NAMES) never learn
+/// about the remote participant until they happen to refresh — or until
+/// the remote user leaves and rejoins, which is exactly the "rejoin
+/// reveals the user" behaviour that exposed this bug.
 async fn parse_burst_members(
     state: &ServerState,
     chan: &mut Channel,
@@ -606,10 +615,29 @@ async fn parse_burst_members(
 
         chan.remote_members.insert(numeric, flags);
 
-        // Track channel on the remote client
-        if let Some(remote) = state.remote_clients.get(&numeric) {
-            let mut rc = remote.write().await;
+        // Track channel on the remote client and capture what we need
+        // to broadcast the synthetic JOIN without holding the remote's
+        // write lock while awaiting on per-recipient sends.
+        let Some(remote_arc) = state.remote_clients.get(&numeric) else {
+            continue;
+        };
+        let (prefix, src) = {
+            let mut rc = remote_arc.write().await;
             rc.channels.insert(chan.name.clone());
+            (rc.prefix(), crate::tags::SourceInfo::from_remote(&rc))
+        };
+        drop(remote_arc);
+
+        let join_msg = irc_proto::Message::with_source(
+            &prefix,
+            irc_proto::Command::Join,
+            vec![chan.name.clone()],
+        );
+        for (&member_id, _) in &chan.members {
+            if let Some(member) = state.clients.get(&member_id) {
+                let m = member.read().await;
+                m.send_from(join_msg.clone(), &src);
+            }
         }
     }
 }
