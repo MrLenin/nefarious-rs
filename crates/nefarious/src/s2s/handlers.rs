@@ -331,6 +331,7 @@ async fn handle_nick_change(state: &ServerState, msg: &P10Message) {
                         "Nick collision",
                     )
                     .await;
+                    state.remove_remote_client(numeric).await;
                     return;
                 }
                 Equal => {
@@ -369,6 +370,7 @@ async fn handle_nick_change(state: &ServerState, msg: &P10Message) {
                         "Nick collision",
                     )
                     .await;
+                    state.remove_remote_client(numeric).await;
                     return;
                 }
                 Equal => {
@@ -1075,8 +1077,12 @@ pub async fn handle_privmsg_notice(state: &ServerState, msg: &P10Message) {
     } else {
         // Private message. P10 allows numeric targets; resolve to the
         // recipient's actual nick so clients don't see a raw numeric.
+        // Only consult our slot table when the numeric's server field
+        // is our own — otherwise we'd happily resolve a remote user's
+        // numeric to an unrelated local client sharing the client slot.
         let (recipient_nick, client_arc) =
             if let Some(id) = ClientNumeric::from_str(target)
+                .filter(|num| num.server == state.numeric)
                 .and_then(|num| state.client_by_numeric_slot(num.client))
             {
                 if let Some(arc) = state.clients.get(&id) {
@@ -1415,13 +1421,21 @@ pub async fn handle_mode(state: &ServerState, msg: &P10Message) {
                 '-' => adding = false,
                 'o' | 'v' | 'h' => {
                     if let Some(param) = msg.params.get(pi) {
-                        // Resolve numeric → nick; pass through if already a nick
+                        // Resolve numeric → nick; pass through if already a nick.
+                        // Only fall through to the local slot table when the
+                        // numeric's server field matches ours — otherwise a
+                        // remote numeric would collide with an unrelated local
+                        // slot and we'd render a wrong nick.
                         let resolved = if let Some(num) = ClientNumeric::from_str(param) {
                             if let Some(remote) = state.remote_clients.get(&num) {
                                 remote.read().await.nick.clone()
-                            } else if let Some(id) = state.client_by_numeric_slot(num.client) {
-                                if let Some(local) = state.clients.get(&id) {
-                                    local.read().await.nick.clone()
+                            } else if num.server == state.numeric {
+                                if let Some(id) = state.client_by_numeric_slot(num.client) {
+                                    if let Some(local) = state.clients.get(&id) {
+                                        local.read().await.nick.clone()
+                                    } else {
+                                        param.clone()
+                                    }
                                 } else {
                                     param.clone()
                                 }
@@ -1474,9 +1488,12 @@ pub async fn handle_mode(state: &ServerState, msg: &P10Message) {
 
 /// Apply a MODE message from a remote server to our channel state.
 ///
-/// Op/voice targets in P10 MODE are nicks (not numerics), so resolve them
-/// against both local and remote nick tables. Op/voice on a target we don't
-/// know is silently dropped — the network will resync on the next burst.
+/// Per P10, op/voice/halfop targets arrive on the wire as 5-char YYXXX
+/// numerics (not nicks). Resolve the numeric against remote_clients
+/// first, then — if `num.server` is ours — against our client-slot map.
+/// The nick fallback is only there to tolerate a malformed peer; the
+/// normal path is numeric. Unknown targets are silently dropped (the
+/// network will resync on the next burst).
 async fn apply_remote_channel_mode(
     state: &ServerState,
     chan_name: &str,
@@ -1488,9 +1505,9 @@ async fn apply_remote_channel_mode(
         None => return,
     };
 
-    // Resolve any op/voice nick targets to ids BEFORE taking the channel
-    // write lock, so we never block the channel while awaiting a Client
-    // read lock elsewhere.
+    // Resolve op/voice/halfop targets to (Local(id) | Remote(numeric))
+    // BEFORE taking the channel write lock, so we never block the
+    // channel while awaiting a Client read lock elsewhere.
     enum MemberTarget {
         Local(crate::client::ClientId),
         Remote(ClientNumeric),
@@ -1502,14 +1519,29 @@ async fn apply_remote_channel_mode(
         match c {
             '+' => scan_adding = true,
             '-' => scan_adding = false,
-            'o' | 'v' => {
-                if let Some(nick) = params.get(pi) {
-                    if let Some(client) = state.find_client_by_nick(nick) {
-                        let id = client.read().await.id;
-                        resolved.push(MemberTarget::Local(id));
-                    } else if let Some(remote) = state.find_remote_by_nick(nick) {
-                        let numeric = remote.read().await.numeric;
-                        resolved.push(MemberTarget::Remote(numeric));
+            'o' | 'v' | 'h' => {
+                if let Some(tok) = params.get(pi) {
+                    let mut target: Option<MemberTarget> = None;
+                    if let Some(num) = ClientNumeric::from_str(tok) {
+                        if state.remote_clients.contains_key(&num) {
+                            target = Some(MemberTarget::Remote(num));
+                        } else if num.server == state.numeric {
+                            if let Some(id) = state.client_by_numeric_slot(num.client) {
+                                target = Some(MemberTarget::Local(id));
+                            }
+                        }
+                    }
+                    if target.is_none() {
+                        if let Some(client) = state.find_client_by_nick(tok) {
+                            let id = client.read().await.id;
+                            target = Some(MemberTarget::Local(id));
+                        } else if let Some(remote) = state.find_remote_by_nick(tok) {
+                            let numeric = remote.read().await.numeric;
+                            target = Some(MemberTarget::Remote(numeric));
+                        }
+                    }
+                    if let Some(t) = target {
+                        resolved.push(t);
                     }
                     pi += 1;
                 }
@@ -1571,26 +1603,23 @@ async fn apply_remote_channel_mode(
                     chan.modes.limit = None;
                 }
             }
-            'o' | 'v' => {
-                let is_voice = c == 'v';
+            'o' | 'v' | 'h' => {
                 if let Some(target) = resolved.get(ri) {
+                    let apply = |flags: &mut MembershipFlags| match c {
+                        'o' => flags.op = adding,
+                        'v' => flags.voice = adding,
+                        'h' => flags.halfop = adding,
+                        _ => {}
+                    };
                     match target {
                         MemberTarget::Local(id) => {
                             if let Some(flags) = chan.members.get_mut(id) {
-                                if is_voice {
-                                    flags.voice = adding;
-                                } else {
-                                    flags.op = adding;
-                                }
+                                apply(flags);
                             }
                         }
                         MemberTarget::Remote(numeric) => {
                             if let Some(flags) = chan.remote_members.get_mut(numeric) {
-                                if is_voice {
-                                    flags.voice = adding;
-                                } else {
-                                    flags.op = adding;
-                                }
+                                apply(flags);
                             }
                         }
                     }
