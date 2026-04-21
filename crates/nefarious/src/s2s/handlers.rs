@@ -26,7 +26,7 @@ pub async fn handle_server(state: &ServerState, msg: &P10Message) {
     let _protocol = &msg.params[4];
     let numeric_capacity = &msg.params[5];
     let flags_str = msg.params[6].as_str();
-    let description = msg.params.last().unwrap();
+    let description = msg.params.last().map(|s| s.as_str()).unwrap_or("");
 
     let (numeric, _mask) = match p10_proto::numeric::parse_server_numeric_capacity(numeric_capacity)
     {
@@ -484,7 +484,7 @@ pub async fn handle_burst(state: &ServerState, msg: &P10Message) {
     let remote_wins = create_ts > 0 && (local_ts == 0 || create_ts < local_ts);
     let local_wins = local_ts > 0 && create_ts > local_ts;
 
-    info!(
+    debug!(
         "burst TS: chan={} local_ts={} burst_ts={} remote_wins={} local_wins={} accept_status={}",
         chan_name, local_ts, create_ts, remote_wins, local_wins, !local_wins
     );
@@ -867,7 +867,7 @@ async fn parse_burst_members(
         let is_voice = flags.voice;
 
         let mode_label = if mode_str.is_empty() { "(sticky)".to_string() } else { mode_str.to_string() };
-        info!(
+        debug!(
             "burst member {numeric}: sticky_op={sticky_op} sticky_halfop={sticky_halfop} sticky_voice={sticky_voice} \
              accept_status={accept_status} is_op={is_op} was_pre_existing={was_pre_existing} \
              prior_had_op={prior_had_op} mode_chunk={mode_label}"
@@ -879,7 +879,7 @@ async fn parse_burst_members(
         // to broadcast the synthetic JOIN/AWAY without holding the
         // remote's write lock while awaiting on per-recipient sends.
         let Some(remote_arc) = state.remote_clients.get(&numeric) else {
-            info!("burst member {numeric}: NOT FOUND in remote_clients — skipping JOIN/MODE emit");
+            warn!("burst member {numeric}: NOT FOUND in remote_clients — skipping JOIN/MODE emit");
             continue;
         };
         let (prefix, src, account, realname, away_message) = {
@@ -1269,9 +1269,12 @@ pub async fn handle_part(state: &ServerState, msg: &P10Message) {
             }
         }
 
-        // Remove remote member
-        let mut chan = channel.write().await;
-        chan.remote_members.remove(&numeric);
+        // Remove remote member and reap if now empty
+        {
+            let mut chan = channel.write().await;
+            chan.remote_members.remove(&numeric);
+        }
+        state.reap_channel_if_empty(chan_name).await;
     }
 }
 
@@ -1724,6 +1727,7 @@ pub async fn handle_kick(state: &ServerState, msg: &P10Message) {
                 let mut chan = channel.write().await;
                 chan.remote_members.remove(&numeric);
             }
+            state.reap_channel_if_empty(chan_name).await;
         }
         KickTarget::LocalClient(client_id) => {
             if let Some(channel) = state.get_channel(chan_name) {

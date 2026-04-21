@@ -37,7 +37,7 @@ pub async fn handle_server_link<S>(
     let protocol_str = &server_msg_params[4];
     let numeric_capacity = &server_msg_params[5];
     let flags_str = server_msg_params.get(6).map(|s| s.as_str()).unwrap_or("+");
-    let description = server_msg_params.last().unwrap();
+    let description = server_msg_params.last().map(|s| s.as_str()).unwrap_or("");
 
     // Parse protocol version
     let protocol_version: u16 = protocol_str

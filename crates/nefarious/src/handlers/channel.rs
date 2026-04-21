@@ -471,6 +471,7 @@ pub async fn handle_kick(ctx: &HandlerContext, msg: &Message) {
             let mut rc = remote.write().await;
             rc.channels.remove(chan_name);
         }
+        ctx.state.reap_channel_if_empty(chan_name).await;
     } else {
         ctx.send_numeric(
             ERR_NOSUCHNICK,

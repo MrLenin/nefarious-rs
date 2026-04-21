@@ -384,7 +384,7 @@ impl ServerState {
         for entry in self.channels.iter() {
             let mut chan = entry.value().write().await;
             chan.remote_members.remove(&numeric);
-            if chan.is_empty() && chan.remote_members.is_empty() {
+            if chan.is_empty() {
                 empty_channels.push(entry.key().clone());
             }
         }
@@ -412,6 +412,18 @@ impl ServerState {
 
         self.remote_servers.remove(&server_numeric);
         self.links.remove(&server_numeric);
+    }
+
+    /// Remove a channel from the registry if it has no local or remote members.
+    /// Call this after any operation that reduces a channel's membership.
+    pub async fn reap_channel_if_empty(&self, chan_name: &str) {
+        let key = irc_casefold(chan_name);
+        if let Some(entry) = self.channels.get(&key) {
+            if entry.value().read().await.is_empty() {
+                drop(entry);
+                self.channels.remove(&key);
+            }
+        }
     }
 
     /// Find a remote client by nick (rfc1459-case-insensitive).
