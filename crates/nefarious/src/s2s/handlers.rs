@@ -1377,12 +1377,65 @@ pub async fn handle_mode(state: &ServerState, msg: &P10Message) {
         apply_remote_channel_mode(state, target, &mode_str, &mode_params).await;
     }
 
+    // Build a client-facing params list: P10 MODE targets are numerics on
+    // the wire; IRC clients expect nicks. Resolve each numeric param that
+    // corresponds to an o/v/h/b/k/l flag, leaving non-target params as-is.
+    let client_params = if msg.params.len() >= 2 {
+        let mode_str = &msg.params[1];
+        let mut out = vec![target.clone(), mode_str.clone()];
+        let mut pi = 2usize;
+        let mut adding = true;
+        for c in mode_str.chars() {
+            match c {
+                '+' => adding = true,
+                '-' => adding = false,
+                'o' | 'v' | 'h' => {
+                    if let Some(param) = msg.params.get(pi) {
+                        // Resolve numeric → nick; pass through if already a nick
+                        let resolved = if let Some(num) = ClientNumeric::from_str(param) {
+                            if let Some(remote) = state.remote_clients.get(&num) {
+                                remote.read().await.nick.clone()
+                            } else if let Some(id) = state.client_by_numeric_slot(num.client) {
+                                if let Some(local) = state.clients.get(&id) {
+                                    local.read().await.nick.clone()
+                                } else {
+                                    param.clone()
+                                }
+                            } else {
+                                param.clone()
+                            }
+                        } else {
+                            param.clone()
+                        };
+                        out.push(resolved);
+                        pi += 1;
+                    }
+                }
+                'k' => {
+                    if let Some(p) = msg.params.get(pi) { out.push(p.clone()); pi += 1; }
+                }
+                'b' => {
+                    if let Some(p) = msg.params.get(pi) { out.push(p.clone()); pi += 1; }
+                }
+                'l' => {
+                    if adding {
+                        if let Some(p) = msg.params.get(pi) { out.push(p.clone()); pi += 1; }
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    } else {
+        msg.params.clone()
+    };
+
     // Relay the MODE message to local channel members
     if let Some(channel) = state.get_channel(target) {
         let mode_msg = irc_proto::Message::with_source(
             &source_prefix,
             irc_proto::Command::Mode,
-            msg.params.clone(),
+            client_params,
         );
 
         let chan = channel.read().await;
