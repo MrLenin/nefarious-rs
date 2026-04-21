@@ -191,20 +191,22 @@ pub fn ip_to_base64(ip: std::net::IpAddr) -> String {
 }
 
 /// Encode a numeric capacity mask (e.g., max clients) to base64.
-/// The C code uses 3+ chars depending on capacity.
-/// For our purposes, 3 chars covers up to 262143 clients.
+///
+/// **Always 3 characters** to match C nefarious2
+/// (`ircd/numnicks.c::SetYXXCapacity`, which calls
+/// `inttobase64(…, 3)` unconditionally). The peer's parser
+/// (`SetServerYXX`, `numnicks.c:274`) checks `strlen(yxx) == 5` to
+/// pick 2-char numeric + 3-char capacity; any other length triggers
+/// the legacy 1-char numeric + 2-char capacity fallback, at which
+/// point our server is registered under the wrong slot and burst
+/// cross-references fail silently.
+///
+/// The input is the max client count; we emit the mask
+/// (next_power_of_two - 1) packed into 3 base64 chars (18 bits, up
+/// to 262,143 slots — matching the server-side client-numeric cap).
 pub fn capacity_to_base64(max_clients: u32) -> String {
-    // C code: SetYXXCapacity stores the mask as base64
-    // Capacity is stored as a mask (next power of 2 - 1)
     let mask = max_clients.next_power_of_two() - 1;
-    // Determine needed chars: 1 char = 64, 2 = 4096, 3 = 262144
-    if mask < 64 {
-        inttobase64(mask, 1)
-    } else if mask < 4096 {
-        inttobase64(mask, 2)
-    } else {
-        inttobase64(mask, 3)
-    }
+    inttobase64(mask, 3)
 }
 
 /// Parse a numeric capacity string from a SERVER message.
@@ -329,5 +331,17 @@ mod tests {
         let (sn, mask) = parse_server_numeric_capacity("ABAAC").unwrap();
         assert_eq!(sn.0, 1);
         assert_eq!(mask, 2);
+    }
+
+    #[test]
+    fn capacity_to_base64_always_three_chars() {
+        // nefarious2/ircd/numnicks.c:SetServerYXX only accepts the
+        // 5-char YYXXX form as "2 char numeric + 3 char capacity";
+        // any other total length falls back to 1+2. Our encoding
+        // must therefore always be 3 chars regardless of value.
+        for caps in [1u32, 16, 64, 1024, 4096, 65536, 262144] {
+            let s = capacity_to_base64(caps);
+            assert_eq!(s.len(), 3, "capacity {caps} produced {s:?}");
+        }
     }
 }
