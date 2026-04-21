@@ -1198,38 +1198,62 @@ pub async fn handle_kick(state: &ServerState, msg: &P10Message) {
 
     let source_prefix = get_source_prefix(state, msg).await;
 
-    // The target could be a nick or a numeric
+    // The target can arrive on the wire as either a 5-char P10 numeric
+    // or a nick. `ClientNumeric::from_str` happily accepts any 8-char
+    // nick that happens to start with two base64 bytes ("ibutsu__"
+    // among them), so don't rely on the parse alone — confirm the
+    // numeric actually exists in state.remote_clients before committing
+    // to that branch. If it doesn't resolve to either a known remote
+    // user or a local nick, fall back to emitting the broadcast with
+    // the raw target string so channel members still see the KICK even
+    // when we can't update our own roster.
     let target_nick;
+    let mut resolved_remote: Option<ClientNumeric> = None;
+    let mut resolved_local = false;
 
     if let Some(numeric) = ClientNumeric::from_str(target_str) {
-        // Remote user being kicked
+        if state.remote_clients.contains_key(&numeric) {
+            resolved_remote = Some(numeric);
+        }
+    }
+
+    if let Some(numeric) = resolved_remote {
+        // Remote user being kicked — commit the removal.
         if let Some(remote) = state.remote_clients.get(&numeric) {
             let mut rc = remote.write().await;
             target_nick = rc.nick.clone();
             rc.channels.remove(chan_name);
         } else {
-            return;
+            // Race: disappeared between contains_key and get.
+            target_nick = target_str.to_string();
         }
-
         if let Some(channel) = state.get_channel(chan_name) {
             let mut chan = channel.write().await;
             chan.remote_members.remove(&numeric);
         }
-    } else {
-        // Could be a local user being kicked by remote
+    } else if let Some(client) = state.find_client_by_nick(target_str) {
+        // Local user being kicked by a remote operator.
         target_nick = target_str.to_string();
-        if let Some(client) = state.find_client_by_nick(target_str) {
+        resolved_local = true;
+        let client_id = {
             let mut c = client.write().await;
             c.channels.remove(chan_name);
-            let client_id = c.id;
-            drop(c);
-
-            if let Some(channel) = state.get_channel(chan_name) {
-                let mut chan = channel.write().await;
-                chan.remove_member(&client_id);
-            }
+            c.id
+        };
+        if let Some(channel) = state.get_channel(chan_name) {
+            let mut chan = channel.write().await;
+            chan.remove_member(&client_id);
         }
+    } else {
+        // Neither a known numeric nor a local nick — just carry the
+        // raw target through to the broadcast so channel members get
+        // the wire event, and trust upstream to have the roster.
+        target_nick = target_str.to_string();
+        warn!(
+            "K from {source_prefix} for {chan_name}: target {target_str} is neither a known remote numeric nor a local nick"
+        );
     }
+    let _ = resolved_local;
 
     // Notify local channel members
     let kick_msg = irc_proto::Message::with_source(
