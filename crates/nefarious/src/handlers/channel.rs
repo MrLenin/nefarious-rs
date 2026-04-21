@@ -138,8 +138,8 @@ pub async fn handle_join(ctx: &HandlerContext, msg: &Message) {
                 .await;
         }
 
-        // Send topic
-        send_topic(ctx, chan_name).await;
+        // Send topic (silent when unset — matches C nefarious m_join.c:290)
+        send_topic(ctx, chan_name, false).await;
 
         // Send NAMES
         send_names(ctx, chan_name).await;
@@ -252,8 +252,8 @@ pub async fn handle_topic(ctx: &HandlerContext, msg: &Message) {
     let client_id = ctx.client_id().await;
 
     if msg.params.len() == 1 {
-        // Query topic
-        send_topic(ctx, chan_name).await;
+        // Query topic (emit RPL_NOTOPIC when unset — matches C m_topic.c:295)
+        send_topic(ctx, chan_name, true).await;
         return;
     }
 
@@ -728,7 +728,12 @@ pub async fn send_to_channel(
 }
 
 /// Send topic information for a channel to the requesting client.
-async fn send_topic(ctx: &HandlerContext, chan_name: &str) {
+///
+/// `on_query` distinguishes the two call sites: a /TOPIC query with no
+/// argument expects RPL_NOTOPIC when the topic is unset, whereas a JOIN
+/// should stay silent in that case (matches nefarious2/ircd/m_join.c:290
+/// which only emits RPL_TOPIC when `chptr->topic[0]` is non-empty).
+async fn send_topic(ctx: &HandlerContext, chan_name: &str, on_query: bool) {
     let channel = match ctx.state.get_channel(chan_name) {
         Some(c) => c,
         None => return,
@@ -754,13 +759,14 @@ async fn send_topic(ctx: &HandlerContext, chan_name: &str) {
                 .await;
             }
         }
-        None => {
+        None if on_query => {
             ctx.send_numeric(
                 RPL_NOTOPIC,
                 vec![chan_name.to_string(), "No topic is set".into()],
             )
             .await;
         }
+        None => {}
     }
 }
 
