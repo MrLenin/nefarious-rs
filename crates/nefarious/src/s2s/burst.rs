@@ -43,33 +43,33 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
         };
 
         // N <nick> <hop> <nick_ts> <user> <host> [+<modes>] <ip> <numeric> :<realname>
+        //
+        // The `<numeric>` field is the 5-char combined YYXXX form
+        // (2-char server numeric immediately followed by 3-char client
+        // slot) in a SINGLE token. nefarious2 sends it via its
+        // `NumNick()` macro joined with `%s%s`, and its `ms_nick`
+        // parser reads it from `parv[parc-2]` as one field — splitting
+        // across two whitespace-separated fields desyncs the position
+        // of every later param, so the receiver ends up with just the
+        // 3-char client slot in `parv[parc-2]`, can't resolve it to a
+        // server, and silently drops the entire NICK line. That's how
+        // our users never landed on the remote side.
         let nick_ts = client.nick_ts;
         let line = if mode_str.is_empty() {
             format!(
-                "{} N {} 1 {} {} {} {} {} {} :{}",
-                our_numeric,
-                client.nick,
-                nick_ts,
-                client.user,
-                client.host,
-                ip_encoded,
-                state.numeric,
-                p10_proto::inttobase64(client_numeric.client, 3),
-                client.realname
+                "{our_numeric} N {nick} 1 {nick_ts} {user} {host} {ip_encoded} {client_numeric} :{realname}",
+                nick = client.nick,
+                user = client.user,
+                host = client.host,
+                realname = client.realname,
             )
         } else {
             format!(
-                "{} N {} 1 {} {} {} {} {} {} {} :{}",
-                our_numeric,
-                client.nick,
-                nick_ts,
-                client.user,
-                client.host,
-                mode_str,
-                ip_encoded,
-                state.numeric,
-                p10_proto::inttobase64(client_numeric.client, 3),
-                client.realname
+                "{our_numeric} N {nick} 1 {nick_ts} {user} {host} {mode_str} {ip_encoded} {client_numeric} :{realname}",
+                nick = client.nick,
+                user = client.user,
+                host = client.host,
+                realname = client.realname,
             )
         };
 
