@@ -192,6 +192,72 @@ pub async fn route_invite(
         .await;
 }
 
+/// Route the introduction of a newly-registered local client to every
+/// S2S link.
+///
+/// Must be called once, right after `ServerState::register_client`,
+/// whenever a client completes registration after the link is already
+/// active — otherwise peers never learn the client exists. The burst
+/// path in `send_burst` covers clients registered *before* the link
+/// came up; this path covers the steady-state case.
+///
+/// Wire format matches `send_burst`'s NICK emission exactly:
+///   `<our_numeric> N <nick> 1 <nick_ts> <user> <host> [+<modes>] <ip> <YYXXX> :<realname>`
+///
+/// If the client is logged into an account, emits the follow-up
+/// `AC <numeric> R <account> <ts>` token so peers record the login.
+/// Silently skips when no S2S link exists or the client has no
+/// allocated P10 numeric.
+pub async fn route_nick_intro(
+    state: &ServerState,
+    client: &std::sync::Arc<tokio::sync::RwLock<crate::client::Client>>,
+) {
+    if state.links.is_empty() {
+        return;
+    }
+    let c = client.read().await;
+    let Some(slot) = state.numeric_for(c.id) else {
+        return;
+    };
+    let client_numeric = p10_proto::ClientNumeric {
+        server: state.numeric,
+        client: slot,
+    };
+    let our = state.numeric.to_string();
+
+    let modes: String = c.modes.iter().collect();
+    let mode_tok = if modes.is_empty() {
+        String::new()
+    } else {
+        format!(" +{modes}")
+    };
+    let ip_encoded = p10_proto::numeric::ip_to_base64(c.addr.ip());
+
+    let line = format!(
+        "{our} N {nick} 1 {nick_ts} {user} {host}{mode_tok} {ip_encoded} {client_numeric} :{realname}",
+        nick = c.nick,
+        nick_ts = c.nick_ts,
+        user = c.user,
+        host = c.host,
+        realname = c.realname,
+    );
+
+    let account_line = c.account.as_ref().map(|a| {
+        format!(
+            "{our} AC {client_numeric} R {a} {ts}",
+            ts = c.nick_ts,
+        )
+    });
+    drop(c);
+
+    for entry in state.links.iter() {
+        entry.value().send_line(line.clone()).await;
+        if let Some(ref ac) = account_line {
+            entry.value().send_line(ac.clone()).await;
+        }
+    }
+}
+
 /// Route a local AWAY state change to the S2S link.
 ///
 /// Wire format per nefarious2/ircd/m_away.c: `<user> A :<msg>` when

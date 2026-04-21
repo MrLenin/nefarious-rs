@@ -103,6 +103,13 @@ pub async fn handle_connection<S>(
     // Register in global state
     state.register_client(Arc::clone(&client), &nick).await;
 
+    // Introduce the client to every active S2S link. Without this,
+    // registrations that happen after the link is up are invisible
+    // to peers until the next burst — a hard desync since the peer
+    // never learns the user exists, can't route to them, and will
+    // emit nick-collision KILLs if the same nick appears elsewhere.
+    crate::s2s::routing::route_nick_intro(&state, &client).await;
+
     // Send welcome burst
     send_welcome(&client, &state).await;
 
