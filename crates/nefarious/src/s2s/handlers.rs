@@ -1256,32 +1256,44 @@ pub async fn handle_part(state: &ServerState, msg: &P10Message) {
         return;
     };
 
-    // Notify local members before removing
-    let mut part_params = vec![chan_name.clone()];
-    if !reason.is_empty() {
-        part_params.push(reason);
-    }
-    let part_msg =
-        irc_proto::Message::with_source(&prefix, irc_proto::Command::Part, part_params);
+    // When we locally kick a remote user, nefarious2's ms_kick →
+    // make_zombie path (channel.c:2259-2263) sends us back a PART
+    // for the kicked user as an acknowledgment. Re-broadcasting that
+    // PART would show a phantom "has left" right after the KICK.
+    // Suppress the broadcast when the user has already been removed
+    // from chan.remote_members — the KICK handler got there first.
+    // Take the remove as the authoritative "were they still a member?"
+    // check: `.remove()` returns `None` iff they weren't present.
+    let part_msg = {
+        let Some(channel) = state.get_channel(chan_name) else {
+            return;
+        };
+        let was_member = {
+            let mut chan = channel.write().await;
+            chan.remote_members.remove(&numeric).is_some()
+        };
+        if !was_member {
+            state.reap_channel_if_empty(chan_name).await;
+            return;
+        }
+
+        let mut part_params = vec![chan_name.clone()];
+        if !reason.is_empty() {
+            part_params.push(reason);
+        }
+        irc_proto::Message::with_source(&prefix, irc_proto::Command::Part, part_params)
+    };
 
     if let Some(channel) = state.get_channel(chan_name) {
-        {
-            let chan = channel.read().await;
-            for (&member_id, _) in &chan.members {
-                if let Some(member) = state.clients.get(&member_id) {
-                    let m = member.read().await;
-                    m.send_from(part_msg.clone(), &src);
-                }
+        let chan = channel.read().await;
+        for (&member_id, _) in &chan.members {
+            if let Some(member) = state.clients.get(&member_id) {
+                let m = member.read().await;
+                m.send_from(part_msg.clone(), &src);
             }
         }
-
-        // Remove remote member and reap if now empty
-        {
-            let mut chan = channel.write().await;
-            chan.remote_members.remove(&numeric);
-        }
-        state.reap_channel_if_empty(chan_name).await;
     }
+    state.reap_channel_if_empty(chan_name).await;
 }
 
 /// Handle D (KILL) from remote.
