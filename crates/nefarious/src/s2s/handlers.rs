@@ -106,6 +106,22 @@ pub async fn handle_nick(state: &ServerState, msg: &P10Message) {
 
     info!("remote user: {nick} ({numeric}) on server {}", numeric.server);
 
+    // Sanity checks. Two different users cannot share a YYXXX, and
+    // the server portion must be in our server map — otherwise the
+    // burst arrived out of order and we'll end up with ghost state.
+    if !state.remote_servers.contains_key(&numeric.server) && numeric.server != state.numeric {
+        warn!(
+            "accepting NICK for {nick} on unknown server {} (numeric={numeric}) — introduced before SERVER intro?",
+            numeric.server
+        );
+    }
+    if let Some(existing) = state.remote_clients.get(&numeric) {
+        let existing_nick = existing.read().await.nick.clone();
+        warn!(
+            "numeric collision: {numeric} already held by {existing_nick}; new burst introduces it as {nick}"
+        );
+    }
+
     // P10 nick-TS collision resolution: if another user already owns this
     // casefolded nick, the one with the older nick_ts wins. Equal TS → both
     // lose. Without this, two servers introducing the same nick silently
