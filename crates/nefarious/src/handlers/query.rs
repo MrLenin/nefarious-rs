@@ -183,10 +183,20 @@ pub async fn handle_whois(ctx: &HandlerContext, msg: &Message) {
             .await;
         }
         if !t.channels.is_empty() {
+            let requester_id = ctx.client_id().await;
             let mut chan_list = Vec::new();
             for chan_name in &t.channels {
                 if let Some(channel) = ctx.state.get_channel(chan_name) {
                     let chan = channel.read().await;
+                    // 319 info leak: skip secret/private channels the
+                    // requester isn't on. Non-members shouldn't be able
+                    // to discover membership of hidden channels via
+                    // WHOIS. Matches standard IRC behaviour.
+                    let hidden = chan.modes.secret || chan.modes.private;
+                    let requester_on = chan.members.contains_key(&requester_id);
+                    if hidden && !requester_on {
+                        continue;
+                    }
                     if let Some(flags) = chan.members.get(&t.id) {
                         chan_list.push(format!("{}{}", flags.highest_prefix(), chan_name));
                     }
@@ -258,12 +268,34 @@ pub async fn handle_whois(ctx: &HandlerContext, msg: &Message) {
             .await;
         }
         if !r.channels.is_empty() {
-            let channels: Vec<String> = r.channels.iter().cloned().collect();
-            ctx.send_numeric(
-                RPL_WHOISCHANNELS,
-                vec![r.nick.clone(), channels.join(" ")],
-            )
-            .await;
+            let requester_id = ctx.client_id().await;
+            let mut chan_list = Vec::new();
+            for chan_name in &r.channels {
+                if let Some(channel) = ctx.state.get_channel(chan_name) {
+                    let chan = channel.read().await;
+                    // Same +s/+p leak gate as the local-target path.
+                    let hidden = chan.modes.secret || chan.modes.private;
+                    let requester_on = chan.members.contains_key(&requester_id);
+                    if hidden && !requester_on {
+                        continue;
+                    }
+                    // Prefix comes from chan.remote_members for a
+                    // remote user; otherwise no prefix (plain member).
+                    let prefix = chan
+                        .remote_members
+                        .get(&r.numeric)
+                        .map(|f| f.highest_prefix().to_string())
+                        .unwrap_or_default();
+                    chan_list.push(format!("{prefix}{chan_name}"));
+                }
+            }
+            if !chan_list.is_empty() {
+                ctx.send_numeric(
+                    RPL_WHOISCHANNELS,
+                    vec![r.nick.clone(), chan_list.join(" ")],
+                )
+                .await;
+            }
         }
         if let Some(ref account) = r.account {
             ctx.send_numeric(

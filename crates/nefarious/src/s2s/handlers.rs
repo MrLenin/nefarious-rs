@@ -2384,6 +2384,14 @@ pub async fn handle_whois(state: &ServerState, msg: &P10Message) {
                 for chan_name in &t.channels {
                     if let Some(channel) = state.get_channel(chan_name) {
                         let chan = channel.read().await;
+                        // Secret/private channels are only visible
+                        // to members. The requester here is remote —
+                        // consult chan.remote_members.
+                        let hidden = chan.modes.secret || chan.modes.private;
+                        let requester_on = chan.remote_members.contains_key(&requester);
+                        if hidden && !requester_on {
+                            continue;
+                        }
                         if let Some(flags) = chan.members.get(&t.id) {
                             chan_list.push(format!(
                                 "{}{}",
