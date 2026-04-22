@@ -636,29 +636,80 @@ pub async fn handle_oper(ctx: &HandlerContext, msg: &Message) {
         .iter()
         .find(|op| op.name == *name && op.password == *password);
 
-    if matched.is_none() {
-        ctx.send_numeric(ERR_PASSWDMISMATCH, vec!["Password incorrect".into()])
-            .await;
-        return;
-    }
+    let oper_config = match matched {
+        Some(op) => op.clone(),
+        None => {
+            ctx.send_numeric(ERR_PASSWDMISMATCH, vec!["Password incorrect".into()])
+                .await;
+            return;
+        }
+    };
 
-    {
+    // Resolve privileges from the Operator block's `privs` line. If
+    // unspecified, fall back to the baseline global-oper set (roughly
+    // mirrors nefarious2's default_global_priv_list without the
+    // administrative ones like DIE/RESTART).
+    let privs: std::collections::HashSet<String> = match &oper_config.privs {
+        Some(s) => s
+            .split_whitespace()
+            .map(|p| p.to_uppercase())
+            .collect(),
+        None => DEFAULT_OPER_PRIVS.iter().map(|s| s.to_string()).collect(),
+    };
+
+    let client_id = {
         let mut client = ctx.client.write().await;
         client.modes.insert('o');
-    }
+        client.privs = privs.clone();
+        client.id
+    };
 
     ctx.send_numeric(RPL_YOUREOPER, vec!["You are now an IRC operator".into()])
         .await;
 
     // Echo the mode change back to the client.
     let nick = ctx.nick().await;
-    let client = ctx.client.read().await;
-    client.send(Message::with_source(
-        &nick,
-        irc_proto::Command::Mode,
-        vec![nick.clone(), "+o".into()],
-    ));
+    {
+        let client = ctx.client.read().await;
+        client.send(Message::with_source(
+            &nick,
+            irc_proto::Command::Mode,
+            vec![nick.clone(), "+o".into()],
+        ));
+    }
+
+    // Propagate to S2S: first the +o umode, then the PRIVS token so
+    // peers can enforce/display the user's granted privileges.
+    // Matches nefarious2 m_oper.c which calls send_umode_out followed
+    // by client_sendtoserv_privs.
+    crate::s2s::routing::route_user_mode(&ctx.state, client_id, &nick, "+o").await;
+    let priv_refs: Vec<&str> = privs.iter().map(|s| s.as_str()).collect();
+    crate::s2s::routing::route_privs(&ctx.state, client_id, &priv_refs).await;
 }
+
+/// Baseline priv set granted to an /OPER with no `privs =` config
+/// line. Roughly mirrors nefarious2's default_global_priv_list with
+/// the administrative privileges (DIE, RESTART, JUPE/local variants,
+/// SET) held back so a default oper is capable but not catastrophic.
+/// Operator blocks with an explicit `privs = "..."` override this
+/// entirely.
+const DEFAULT_OPER_PRIVS: &[&str] = &[
+    "CHAN_LIMIT",
+    "SHOW_INVIS",
+    "SHOW_ALL_INVIS",
+    "KILL",
+    "LOCAL_KILL",
+    "REHASH",
+    "OPMODE",
+    "WHOX",
+    "SEE_CHAN",
+    "PROPAGATE",
+    "DISPLAY",
+    "SEE_OPERS",
+    "LIST_CHAN",
+    "FORCE_OPMODE",
+    "CHECK",
+];
 
 /// Handle VERSION command.
 pub async fn handle_version(ctx: &HandlerContext, _msg: &Message) {

@@ -82,6 +82,10 @@ pub struct RemoteClient {
     pub account: Option<String>,
     pub nick_ts: u64,
     pub channels: HashSet<String>,
+    /// Oper privileges propagated from the user's home server via the
+    /// P10 `PRIVS` token. Names match nefarious2's `privtab`. Empty
+    /// for non-opers. Multiple PRIVS lines are merged into this set.
+    pub privs: HashSet<String>,
     /// AWAY text set by the remote side. `None` when the user is
     /// present; `Some(msg)` when they have AWAY set. Used for
     /// CAP-gated AWAY emit during channel burst join so clients with

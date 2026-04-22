@@ -59,6 +59,10 @@ pub enum P10Token {
     // IRCv3 setname cap (nefarious2 uses token SR for realname changes)
     Setname,
 
+    // Oper privileges. Token is the full word "PRIVS" — nefarious2 did
+    // not mint a short form (see include/msg.h:TOK_PRIVS).
+    Privs,
+
     // Unknown token
     Unknown(String),
 }
@@ -114,6 +118,8 @@ impl P10Token {
             "BX" => P10Token::BouncerTransfer,
 
             "SR" => P10Token::Setname,
+
+            "PRIVS" => P10Token::Privs,
 
             // Also accept full command names
             "PASS" => P10Token::Pass,
@@ -192,6 +198,7 @@ impl P10Token {
             P10Token::BouncerSession => "BS",
             P10Token::BouncerTransfer => "BX",
             P10Token::Setname => "SR",
+            P10Token::Privs => "PRIVS",
             P10Token::Unknown(s) => s,
         }
     }

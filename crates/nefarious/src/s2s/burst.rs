@@ -100,6 +100,27 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
             ))
             .await;
         }
+
+        // 1c. If the user is an oper with a priv set, follow with
+        // PRIVS so the remote side has the full state without waiting
+        // for a steady-state PRIVS emission. Mirrors s_serv.c which
+        // invokes client_send_privs for every bursted oper.
+        if !client.privs.is_empty() {
+            // Same packing rule as route_privs: flush at ~400 bytes.
+            let mut line = format!("{our_numeric} PRIVS {client_numeric}");
+            let base_len = line.len();
+            for p in &client.privs {
+                if line.len() + 1 + p.len() > 400 {
+                    link.send_line(line.clone()).await;
+                    line.truncate(base_len);
+                }
+                line.push(' ');
+                line.push_str(p);
+            }
+            if line.len() > base_len {
+                link.send_line(line).await;
+            }
+        }
     }
 
     info!(

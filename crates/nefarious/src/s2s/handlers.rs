@@ -223,6 +223,7 @@ pub async fn handle_nick(state: &ServerState, msg: &P10Message) {
         nick_ts,
         channels: HashSet::new(),
         away_message: None,
+        privs: HashSet::new(),
         is_alias: false,
         primary: None,
     }));
@@ -1962,6 +1963,41 @@ async fn handle_remote_user_mode(state: &ServerState, msg: &P10Message) {
     debug!("remote user mode: {numeric} now {:?}", rc.modes);
 }
 
+/// Handle PRIVS from a remote server — record oper privileges on
+/// the named user. Nefarious2 can split large priv sets across
+/// multiple PRIVS lines, each for the same user; we merge into the
+/// user's `privs` set rather than replacing it so the full set is
+/// captured regardless of how it's split. An empty PRIVS line
+/// (target only, no privs) is tolerated and just no-ops.
+///
+/// Wire: `<server> PRIVS <user_numeric> <priv1> <priv2> ...`.
+pub async fn handle_privs(state: &ServerState, msg: &P10Message) {
+    if msg.params.is_empty() {
+        return;
+    }
+    let Some(numeric) = ClientNumeric::from_str(&msg.params[0]) else {
+        return;
+    };
+    if msg.params.len() < 2 {
+        return;
+    }
+
+    let Some(remote) = state.remote_clients.get(&numeric) else {
+        return;
+    };
+    let mut rc = remote.write().await;
+    for tok in &msg.params[1..] {
+        // A single param can carry multiple whitespace-separated privs
+        // (nefarious2 packs them into one trailing arg when they fit).
+        for p in tok.split_whitespace() {
+            if !p.is_empty() {
+                rc.privs.insert(p.to_uppercase());
+            }
+        }
+    }
+    debug!("PRIVS: {numeric} now has {} privs", rc.privs.len());
+}
+
 /// Handle SR (SETNAME) from a remote user.
 ///
 /// Wire: `<user> SR :<realname>`. Update the remote_client realname
@@ -2423,6 +2459,7 @@ async fn handle_bx_create(state: &ServerState, msg: &P10Message) {
         nick_ts: 0,
         channels: HashSet::new(),
         away_message: None,
+        privs: HashSet::new(),
         is_alias: true,
         primary: Some(primary),
     }));

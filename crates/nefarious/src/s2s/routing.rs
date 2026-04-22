@@ -258,6 +258,43 @@ pub async fn route_nick_intro(
     }
 }
 
+/// Route a local oper's privilege set to S2S peers.
+///
+/// Wire: `<our_server> PRIVS <user_numeric> <priv1> <priv2> ...`.
+/// Called once after a successful /OPER, right after the `+o` user
+/// mode is propagated. Mirrors `client_sendtoserv_privs` in
+/// nefarious2/ircd/client.c — splits into multiple PRIVS lines if
+/// the priv list would blow the 512-byte wire limit. Baseline emits
+/// everything in one line since our default priv set fits.
+pub async fn route_privs(state: &ServerState, client_id: ClientId, privs: &[&str]) {
+    let link = match state.get_link() {
+        Some(l) => l,
+        None => return,
+    };
+    if privs.is_empty() {
+        return;
+    }
+    let numeric = local_numeric(state, client_id);
+    let our = state.numeric.to_string();
+
+    // Pack privs until we'd cross ~400 bytes, then flush. The 512-byte
+    // line limit minus prefix/token/numeric overhead leaves room for
+    // roughly 14-20 priv names per line — well above the baseline set.
+    let mut line = format!("{our} PRIVS {numeric}");
+    let base_len = line.len();
+    for p in privs {
+        if line.len() + 1 + p.len() > 400 {
+            link.send_line(line.clone()).await;
+            line.truncate(base_len);
+        }
+        line.push(' ');
+        line.push_str(p);
+    }
+    if line.len() > base_len {
+        link.send_line(line).await;
+    }
+}
+
 /// Route a local AWAY state change to the S2S link.
 ///
 /// Wire format per nefarious2/ircd/m_away.c: `<user> A :<msg>` when

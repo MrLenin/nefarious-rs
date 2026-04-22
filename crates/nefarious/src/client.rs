@@ -49,6 +49,12 @@ pub struct Client {
     /// to fill the `@account` tag for `account-tag`-enabled recipients
     /// and the extended-join payload in Phase 2.7.
     pub account: Option<String>,
+    /// Oper privileges granted on successful /OPER. Populated from the
+    /// matching Operator config block; names match nefarious2's
+    /// `privtab` (e.g. "KILL", "REHASH", "OPMODE"). Empty for non-opers.
+    /// Propagated over S2S via the `PRIVS` token so peers know what
+    /// remote opers are allowed to do.
+    pub privs: HashSet<String>,
     /// Channels this client is in.
     pub channels: HashSet<String>,
     /// Connection timestamp.
@@ -121,6 +127,7 @@ impl Client {
             modes: HashSet::new(),
             away_message: None,
             account: None,
+            privs: HashSet::new(),
             channels: HashSet::new(),
             connected_at: now,
             last_active: now,

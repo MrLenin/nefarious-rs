@@ -76,6 +76,11 @@ pub struct OperatorConfig {
     pub password: String,
     pub class: String,
     pub local: bool,
+    /// Whitespace-separated priv names (e.g. "KILL REHASH OPMODE").
+    /// Names match nefarious2 `privtab`. When absent, a sensible
+    /// default set is applied at /OPER time (see
+    /// `handlers::query::handle_oper`).
+    pub privs: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +247,7 @@ impl Config {
                             .to_string(),
                         class: block.get_str("class").unwrap_or("Opers").to_string(),
                         local: block.get_bool("local").unwrap_or(true),
+                        privs: block.get_str("privs").map(|s| s.to_string()),
                     });
                 }
 
