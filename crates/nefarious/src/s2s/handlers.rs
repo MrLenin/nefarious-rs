@@ -460,7 +460,7 @@ async fn handle_nick_change(state: &ServerState, msg: &P10Message) {
             irc_proto::Command::Nick,
             vec![new_nick.clone()],
         );
-        let src = crate::tags::SourceInfo::from_remote(&rc);
+        let src = crate::tags::SourceInfo::from_remote(&rc).with_inbound_tags(msg);
 
         for chan_name in &rc.channels {
             if let Some(channel) = state.get_channel(chan_name) {
@@ -938,6 +938,9 @@ async fn parse_burst_members(
             );
             continue;
         };
+        // Burst-synth JOIN uses a fresh SourceInfo — no single inbound
+        // message maps to it (we synthesize one JOIN per member of the
+        // bursted channel list).
         let (prefix, src, account, realname, away_message) = {
             let mut rc = remote_arc.write().await;
             rc.channels.insert(chan.name.clone());
@@ -1091,7 +1094,7 @@ pub async fn handle_privmsg_notice(state: &ServerState, msg: &P10Message) {
             let rc = remote.read().await;
             (
                 rc.prefix(),
-                crate::tags::SourceInfo::from_remote(&rc).with_inbound_tags(msg),
+                crate::tags::SourceInfo::from_remote(&rc).with_inbound_tags(msg).with_inbound_tags(msg),
             )
         } else {
             warn!(
@@ -1191,7 +1194,7 @@ pub async fn handle_join(state: &ServerState, msg: &P10Message) {
     let (prefix, src) = if let Some(remote) = state.remote_clients.get(&numeric) {
         let mut rc = remote.write().await;
         rc.channels.insert(chan_name.to_string());
-        (rc.prefix(), crate::tags::SourceInfo::from_remote(&rc))
+        (rc.prefix(), crate::tags::SourceInfo::from_remote(&rc).with_inbound_tags(msg))
     } else {
         warn!(
             "dropping JOIN for {chan_name}: unknown remote user numeric {numeric}"
@@ -1247,7 +1250,7 @@ pub async fn handle_create(state: &ServerState, msg: &P10Message) {
     let (prefix, src) = if let Some(remote) = state.remote_clients.get(&numeric) {
         let mut rc = remote.write().await;
         rc.channels.insert(chan_name.to_string());
-        (rc.prefix(), crate::tags::SourceInfo::from_remote(&rc))
+        (rc.prefix(), crate::tags::SourceInfo::from_remote(&rc).with_inbound_tags(msg))
     } else {
         warn!(
             "dropping CREATE for {chan_name}: unknown remote user numeric {numeric}"
@@ -1311,7 +1314,7 @@ pub async fn handle_part(state: &ServerState, msg: &P10Message) {
     let (prefix, src) = if let Some(remote) = state.remote_clients.get(&numeric) {
         let mut rc = remote.write().await;
         rc.channels.remove(chan_name);
-        (rc.prefix(), crate::tags::SourceInfo::from_remote(&rc))
+        (rc.prefix(), crate::tags::SourceInfo::from_remote(&rc).with_inbound_tags(msg))
     } else {
         return;
     };
@@ -1396,7 +1399,7 @@ pub async fn handle_kill(state: &ServerState, msg: &P10Message) {
                 irc_proto::Command::Quit,
                 vec![format!("Killed ({reason})")],
             );
-            let src = crate::tags::SourceInfo::from_remote(&rc);
+            let src = crate::tags::SourceInfo::from_remote(&rc).with_inbound_tags(msg);
             for chan_name in &rc.channels {
                 if let Some(channel) = state.get_channel(chan_name) {
                     let chan = channel.read().await;
@@ -1441,7 +1444,7 @@ pub async fn handle_quit(state: &ServerState, msg: &P10Message) {
             irc_proto::Command::Quit,
             vec![reason],
         );
-        let src = crate::tags::SourceInfo::from_remote(&rc);
+        let src = crate::tags::SourceInfo::from_remote(&rc).with_inbound_tags(msg);
 
         // Notify local channel members
         for chan_name in &rc.channels {
@@ -1937,7 +1940,7 @@ pub async fn handle_account(state: &ServerState, msg: &P10Message) {
                 rc.prefix(),
                 rc.channels.clone(),
                 account.clone().unwrap_or_else(|| "*".to_string()),
-                crate::tags::SourceInfo::from_remote(&rc),
+                crate::tags::SourceInfo::from_remote(&rc).with_inbound_tags(msg),
             )
         };
 
@@ -2074,7 +2077,7 @@ pub async fn handle_setname(state: &ServerState, msg: &P10Message) {
         (
             rc.prefix(),
             rc.channels.clone(),
-            crate::tags::SourceInfo::from_remote(&rc),
+            crate::tags::SourceInfo::from_remote(&rc).with_inbound_tags(msg),
         )
     };
     drop(remote);
@@ -2131,7 +2134,7 @@ pub async fn handle_away(state: &ServerState, msg: &P10Message) {
         (
             rc.prefix(),
             rc.channels.clone(),
-            crate::tags::SourceInfo::from_remote(&rc),
+            crate::tags::SourceInfo::from_remote(&rc).with_inbound_tags(msg),
         )
     };
     drop(remote);

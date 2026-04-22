@@ -272,6 +272,7 @@ async fn handle_channel_mode(ctx: &HandlerContext, msg: &Message) {
             chan_name,
             &mode_change,
             &applied_params_s2s,
+            &src,
         )
         .await;
     }
@@ -419,7 +420,17 @@ async fn handle_user_mode(ctx: &HandlerContext, msg: &Message) {
         // (nefarious2 send_umode_out in ircd/s_user.c). The M token
         // is shared with channel MODE; the receiving side disambiguates
         // on whether the first param starts with `#`/`&`.
-        let client_id = ctx.client.read().await.id;
-        crate::s2s::routing::route_user_mode(&ctx.state, client_id, &nick, &mode_change).await;
+        let (client_id, src) = {
+            let c = ctx.client.read().await;
+            (c.id, crate::tags::SourceInfo::from_local(&c))
+        };
+        crate::s2s::routing::route_user_mode(
+            &ctx.state,
+            client_id,
+            &nick,
+            &mode_change,
+            &src,
+        )
+        .await;
     }
 }

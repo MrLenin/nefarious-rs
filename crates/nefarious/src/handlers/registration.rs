@@ -56,7 +56,11 @@ pub async fn handle_nick_change(ctx: &HandlerContext, msg: &Message) {
     }
 
     // Propagate the nick change to the linked server.
-    crate::s2s::routing::route_nick_change(&ctx.state, client_id, &new_nick, nick_ts).await;
+    let src = {
+        let c = ctx.client.read().await;
+        crate::tags::SourceInfo::from_local(&c)
+    };
+    crate::s2s::routing::route_nick_change(&ctx.state, client_id, &new_nick, nick_ts, &src).await;
 
     // Notify the client
     let nick_msg = Message::with_source(&old_prefix, Command::Nick, vec![new_nick.clone()]);

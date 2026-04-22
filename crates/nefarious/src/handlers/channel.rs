@@ -134,8 +134,14 @@ pub async fn handle_join(ctx: &HandlerContext, msg: &Message) {
         // Route to S2S
         {
             let chan = channel.read().await;
-            crate::s2s::routing::route_join(&ctx.state, client_id, chan_name, chan.created_ts)
-                .await;
+            crate::s2s::routing::route_join(
+                &ctx.state,
+                client_id,
+                chan_name,
+                chan.created_ts,
+                &src,
+            )
+            .await;
         }
 
         // Send topic (silent when unset — matches C nefarious m_join.c:290)
@@ -216,7 +222,7 @@ pub async fn handle_part(ctx: &HandlerContext, msg: &Message) {
 
         // Route to S2S now that local state matches what we're telling
         // peers.
-        crate::s2s::routing::route_part(&ctx.state, client_id, chan_name, &reason).await;
+        crate::s2s::routing::route_part(&ctx.state, client_id, chan_name, &reason, &src).await;
 
         // Clean up empty channel
         {
@@ -324,6 +330,7 @@ pub async fn handle_topic(ctx: &HandlerContext, msg: &Message) {
         new_topic,
         &prefix,
         ts_epoch,
+        &src,
     )
     .await;
 }
@@ -427,6 +434,7 @@ pub async fn handle_kick(ctx: &HandlerContext, msg: &Message) {
             chan_name,
             &target_numeric,
             &reason,
+            &src,
         )
         .await;
 
@@ -488,6 +496,7 @@ pub async fn handle_kick(ctx: &HandlerContext, msg: &Message) {
             chan_name,
             &target_numeric.to_string(),
             &reason,
+            &src,
         )
         .await;
 
@@ -695,6 +704,7 @@ pub async fn handle_invite(ctx: &HandlerContext, msg: &Message) {
         client_id,
         &target_numeric_str,
         chan_name,
+        &src,
     )
     .await;
 }

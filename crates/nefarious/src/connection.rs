@@ -132,7 +132,7 @@ pub async fn handle_connection<S>(
     let src = crate::tags::SourceInfo::from_local(&*client.read().await);
 
     // Route QUIT to S2S
-    crate::s2s::routing::route_quit(&state, client_id, &quit_reason).await;
+    crate::s2s::routing::route_quit(&state, client_id, &quit_reason, &src).await;
 
     for chan_name in &channels {
         if let Some(channel) = state.get_channel(chan_name) {

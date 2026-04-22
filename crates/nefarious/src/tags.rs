@@ -240,6 +240,23 @@ pub fn format_server_time(ts: DateTime<Utc>) -> String {
     ts.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
 
+/// Build the compact P10 S2S tag prefix `@A<time_7><msgid_14>` for a
+/// given event. Every `route_*` that propagates a user-visible event
+/// should prepend this so peers broadcast the same `@time`/`@msgid`
+/// to their own clients — preserves network-wide id consistency per
+/// IRCv3 msgid.
+///
+/// Returns a string with no trailing space; callers concatenate with
+/// `" "` before the origin numeric.
+pub fn compact_s2s_tag_prefix(src: &SourceInfo) -> String {
+    let time_ms = src.time.timestamp_millis() as u64;
+    format!(
+        "@A{}{}",
+        p10_proto::inttobase64_64(time_ms, 7),
+        src.msgid
+    )
+}
+
 /// Apply cap-gated tags to `msg` for delivery to `recipient`, based on
 /// `src`. Only modifies `msg` when at least one of the recipient's
 /// active caps demands the tag. The returned message is ready to

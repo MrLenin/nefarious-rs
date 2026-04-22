@@ -404,7 +404,7 @@ pub async fn handle_away(ctx: &HandlerContext, msg: &Message) {
     // away-notify emissions (and so /WHOIS on a remote side shows
     // the 301 "away" numeric). Matches nefarious2 m_away.c:260-326
     // which always emits CMD_AWAY to every peer on state change.
-    crate::s2s::routing::route_away(&ctx.state, client_id, new_state.as_deref()).await;
+    crate::s2s::routing::route_away(&ctx.state, client_id, new_state.as_deref(), &src).await;
 
     if new_state.is_some() {
         ctx.send_numeric(
@@ -470,7 +470,7 @@ pub async fn handle_setname(ctx: &HandlerContext, msg: &Message) {
     // realname and fan setname-notify out to their own channel peers.
     // Matches nefarious2 m_setname.c which emits CMD_SETNAME to servers
     // on every realname change.
-    crate::s2s::routing::route_setname(&ctx.state, client_id, &name).await;
+    crate::s2s::routing::route_setname(&ctx.state, client_id, &name, &src).await;
 }
 
 /// Handle CHGHOST — `CHGHOST <target> <newuser> <newhost>`. Operator-
@@ -702,7 +702,11 @@ pub async fn handle_oper(ctx: &HandlerContext, msg: &Message) {
     // peers can enforce/display the user's granted privileges.
     // Matches nefarious2 m_oper.c which calls send_umode_out followed
     // by client_sendtoserv_privs.
-    crate::s2s::routing::route_user_mode(&ctx.state, client_id, &nick, "+o").await;
+    let src = {
+        let c = ctx.client.read().await;
+        crate::tags::SourceInfo::from_local(&c)
+    };
+    crate::s2s::routing::route_user_mode(&ctx.state, client_id, &nick, "+o", &src).await;
     let priv_refs: Vec<&str> = privs.iter().map(|s| s.as_str()).collect();
     crate::s2s::routing::route_privs(&ctx.state, client_id, &priv_refs).await;
 }
