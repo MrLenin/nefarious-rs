@@ -63,6 +63,9 @@ pub enum P10Token {
     // not mint a short form (see include/msg.h:TOK_PRIVS).
     Privs,
 
+    // Information queries forwarded across servers.
+    Whois,
+
     // Unknown token
     Unknown(String),
 }
@@ -120,6 +123,9 @@ impl P10Token {
             "SR" => P10Token::Setname,
 
             "PRIVS" => P10Token::Privs,
+
+            "W" => P10Token::Whois,
+            "WHOIS" => P10Token::Whois,
 
             // Also accept full command names
             "PASS" => P10Token::Pass,
@@ -199,6 +205,7 @@ impl P10Token {
             P10Token::BouncerTransfer => "BX",
             P10Token::Setname => "SR",
             P10Token::Privs => "PRIVS",
+            P10Token::Whois => "W",
             P10Token::Unknown(s) => s,
         }
     }

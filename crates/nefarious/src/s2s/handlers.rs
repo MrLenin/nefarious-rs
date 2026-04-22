@@ -2287,6 +2287,183 @@ pub async fn handle_invite(state: &ServerState, msg: &P10Message) {
     }
 }
 
+/// Handle W (WHOIS) from a remote user targeting one of our users.
+///
+/// Wire per nefarious2 m_whois.c:550 — `<requester> W [<target_server>]
+/// :<nick_masklist>`. When the target server is specified (parc > 2
+/// after origin), it's the server we're being asked to answer on
+/// behalf of — we only respond if it resolves to us or a user on
+/// us. The nick list is comma-separated; we handle it generically
+/// even though clients usually ask about one nick.
+///
+/// Responses are server-originated numerics routed back to the
+/// requester via their P10 numeric. Wire form:
+///   `<our_server> <NNN> <requester_numeric> <params> :<trailing>`
+///
+/// Emits the same numerics the local /WHOIS handler does — 311
+/// (user), 301 (away), 312 (server), 313 (oper), 319 (channels),
+/// 330 (account), 318 (end).
+pub async fn handle_whois(state: &ServerState, msg: &P10Message) {
+    let Some(ref origin) = msg.origin else { return };
+    let Some(requester) = ClientNumeric::from_str(origin) else {
+        return;
+    };
+    if msg.params.is_empty() {
+        return;
+    }
+
+    // With >1 param the first is a target server/nick mask we're
+    // being routed to answer for; the last is always the nick list.
+    // We accept any target and just answer the last param — hop
+    // routing in a multi-server network would need hunt_server_cmd
+    // logic, but a single-uplink deployment can treat "we got it"
+    // as "it's for us".
+    let nick_list = msg.params.last().unwrap().clone();
+    let our = state.numeric.to_string();
+    let req_str = requester.to_string();
+
+    let mut responded_any = false;
+
+    for nick in nick_list.split(',').filter(|n| !n.is_empty()) {
+        if let Some(target) = state.find_client_by_nick(nick) {
+            let t = target.read().await;
+            responded_any = true;
+
+            // 311 RPL_WHOISUSER — <nick> <user> <host> * :<realname>
+            send_whois_numeric(
+                state,
+                &our,
+                &req_str,
+                311,
+                &[&t.nick, &t.user, &t.host, "*", &t.realname],
+            )
+            .await;
+
+            // 301 RPL_AWAY if away
+            if let Some(ref away) = t.away_message {
+                send_whois_numeric(state, &our, &req_str, 301, &[&t.nick, away]).await;
+            }
+
+            // 312 RPL_WHOISSERVER — <nick> <server> :<server_info>
+            send_whois_numeric(
+                state,
+                &our,
+                &req_str,
+                312,
+                &[&t.nick, &state.server_name, &state.server_description],
+            )
+            .await;
+
+            // 313 RPL_WHOISOPERATOR if +o
+            if t.modes.contains(&'o') {
+                send_whois_numeric(
+                    state,
+                    &our,
+                    &req_str,
+                    313,
+                    &[&t.nick, "is an IRC operator"],
+                )
+                .await;
+            }
+
+            // 330 RPL_WHOISACCOUNT if logged in
+            if let Some(ref account) = t.account {
+                send_whois_numeric(
+                    state,
+                    &our,
+                    &req_str,
+                    330,
+                    &[&t.nick, account, "is logged in as"],
+                )
+                .await;
+            }
+
+            // 319 RPL_WHOISCHANNELS (prefixes + list)
+            if !t.channels.is_empty() {
+                let mut chan_list = Vec::new();
+                for chan_name in &t.channels {
+                    if let Some(channel) = state.get_channel(chan_name) {
+                        let chan = channel.read().await;
+                        if let Some(flags) = chan.members.get(&t.id) {
+                            chan_list.push(format!(
+                                "{}{}",
+                                flags.highest_prefix(),
+                                chan_name
+                            ));
+                        }
+                    }
+                }
+                if !chan_list.is_empty() {
+                    send_whois_numeric(
+                        state,
+                        &our,
+                        &req_str,
+                        319,
+                        &[&t.nick, &chan_list.join(" ")],
+                    )
+                    .await;
+                }
+            }
+
+            // 317 RPL_WHOISIDLE — idle seconds, signon time
+            let idle_secs = (chrono::Utc::now() - t.last_active).num_seconds().max(0);
+            send_whois_numeric(
+                state,
+                &our,
+                &req_str,
+                317,
+                &[
+                    &t.nick,
+                    &idle_secs.to_string(),
+                    &t.connected_at.timestamp().to_string(),
+                    "seconds idle, signon time",
+                ],
+            )
+            .await;
+        } else {
+            // 401 ERR_NOSUCHNICK
+            send_whois_numeric(state, &our, &req_str, 401, &[nick, "No such nick"]).await;
+        }
+    }
+
+    // 318 RPL_ENDOFWHOIS
+    let _ = responded_any;
+    send_whois_numeric(
+        state,
+        &our,
+        &req_str,
+        318,
+        &[&nick_list, "End of /WHOIS list"],
+    )
+    .await;
+}
+
+/// Emit a server-originated numeric over S2S targeting a remote
+/// client. Wire form: `<our_server> <NNN> <target> <params...>`.
+/// The last param is trailing-colon-prefixed if it contains spaces.
+async fn send_whois_numeric(
+    state: &ServerState,
+    our_server: &str,
+    target_numeric: &str,
+    code: u16,
+    params: &[&str],
+) {
+    let Some(link) = state.get_link() else { return };
+    let mut line = format!("{our_server} {code:03} {target_numeric}");
+    for (i, p) in params.iter().enumerate() {
+        let last = i == params.len() - 1;
+        if last && (p.contains(' ') || p.is_empty() || p.starts_with(':')) {
+            line.push(' ');
+            line.push(':');
+            line.push_str(p);
+        } else {
+            line.push(' ');
+            line.push_str(p);
+        }
+    }
+    link.send_line(line).await;
+}
+
 /// Handle DE (DESTRUCT) — channel destruction.
 pub async fn handle_destruct(state: &ServerState, msg: &P10Message) {
     if msg.params.is_empty() {
