@@ -23,6 +23,10 @@ pub async fn run(
     if let Some(spec) = sasl_accounts {
         state_inner.account_store = build_account_store_from_env(&spec).await;
     }
+    // Seed the HLC and msgid-generator YY prefix. Every SourceInfo
+    // will route through this for time + msgid. Must happen before
+    // any client-event SourceInfo is built.
+    crate::tags::init_hlc(state_inner.numeric);
     let state = Arc::new(state_inner);
 
     // Set up SSL acceptor if we have cert/key

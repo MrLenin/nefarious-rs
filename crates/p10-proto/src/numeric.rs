@@ -26,6 +26,21 @@ pub fn inttobase64(value: u32, count: usize) -> String {
     unsafe { String::from_utf8_unchecked(buf) }
 }
 
+/// Encode a 64-bit integer into P10 base64, writing `count` characters.
+/// Used for compact S2S msgid/time encoding — epoch_ms in 7 chars,
+/// 9-char msgid counter, etc. Mirrors nefarious2 `inttobase64_64`.
+pub fn inttobase64_64(value: u64, count: usize) -> String {
+    let mut buf = vec![b'A'; count];
+    let mut v = value;
+    let mut i = count;
+    while i > 0 {
+        i -= 1;
+        buf[i] = ENCODE[(v & 63) as usize];
+        v >>= 6;
+    }
+    unsafe { String::from_utf8_unchecked(buf) }
+}
+
 /// Decode P10 base64 string to integer.
 pub fn base64toint(s: &str) -> u32 {
     let mut v = 0u32;
@@ -34,6 +49,21 @@ pub fn base64toint(s: &str) -> u32 {
             let d = DECODE[b as usize];
             if d < 64 {
                 v = (v << 6) | d as u32;
+            }
+        }
+    }
+    v
+}
+
+/// Decode P10 base64 string to 64-bit integer. Used for parsing
+/// inbound compact S2S tags (`@A<time_7>` → epoch_ms).
+pub fn base64toint_64(s: &str) -> u64 {
+    let mut v = 0u64;
+    for &b in s.as_bytes() {
+        if (b as usize) < 128 {
+            let d = DECODE[b as usize];
+            if d < 64 {
+                v = (v << 6) | d as u64;
             }
         }
     }

@@ -2,10 +2,17 @@ use crate::token::P10Token;
 
 /// A parsed P10 server-to-server message.
 ///
-/// Format: `[<origin>] <token> [<params>...] [:<trailing>]`
+/// Format: `[@<tags>] [<origin>] <token> [<params>...] [:<trailing>]`
 ///
 /// Origin is a numeric prefix: 2 chars for server, 5 chars for user.
 /// During handshake (PASS/SERVER), there is no origin.
+///
+/// IRCv3 message tags can prefix the line (`@k1=v1;k2;k3=v3 …`).
+/// nefarious2 also ships a compact P10-native form
+/// `@A<time_base64_7><msgid_14>` — auto-detected by the absence of
+/// `=`. Both forms populate `tag_time_ms` and `tag_msgid` so handlers
+/// can propagate them onto the local broadcast's SourceInfo without
+/// branching on encoding.
 #[derive(Debug, Clone)]
 pub struct P10Message {
     /// Origin numeric (2 chars = server, 5 chars = user, None = no prefix).
@@ -14,6 +21,12 @@ pub struct P10Message {
     pub token: P10Token,
     /// Parameters (trailing included as last element).
     pub params: Vec<String>,
+    /// `time` tag decoded as epoch milliseconds, when the inbound
+    /// line carried one. Verbose `@time=<iso>` is parsed via
+    /// iso-to-ms; compact `@A<time_7>...` is base64-decoded.
+    pub tag_time_ms: Option<u64>,
+    /// `msgid` tag value, when present.
+    pub tag_msgid: Option<String>,
 }
 
 impl P10Message {
@@ -23,6 +36,8 @@ impl P10Message {
             origin: None,
             token,
             params,
+            tag_time_ms: None,
+            tag_msgid: None,
         }
     }
 
@@ -32,6 +47,8 @@ impl P10Message {
             origin: Some(origin.into()),
             token,
             params,
+            tag_time_ms: None,
+            tag_msgid: None,
         }
     }
 
@@ -44,10 +61,39 @@ impl P10Message {
 
         let mut rest = input;
         let mut origin = None;
+        let mut tag_time_ms: Option<u64> = None;
+        let mut tag_msgid: Option<String> = None;
 
-        // Skip S2S tags (@...) if present
+        // IRCv3 message tags prefix: `@<tags> ...`. nefarious2 emits
+        // the compact form `@A<time_b64_7><msgid_14>` (no `=`); other
+        // IRCv3 peers emit `@key=value;key=value`. Auto-detect by the
+        // presence of `=` in the tag block (mirrors parse.c:1708).
         if rest.starts_with('@') {
             if let Some(space) = rest.find(' ') {
+                let tag_block = &rest[1..space]; // skip the '@'
+                if tag_block.contains('=') {
+                    // Verbose: semicolon-separated key=value pairs.
+                    for tag in tag_block.split(';') {
+                        if let Some((k, v)) = tag.split_once('=') {
+                            match k {
+                                "time" => {
+                                    tag_time_ms = parse_iso_to_ms(v);
+                                }
+                                "msgid" => tag_msgid = Some(v.to_string()),
+                                _ => {}
+                            }
+                        }
+                    }
+                } else if tag_block.len() >= 22 && tag_block.starts_with('A') {
+                    // Compact: A + 7 chars time + 14+ chars msgid.
+                    let time_b64 = &tag_block[1..8];
+                    let msgid = &tag_block[8..];
+                    tag_time_ms = Some(crate::numeric::base64toint_64(time_b64));
+                    // Take the first 14 chars as the primary msgid;
+                    // a trailing multi-msgid block is carried but we
+                    // only surface the head for now.
+                    tag_msgid = Some(msgid.chars().take(14).collect());
+                }
                 rest = rest[space..].trim_start();
             } else {
                 return None;
@@ -107,6 +153,8 @@ impl P10Message {
             origin,
             token,
             params,
+            tag_time_ms,
+            tag_msgid,
         })
     }
 
@@ -204,6 +252,46 @@ fn is_likely_numeric(s: &str) -> bool {
 
 fn is_base64_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'[' || b == b']'
+}
+
+/// Parse ISO 8601 (`YYYY-MM-DDTHH:MM:SS.sssZ`) to epoch milliseconds.
+/// Returns `None` on malformed input; we use this to back-convert the
+/// verbose `@time=` tag form (which nefarious2 still accepts) into
+/// the same u64 our compact-path produces.
+fn parse_iso_to_ms(s: &str) -> Option<u64> {
+    // Minimal handwritten parser — avoids pulling chrono into the
+    // p10-proto crate for one conversion. Matches the format we
+    // ourselves emit (server_time tag): 24 chars, fixed layout.
+    if s.len() < 20 {
+        return None;
+    }
+    let b = s.as_bytes();
+    if b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+    let yr: i64 = s[0..4].parse().ok()?;
+    let mo: u32 = s[5..7].parse().ok()?;
+    let dy: u32 = s[8..10].parse().ok()?;
+    let hr: i64 = s[11..13].parse().ok()?;
+    let mn: i64 = s[14..16].parse().ok()?;
+    let sc: i64 = s[17..19].parse().ok()?;
+    let ms: i64 = if s.len() >= 23 && b[19] == b'.' {
+        s[20..23].parse().ok()?
+    } else {
+        0
+    };
+
+    // Days from 0000-03-01 to the given date (civil-from-ymd trick).
+    let y = if mo <= 2 { yr - 1 } else { yr };
+    let era = y.div_euclid(400);
+    let yoe = (y - era * 400) as i64;
+    let m = mo as i64;
+    let d = dy as i64;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    let secs = days * 86400 + hr * 3600 + mn * 60 + sc;
+    Some((secs * 1000 + ms) as u64)
 }
 
 #[cfg(test)]

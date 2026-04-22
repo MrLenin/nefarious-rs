@@ -22,13 +22,29 @@ pub fn local_numeric(state: &ServerState, client_id: ClientId) -> String {
     .to_string()
 }
 
-/// Route a local PRIVMSG/NOTICE to the S2S link.
+/// Route a local PRIVMSG/NOTICE to the S2S link with compact
+/// nefarious2-native time+msgid tags.
+///
+/// Wire: `@A<time_b64_7><msgid_14> <numeric> P|O <target> :<text>`.
+/// The `A` is a version byte; `time_b64_7` is epoch-ms encoded in 7
+/// P10 base64 chars; `msgid_14` is the 14-char msgid from `src`. See
+/// nefarious2 ircd/send.c `format_s2s_tags` and ircd/parse.c:1708 for
+/// the wire contract.
+///
+/// Verbose `@time=...;msgid=...` is *only* an intermediate form
+/// nefarious2 still parses for backward compat; compact is the
+/// canonical form for a P10 network and the only one we emit.
+///
+/// The msgid on the wire is taken from `src` so every recipient
+/// across the network sees the same id on the broadcast (per IRCv3
+/// msgid: one id per *event*, not per delivery).
 pub async fn route_privmsg(
     state: &ServerState,
     client_id: ClientId,
     target: &str,
     text: &str,
     is_notice: bool,
+    src: &crate::tags::SourceInfo,
 ) {
     let link = match state.get_link() {
         Some(l) => l,
@@ -37,7 +53,13 @@ pub async fn route_privmsg(
 
     let token = if is_notice { "O" } else { "P" };
     let numeric = local_numeric(state, client_id);
-    let line = format!("{numeric} {token} {target} :{text}");
+    let time_ms = src.time.timestamp_millis() as u64;
+    let tag_prefix = format!(
+        "@A{}{}",
+        p10_proto::inttobase64_64(time_ms, 7),
+        src.msgid,
+    );
+    let line = format!("{tag_prefix} {numeric} {token} {target} :{text}");
     link.send_line(line).await;
 }
 

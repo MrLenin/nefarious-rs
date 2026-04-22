@@ -150,6 +150,7 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
                 target,
                 text,
                 cmd == Command::Notice,
+                &src,
             )
             .await;
         }
@@ -176,6 +177,7 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
                 target,
                 text,
                 cmd == Command::Notice,
+                &src,
             )
             .await;
         } else if cmd == Command::Privmsg {

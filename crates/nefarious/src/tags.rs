@@ -17,7 +17,7 @@
 //! value (per the IRCv3 spec — the ID identifies the event, not the
 //! delivery).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use chrono::{DateTime, Utc};
 
@@ -27,25 +27,135 @@ use irc_proto::message::Tag;
 use crate::capabilities::Capability;
 use crate::client::Client;
 
-/// Generate a fresh msgid suitable for the IRCv3 `msgid` tag.
+/// Our server's 2-char P10 base64 YY numeric, set once at startup by
+/// `init_hlc`. `generate_msgid` reads it to prefix every msgid so the
+/// 14-char compact form is globally unique across the network.
+static SERVER_YY: OnceLock<String> = OnceLock::new();
+
+/// Hybrid Logical Clock state (Kulkarni et al. 2014). Pairs a wall-
+/// clock millisecond count with a 16-bit logical counter to produce
+/// network-wide causally-ordered event ids, even with skew and
+/// restarts. Matches nefarious2's `struct HLC` in
+/// `include/crdt_hlc.h`.
 ///
-/// Format: `<13-hex-ms-timestamp>-<6-hex-counter>`. The timestamp gives
-/// natural cross-restart uniqueness plus rough lexicographic ordering;
-/// the atomic counter guarantees uniqueness for events produced within
-/// the same millisecond. 20 chars total, well under the 64-char limit
-/// clients tend to assume.
+/// - `physical_ms` — the largest epoch-ms we've observed. On a local
+///   event, bumped to `max(physical_ms, now)`. On receive, bumped to
+///   `max(physical_ms, remote_ms, now)`.
+/// - `logical` — bumped on same-ms events so ids stay unique and the
+///   `(physical_ms, logical)` pair is monotone. Resets to 0 when
+///   `physical_ms` advances.
+/// - `msgid_counter` — global 54-bit monotonic counter for the `Q`
+///   field of the msgid. Seeded from wall-clock ms at startup so it
+///   keeps advancing across server restarts (no counter resets that
+///   could alias against in-flight ids from a previous generation).
+struct Hlc {
+    physical_ms: u64,
+    logical: u16,
+    msgid_counter: u64,
+}
+
+static HLC: OnceLock<Mutex<Hlc>> = OnceLock::new();
+
+fn wall_clock_ms() -> u64 {
+    Utc::now().timestamp_millis() as u64
+}
+
+/// Initialise the HLC and YY prefix at server startup. Must be called
+/// once before any event can build a SourceInfo. Subsequent calls are
+/// no-ops (OnceLock semantics).
+pub fn init_hlc(numeric: p10_proto::ServerNumeric) {
+    let _ = SERVER_YY.set(numeric.to_string());
+    let now = wall_clock_ms();
+    let _ = HLC.set(Mutex::new(Hlc {
+        physical_ms: now,
+        logical: 0,
+        msgid_counter: now,
+    }));
+}
+
+/// Lazy HLC accessor. Production code calls `init_hlc` at startup so
+/// `SERVER_YY` gets the right value; tests (and any path that invokes
+/// `generate_msgid` before init) get a zero-seeded default. The
+/// absence of a real YY means msgids get the `__` fallback, which is
+/// fine for correctness tests but not for wire use.
+fn hlc() -> &'static Mutex<Hlc> {
+    HLC.get_or_init(|| {
+        let now = wall_clock_ms();
+        Mutex::new(Hlc {
+            physical_ms: now,
+            logical: 0,
+            msgid_counter: now,
+        })
+    })
+}
+
+/// Advance HLC for an originating local event. Returns
+/// `(physical_ms, logical, counter)`. Mirrors nefarious2
+/// `hlc_local_event` + `++MsgIdCounter` in `send.c:generate_msgid`.
+fn hlc_local_event() -> (u64, u16, u64) {
+    let mut hlc = hlc().lock().expect("HLC mutex poisoned");
+    let now = wall_clock_ms();
+    if now > hlc.physical_ms {
+        hlc.physical_ms = now;
+        hlc.logical = 0;
+    } else {
+        hlc.logical = hlc.logical.wrapping_add(1);
+    }
+    hlc.msgid_counter = hlc.msgid_counter.wrapping_add(1);
+    (hlc.physical_ms, hlc.logical, hlc.msgid_counter)
+}
+
+/// Update HLC on receipt of a remote `(physical_ms, logical)`. Takes
+/// `max(now, local.physical_ms, remote.physical_ms)` as the new
+/// physical time; bumps `logical` accordingly so our next local id
+/// sits strictly after the remote event we just observed. Mirrors
+/// nefarious2 `hlc_global_receive`.
+pub fn hlc_receive(remote_ms: u64, remote_logical: u16) {
+    let mut hlc = hlc().lock().expect("HLC mutex poisoned");
+    let now = wall_clock_ms();
+    let max_ms = now.max(hlc.physical_ms).max(remote_ms);
+    let next_logical = if max_ms == hlc.physical_ms && max_ms == remote_ms {
+        hlc.logical.max(remote_logical).wrapping_add(1)
+    } else if max_ms == hlc.physical_ms {
+        hlc.logical.wrapping_add(1)
+    } else if max_ms == remote_ms {
+        remote_logical.wrapping_add(1)
+    } else {
+        0
+    };
+    hlc.physical_ms = max_ms;
+    hlc.logical = next_logical;
+}
+
+/// Advance HLC for a local event and return the matching 14-char
+/// compact msgid + the advanced physical_ms. The two values are
+/// returned together because the `@time` on the S2S wire must reflect
+/// the HLC's state *after* the advance that produced the msgid —
+/// any separate `Utc::now()` call afterwards risks drifting.
 ///
-/// Msgids must be locally unique (spec MUST) and should be network-unique
-/// (spec SHOULD); the timestamp+counter combination satisfies the MUST
-/// directly and the SHOULD probabilistically across mixed-clock nodes.
-/// Cross-server prefixing (using our P10 numeric) is a refinement we can
-/// add when S2S msgid propagation lands — right now msgids are local
-/// only, so the server prefix isn't load-bearing.
-pub fn generate_msgid() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let ts = Utc::now().timestamp_millis() as u64;
-    format!("{:013x}-{:06x}", ts, n & 0xFFFFFF)
+/// Wire layout: `<YY_2><logical_3><counter_9>` — matches
+/// nefarious2 `generate_msgid` in `ircd/send.c`.
+fn generate_msgid_with_time() -> (u64, String) {
+    let (ms, logical, counter) = hlc_local_event();
+    // Fallback `AA` (P10 numeric 0) for test / pre-init paths —
+    // stays within the base64 alphabet so the 14-char msgid parses
+    // anywhere. Real deployments always set SERVER_YY via init_hlc.
+    let yy = SERVER_YY.get().map(|s| s.as_str()).unwrap_or("AA");
+    let msgid = format!(
+        "{yy}{}{}",
+        p10_proto::inttobase64_64(logical as u64, 3),
+        p10_proto::inttobase64_64(counter, 9),
+    );
+    (ms, msgid)
+}
+
+/// Convenience for callers that only need the msgid (UI-side tagging
+/// where we already track the event time separately). Currently only
+/// exercised by tests — production paths always want the paired time
+/// via `SourceInfo`.
+#[cfg(test)]
+fn generate_msgid() -> String {
+    generate_msgid_with_time().1
 }
 
 /// Event metadata needed by IRCv3 tag attachment.
@@ -64,35 +174,61 @@ pub struct SourceInfo {
 }
 
 impl SourceInfo {
-    /// Build a SourceInfo with `time` = now and no account. Useful for
-    /// events that don't have a user source (server notices, etc.).
+    /// Internal: build a SourceInfo with `time` and `msgid` taken
+    /// from the same HLC advance, so the two always agree on the
+    /// wire. Any constructor that represents an "originating here"
+    /// event should route through this.
+    fn fresh(account: Option<String>) -> Self {
+        let (ms, msgid) = generate_msgid_with_time();
+        // The HLC stores physical_ms which is always an epoch-ms in
+        // the valid range; from_timestamp_millis only fails on
+        // implausibly-distant values. Fall back to Utc::now on the
+        // near-impossible overflow case.
+        let time = DateTime::from_timestamp_millis(ms as i64).unwrap_or_else(Utc::now);
+        Self { time, account, msgid }
+    }
+
+    /// Build a SourceInfo with `time` = HLC-advanced now and no
+    /// account. Useful for events that don't have a user source
+    /// (server notices, etc.).
     pub fn now() -> Self {
-        Self {
-            time: Utc::now(),
-            account: None,
-            msgid: generate_msgid(),
-        }
+        Self::fresh(None)
     }
 
-    /// Build from a local client: `time` = now, account pulled from
-    /// the Client struct.
+    /// Build from a local client: `time` = HLC-advanced now, account
+    /// pulled from the Client struct.
     pub fn from_local(client: &Client) -> Self {
-        Self {
-            time: Utc::now(),
-            account: client.account.clone(),
-            msgid: generate_msgid(),
-        }
+        Self::fresh(client.account.clone())
     }
 
-    /// Build from a remote client: `time` = now (i.e. when we
-    /// processed the s2s event), account pulled from the RemoteClient
-    /// struct populated during P10 burst / ACCOUNT updates.
+    /// Build from a remote client: default to an HLC-advanced now;
+    /// callers should chain `.with_inbound_tags(msg)` so the
+    /// network-originated time+msgid overrides ours and we relay the
+    /// same ids the upstream server put on the wire.
     pub fn from_remote(remote: &crate::s2s::types::RemoteClient) -> Self {
-        Self {
-            time: Utc::now(),
-            account: remote.account.clone(),
-            msgid: generate_msgid(),
+        Self::fresh(remote.account.clone())
+    }
+
+    /// Override `time` / `msgid` from a parsed inbound P10 message's
+    /// tag block, when present. Preserves network-wide msgid
+    /// consistency: a PRIVMSG we relay to local clients carries the
+    /// *same* `@msgid` the originating server put on the wire, not
+    /// a fresh one we'd generate locally. Intended as a fluent
+    /// chain on top of `from_remote`:
+    ///
+    /// ```ignore
+    /// let src = SourceInfo::from_remote(&rc).with_inbound_tags(msg);
+    /// ```
+    pub fn with_inbound_tags(mut self, msg: &p10_proto::P10Message) -> Self {
+        if let Some(ms) = msg.tag_time_ms {
+            if let Some(dt) = DateTime::from_timestamp_millis(ms as i64) {
+                self.time = dt;
+            }
         }
+        if let Some(ref mid) = msg.tag_msgid {
+            self.msgid = mid.clone();
+        }
+        self
     }
 }
 
@@ -156,13 +292,14 @@ mod tests {
         let a = generate_msgid();
         let b = generate_msgid();
         assert_ne!(a, b);
-        // Format check: 13 hex, dash, 6 hex.
-        assert!(a.len() == 20, "unexpected msgid length: {a}");
-        let (ts, ctr) = a.split_once('-').expect("msgid should contain '-'");
-        assert_eq!(ts.len(), 13);
-        assert_eq!(ctr.len(), 6);
-        u64::from_str_radix(ts, 16).expect("timestamp half must be hex");
-        u64::from_str_radix(ctr, 16).expect("counter half must be hex");
+        // Compact P10 form: exactly 14 P10 base64 chars (YY + logical + counter).
+        assert_eq!(a.len(), 14, "unexpected msgid length: {a}");
+        for c in a.chars() {
+            assert!(
+                c.is_ascii_alphanumeric() || c == '[' || c == ']',
+                "msgid char {c:?} outside P10 base64 alphabet"
+            );
+        }
     }
 
     #[test]

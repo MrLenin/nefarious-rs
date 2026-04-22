@@ -1083,10 +1083,16 @@ pub async fn handle_privmsg_notice(state: &ServerState, msg: &P10Message) {
 
     // Find the remote sender, capturing the prefix AND the account so
     // cap-gated tags (@account) resolve correctly per recipient.
+    // Reuse the inbound msgid/time tags if the peer attached them,
+    // so our local clients see the *same* @msgid the originating
+    // server put on the wire — preserves network-wide id consistency.
     let (sender_prefix, src) = if let Some(numeric) = ClientNumeric::from_str(origin) {
         if let Some(remote) = state.remote_clients.get(&numeric) {
             let rc = remote.read().await;
-            (rc.prefix(), crate::tags::SourceInfo::from_remote(&rc))
+            (
+                rc.prefix(),
+                crate::tags::SourceInfo::from_remote(&rc).with_inbound_tags(msg),
+            )
         } else {
             warn!(
                 "dropping PRIVMSG/NOTICE to {target}: unknown remote origin numeric {numeric}"

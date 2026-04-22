@@ -197,6 +197,18 @@ pub async fn handle_server_link<S>(
             }
         };
 
+        // If the peer carried a compact tag block (`@A<time><msgid>`)
+        // the parser decoded the physical_ms and msgid. The `LLL`
+        // logical field is the 3 base64 chars at offset 2 of the
+        // msgid. Feed that into the HLC so our next local event ids
+        // are strictly ordered after this remote event.
+        if let (Some(ms), Some(mid)) = (msg.tag_time_ms, msg.tag_msgid.as_deref()) {
+            if mid.len() >= 5 {
+                let logical = p10_proto::base64toint(&mid[2..5]) as u16;
+                crate::tags::hlc_receive(ms, logical);
+            }
+        }
+
         match &msg.token {
             P10Token::Server => {
                 super::handlers::handle_server(&state, &msg).await;
