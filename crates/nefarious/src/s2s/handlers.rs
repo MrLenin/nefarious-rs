@@ -2180,6 +2180,27 @@ pub async fn handle_invite(state: &ServerState, msg: &P10Message) {
     let target_str = &msg.params[0];
     let chan_name = &msg.params[1];
 
+    // Optional trailing channel-creation TS. Per nefarious2 m_invite.c
+    // 309-312, silently discard the invite if invite_ts > our
+    // chan.created_ts — that means the sender's view of the channel
+    // is newer than ours (e.g. they recreated it) and their invite
+    // targets a channel that effectively no longer exists on this side.
+    if let Some(ts_str) = msg.params.get(2) {
+        if let Ok(invite_ts) = ts_str.parse::<u64>() {
+            if let Some(channel) = state.get_channel(chan_name) {
+                let chan = channel.read().await;
+                if invite_ts > chan.created_ts {
+                    debug!(
+                        "handle_invite: dropping stale invite to {chan_name} \
+                         (invite_ts={invite_ts} > chan.created_ts={})",
+                        chan.created_ts
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
     let source_prefix = get_source_prefix(state, msg).await;
     let src = source_info_from_origin(state, msg).await;
 

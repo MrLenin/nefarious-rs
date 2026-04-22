@@ -212,13 +212,23 @@ pub async fn route_mode(
     link.send_line(line).await;
 }
 
-/// Route a local INVITE to the S2S link. The target numeric identifies the
-/// remote or local user being invited.
+/// Route a local INVITE to the S2S link.
+///
+/// Wire format per nefarious2 m_invite.c:237 — `<inviter> I <nick>
+/// <channel> <chan_ts>`. The target is carried as a *nick*, not a
+/// numeric (`FindUser(parv[1])` in the server handler looks it up
+/// by name), and the channel's creation timestamp is required so
+/// peers can silently discard invites that arrive after a channel
+/// has been recreated (m_invite.c:309-312).
+///
+/// We previously sent the target as a numeric and omitted the TS;
+/// the peer failed the FindUser and returned `401 :No such nick`.
 pub async fn route_invite(
     state: &ServerState,
     client_id: ClientId,
-    target_numeric: &str,
+    target_nick: &str,
     channel: &str,
+    chan_ts: u64,
     src: &SourceInfo,
 ) {
     let link = match state.get_link() {
@@ -229,7 +239,7 @@ pub async fn route_invite(
     let numeric = local_numeric(state, client_id);
     let tag_prefix = compact_s2s_tag_prefix(src);
     link.send_line(format!(
-        "{tag_prefix} {numeric} I {target_numeric} {channel}"
+        "{tag_prefix} {numeric} I {target_nick} {channel} {chan_ts}"
     ))
     .await;
 }

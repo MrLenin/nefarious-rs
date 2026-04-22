@@ -692,18 +692,19 @@ pub async fn handle_invite(ctx: &HandlerContext, msg: &Message) {
 
     // Route to S2S so the target's server (local or remote) delivers
     // the INVITE to its user. For a local target we still route so
-    // other peers can drive their own invite-notify fan-outs.
-    let target_numeric_str = match &target {
-        InviteTarget::Local { id, .. } => {
-            crate::s2s::routing::local_numeric(&ctx.state, *id)
-        }
-        InviteTarget::Remote { numeric, .. } => numeric.to_string(),
+    // other peers can drive their own invite-notify fan-outs. The
+    // wire uses the target's *nick* (not numeric) plus the channel's
+    // creation TS — see route_invite doc comment.
+    let chan_ts = {
+        let c = channel.read().await;
+        c.created_ts
     };
     crate::s2s::routing::route_invite(
         &ctx.state,
         client_id,
-        &target_numeric_str,
+        &canonical_nick,
         chan_name,
+        chan_ts,
         &src,
     )
     .await;
