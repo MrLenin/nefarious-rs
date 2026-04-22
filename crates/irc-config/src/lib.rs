@@ -121,6 +121,25 @@ impl Config {
         self.feature("NETWORK").unwrap_or(&self.general.name)
     }
 
+    /// `HIS_SERVERNAME` — the pseudo-server string shown to non-opers
+    /// in WHOIS 312, LINKS, and similar paths that would otherwise
+    /// reveal the user's home server hostname. `None` means "don't
+    /// hide" and callers should use the real server name.
+    ///
+    /// Common deployments set this to the network hostname (e.g.
+    /// `*.AfterNET.org`) so cross-network users see consistent output
+    /// regardless of which edge server they're actually on.
+    pub fn his_servername(&self) -> Option<&str> {
+        self.feature("HIS_SERVERNAME")
+    }
+
+    /// `HIS_SERVERINFO` — the pseudo server description shown
+    /// alongside `HIS_SERVERNAME` in WHOIS 312 / LINKS when hiding
+    /// is in effect.
+    pub fn his_serverinfo(&self) -> Option<&str> {
+        self.feature("HIS_SERVERINFO")
+    }
+
     /// Load a configuration from a file path, resolving includes.
     pub fn from_file(path: &Path) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path).map_err(|e| ConfigError::Io(e.to_string()))?;

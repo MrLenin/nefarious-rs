@@ -2322,6 +2322,16 @@ pub async fn handle_whois(state: &ServerState, msg: &P10Message) {
     let our = state.numeric.to_string();
     let req_str = requester.to_string();
 
+    // Is the remote requester an oper? Skip HIS_* hiding in that
+    // case. Self-WHOIS over S2S can't happen (requester must be on
+    // another server), so the "target == requester" branch doesn't
+    // apply here.
+    let requester_is_oper = if let Some(rc) = state.remote_clients.get(&requester) {
+        rc.read().await.modes.contains(&'o')
+    } else {
+        false
+    };
+
     let mut responded_any = false;
 
     for nick in nick_list.split(',').filter(|n| !n.is_empty()) {
@@ -2329,13 +2339,19 @@ pub async fn handle_whois(state: &ServerState, msg: &P10Message) {
             let t = target.read().await;
             responded_any = true;
 
+            let host = if requester_is_oper {
+                t.host.clone()
+            } else {
+                t.visible_host(&state.config)
+            };
+
             // 311 RPL_WHOISUSER — <nick> <user> <host> * :<realname>
             send_whois_numeric(
                 state,
                 &our,
                 &req_str,
                 311,
-                &[&t.nick, &t.user, &t.host, "*", &t.realname],
+                &[&t.nick, &t.user, &host, "*", &t.realname],
             )
             .await;
 
@@ -2345,12 +2361,20 @@ pub async fn handle_whois(state: &ServerState, msg: &P10Message) {
             }
 
             // 312 RPL_WHOISSERVER — <nick> <server> :<server_info>
+            let (srv_name, srv_desc) = if requester_is_oper {
+                (state.server_name.as_str(), state.server_description.as_str())
+            } else {
+                (
+                    state.config.his_servername().unwrap_or(&state.server_name),
+                    state.config.his_serverinfo().unwrap_or(&state.server_description),
+                )
+            };
             send_whois_numeric(
                 state,
                 &our,
                 &req_str,
                 312,
-                &[&t.nick, &state.server_name, &state.server_description],
+                &[&t.nick, srv_name, srv_desc],
             )
             .await;
 

@@ -149,15 +149,24 @@ pub async fn handle_whois(ctx: &HandlerContext, msg: &Message) {
         &msg.params[0]
     };
 
+    // Whether the requester gets to see unhidden info. Opers always
+    // see real hosts/server names; a user WHOIS'ing themselves also
+    // does (so their own /WHOIS shows their real IP and server).
+    let show_real = {
+        let c = ctx.client.read().await;
+        c.modes.contains(&'o') || irc_proto::irc_eq(&c.nick, nick)
+    };
+
     // Try local first, then fall back to remote users seen via P10 burst.
     if let Some(target) = ctx.state.find_client_by_nick(nick) {
         let t = target.read().await;
+        let host = if show_real { t.host.clone() } else { t.visible_host(&ctx.state.config) };
         ctx.send_numeric(
             RPL_WHOISUSER,
             vec![
                 t.nick.clone(),
                 t.user.clone(),
-                t.host.clone(),
+                host,
                 "*".to_string(),
                 t.realname.clone(),
             ],
@@ -166,13 +175,17 @@ pub async fn handle_whois(ctx: &HandlerContext, msg: &Message) {
         if let Some(ref away) = t.away_message {
             ctx.send_numeric(RPL_AWAY, vec![t.nick.clone(), away.clone()]).await;
         }
+        let (srv_name, srv_desc) = if show_real {
+            (ctx.state.server_name.clone(), ctx.state.server_description.clone())
+        } else {
+            (
+                ctx.state.config.his_servername().unwrap_or(&ctx.state.server_name).to_string(),
+                ctx.state.config.his_serverinfo().unwrap_or(&ctx.state.server_description).to_string(),
+            )
+        };
         ctx.send_numeric(
             RPL_WHOISSERVER,
-            vec![
-                t.nick.clone(),
-                ctx.state.server_name.clone(),
-                ctx.state.server_description.clone(),
-            ],
+            vec![t.nick.clone(), srv_name, srv_desc],
         )
         .await;
         if t.modes.contains(&'o') {
@@ -244,16 +257,37 @@ pub async fn handle_whois(ctx: &HandlerContext, msg: &Message) {
         if let Some(ref away) = r.away_message {
             ctx.send_numeric(RPL_AWAY, vec![r.nick.clone(), away.clone()]).await;
         }
-        let server_info = ctx
-            .state
-            .remote_servers
-            .get(&r.server)
-            .map(|e| e.value().clone());
-        let (server_name, server_desc) = if let Some(s) = server_info {
-            let s = s.read().await;
-            (s.name.clone(), s.description.clone())
+        let (server_name, server_desc) = if show_real {
+            let server_info = ctx
+                .state
+                .remote_servers
+                .get(&r.server)
+                .map(|e| e.value().clone());
+            if let Some(s) = server_info {
+                let s = s.read().await;
+                (s.name.clone(), s.description.clone())
+            } else {
+                (ctx.state.server_name.clone(), String::new())
+            }
         } else {
-            (ctx.state.server_name.clone(), String::new())
+            // Non-oper, not self: hide the remote user's home server
+            // if HIS_SERVERNAME is configured. Fall back to the real
+            // server name if not (matches C behaviour when the
+            // feature is unset).
+            let server_info = ctx
+                .state
+                .remote_servers
+                .get(&r.server)
+                .map(|e| e.value().clone());
+            let real_name = if let Some(s) = server_info {
+                s.read().await.name.clone()
+            } else {
+                ctx.state.server_name.clone()
+            };
+            (
+                ctx.state.config.his_servername().unwrap_or(&real_name).to_string(),
+                ctx.state.config.his_serverinfo().unwrap_or("").to_string(),
+            )
         };
         ctx.send_numeric(
             RPL_WHOISSERVER,

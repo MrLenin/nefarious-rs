@@ -172,6 +172,30 @@ impl Client {
         }
     }
 
+    /// Return the host string to render for this client when the
+    /// audience isn't themselves or an oper. Mirrors the C hiding
+    /// chain in nefarious2 s_user.c `hide_hostmask`:
+    ///
+    /// - `+x` + account + configured `hidden_host_suffix`
+    ///   → `<account>.<suffix>`
+    /// - `+x` without the above (e.g. no account or no config)
+    ///   → real host as-is (proper IP-hex cloak is a follow-up)
+    /// - no `+x` → real host
+    ///
+    /// Callers that want the real host unconditionally (self-WHOIS,
+    /// oper-vision, IAuth logs) should read `self.host` directly.
+    pub fn visible_host(&self, config: &irc_config::Config) -> String {
+        if self.modes.contains(&'x') {
+            if let (Some(account), Some(suffix)) = (
+                self.account.as_ref(),
+                config.general.hidden_host_suffix.as_ref(),
+            ) {
+                return format!("{account}.{suffix}");
+            }
+        }
+        self.host.clone()
+    }
+
     /// Send a message to this client, bypassing the labeled-response
     /// capture. Used by the flush code itself and by tasks that
     /// explicitly want to avoid buffering. Normal sends should go
