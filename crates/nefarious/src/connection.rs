@@ -298,7 +298,7 @@ async fn send_welcome(client: &Arc<RwLock<Client>>, state: &ServerState) {
         RPL_WELCOME,
         vec![format!(
             "Welcome to the {} Internet Relay Chat Network {}",
-            server,
+            state.config.network(),
             c.prefix()
         )],
     );

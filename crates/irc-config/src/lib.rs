@@ -103,6 +103,24 @@ pub struct ConnectConfig {
 }
 
 impl Config {
+    /// Look up a Features block entry by key (case-insensitive), as
+    /// nefarious2 treats feature names case-insensitively. Returns
+    /// the raw value string if present.
+    pub fn feature(&self, key: &str) -> Option<&str> {
+        self.features
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Convenience: the NETWORK feature value, falling back to the
+    /// server name when unset. Used for RPL_WELCOME and ISUPPORT
+    /// NETWORK= so the user sees the network brand rather than the
+    /// individual server's hostname.
+    pub fn network(&self) -> &str {
+        self.feature("NETWORK").unwrap_or(&self.general.name)
+    }
+
     /// Load a configuration from a file path, resolving includes.
     pub fn from_file(path: &Path) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path).map_err(|e| ConfigError::Io(e.to_string()))?;

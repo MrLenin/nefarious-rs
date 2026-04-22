@@ -695,7 +695,7 @@ impl ServerState {
             "CHANLIMIT=#:100".to_string(),
             "CHANMODES=b,k,l,imnpst".to_string(),
             "CHANNELLEN=200".to_string(),
-            format!("NETWORK={}", self.server_name),
+            format!("NETWORK={}", self.config.network()),
             "NICKLEN=30".to_string(),
             "PREFIX=(ov)@+".to_string(),
             "TOPICLEN=390".to_string(),
