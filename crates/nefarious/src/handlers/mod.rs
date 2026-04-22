@@ -32,11 +32,12 @@ impl HandlerContext {
     /// Dispatch a message to the appropriate handler.
     ///
     /// If the inbound message carries an `@label=...` tag and the
-    /// client has the `labeled-response` cap enabled, a per-dispatch
-    /// label buffer is activated on the Client. All subsequent
-    /// `send`/`send_from` calls targeting this client are captured
-    /// into the buffer rather than flushed. When the handler returns
-    /// we pick the spec-correct shape by reply count:
+    /// client has the `labeled-response` cap enabled, a task-local
+    /// label capture is scoped over the handler run. Only sends the
+    /// dispatching task makes to the originating client are
+    /// captured — broadcasts from other tasks and sends from this
+    /// task to other clients bypass the buffer. When the handler
+    /// returns we pick the spec-correct shape by reply count:
     ///
     /// - 0 replies → `@label=X :server ACK`
     /// - 1 reply  → attach `@label=X` to the reply, emit as-is
@@ -55,18 +56,49 @@ impl HandlerContext {
             .find(|t| t.key == "label")
             .and_then(|t| t.value.clone());
 
-        let buffering = if let Some(ref lbl) = label {
-            let c = self.client.read().await;
-            if c.has_cap(Capability::LabeledResponse) {
-                c.begin_label_buffer(lbl.clone());
-                true
+        let originator_id = self.client.read().await.id;
+        let capture_label = if let Some(ref lbl) = label {
+            if self.client.read().await.has_cap(Capability::LabeledResponse) {
+                Some(lbl.clone())
             } else {
-                false
+                None
             }
         } else {
-            false
+            None
         };
 
+        if let Some(lbl) = capture_label {
+            let capture = std::sync::Mutex::new(crate::client::LabelCapture {
+                originator_id,
+                label: lbl,
+                replies: Vec::new(),
+            });
+            crate::client::LABEL_CAPTURE
+                .scope(capture, async {
+                    self.dispatch_inner(msg).await;
+                    // Flush while still inside the scope so send_raw
+                    // (which doesn't consult the capture) goes directly
+                    // to mpsc — otherwise any nested send via `send()`
+                    // from flush helpers would recurse into the
+                    // capture. We take the payload out first.
+                    let captured = crate::client::LABEL_CAPTURE.with(|cell| {
+                        let mut guard = cell.lock().expect("label capture mutex poisoned");
+                        crate::client::LabelCapture {
+                            originator_id: guard.originator_id,
+                            label: std::mem::take(&mut guard.label),
+                            replies: std::mem::take(&mut guard.replies),
+                        }
+                    });
+                    let c = self.client.read().await;
+                    flush_label_capture(&self.state.server_name, &c, captured).await;
+                })
+                .await;
+        } else {
+            self.dispatch_inner(msg).await;
+        }
+    }
+
+    async fn dispatch_inner(&self, msg: &Message) {
         let ctx = HandlerContext {
             state: Arc::clone(&self.state),
             client: Arc::clone(&self.client),
@@ -165,16 +197,6 @@ impl HandlerContext {
             }
         }
 
-        // Flush the labeled-response buffer. The buffer is per-Client
-        // so another task broadcasting to this client during the
-        // handler will also be captured — that's accepted leakage;
-        // dispatches are short and broadcast-during-dispatch is rare.
-        if buffering {
-            let c = self.client.read().await;
-            if let Some(buf) = c.take_label_buffer() {
-                flush_label_buffer(&self.state.server_name, &c, buf).await;
-            }
-        }
     }
 
     /// Helper: read client nick.
@@ -297,7 +319,7 @@ impl HandlerContext {
     }
 }
 
-/// Flush a labeled-response buffer in the shape dictated by reply
+/// Flush a labeled-response capture in the shape dictated by reply
 /// count, per IRCv3 labeled-response spec:
 ///
 /// - 0 replies → `@label=X :server ACK`  (empty-response ack)
@@ -306,11 +328,16 @@ impl HandlerContext {
 ///              followed by each reply tagged `@batch=id`, closed
 ///              by `:server BATCH -id`
 ///
-/// Uses `send_raw` to bypass the buffer — otherwise the flush output
-/// would recursively land back in the same (now-empty) buffer.
-async fn flush_label_buffer(server_name: &str, client: &Client, buf: crate::client::LabelBuffer) {
+/// Uses `send_raw` to bypass the capture — the task-local is still
+/// set during flush (we flush inside the scope), so ordinary `send`
+/// would loop the messages back into the capture we just drained.
+async fn flush_label_capture(
+    server_name: &str,
+    client: &Client,
+    cap: crate::client::LabelCapture,
+) {
     use irc_proto::message::Tag;
-    let crate::client::LabelBuffer { label, replies } = buf;
+    let crate::client::LabelCapture { label, replies, .. } = cap;
     match replies.len() {
         0 => {
             let mut ack = Message::with_source(server_name, Command::Ack, Vec::new());

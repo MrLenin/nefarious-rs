@@ -106,25 +106,33 @@ pub struct Client {
     /// (Phase 3.3) to map the certificate to an account without
     /// requiring a password.
     pub tls_cert_cn: Option<String>,
-    /// Active labeled-response capture. When `Some`, every call to
-    /// `send` pushes the message into the buffer instead of flushing
-    /// to the outbound queue. The dispatcher sets this at the start
-    /// of handling a labeled command and takes it back at the end,
-    /// choosing the ACK / single-with-label / batch-wrapped shape by
-    /// reply count. Interior mutability via `Mutex` because `send` is
-    /// called through `&self`.
-    pub label_buffer: std::sync::Mutex<Option<LabelBuffer>>,
 }
 
-/// Buffered replies to a client's labeled-response command.
+/// Per-dispatch labeled-response capture.
 ///
-/// `replies` contains the outbound messages that `send()` intercepted
-/// while the buffer was active. `label` is the `@label` value that
-/// must come back to the client on whichever final form the flush
-/// picks (ACK / single message / BATCH opener).
-pub struct LabelBuffer {
+/// Lives in a `tokio::task_local!` set by the dispatcher for the
+/// duration of handling a labeled command, rather than on the
+/// `Client` struct. This scopes capture to the dispatching task —
+/// sends from any other task (S2S reader, another client's
+/// dispatcher, keepalive timers) targeting the same client bypass
+/// the buffer and go straight to the outbound queue, which is the
+/// correct behaviour: those aren't replies to the labeled command.
+///
+/// `originator_id` lets `Client::send` cheaply filter out sends the
+/// dispatching task makes to *other* clients (e.g. channel fan-out
+/// broadcasts). Only sends to the originator are buffered.
+pub struct LabelCapture {
+    pub originator_id: ClientId,
     pub label: String,
     pub replies: Vec<Message>,
+}
+
+tokio::task_local! {
+    /// Active label capture for the current dispatch task, if any.
+    /// `Mutex` because `Client::send` takes `&self` and the value
+    /// needs interior mutability; contention is essentially nil
+    /// since only the dispatching task accesses its own task-local.
+    pub static LABEL_CAPTURE: std::sync::Mutex<LabelCapture>;
 }
 
 impl Client {
@@ -161,39 +169,13 @@ impl Client {
             batch_counter: AtomicU32::new(1),
             sasl_mechanism: None,
             tls_cert_cn: None,
-            label_buffer: std::sync::Mutex::new(None),
         }
     }
 
-    /// Start buffering outgoing messages against a labeled-response
-    /// dispatch. Subsequent `send` calls push into the buffer rather
-    /// than flushing to the outbound queue. Caller must pair this
-    /// with `take_label_buffer` in the same dispatch to avoid
-    /// stranding replies.
-    pub fn begin_label_buffer(&self, label: String) {
-        *self
-            .label_buffer
-            .lock()
-            .expect("label buffer mutex poisoned") = Some(LabelBuffer {
-            label,
-            replies: Vec::new(),
-        });
-    }
-
-    /// End label buffering and return the captured replies (if any).
-    /// Returns `None` if `begin_label_buffer` was never called — safe
-    /// to call defensively.
-    pub fn take_label_buffer(&self) -> Option<LabelBuffer> {
-        self.label_buffer
-            .lock()
-            .expect("label buffer mutex poisoned")
-            .take()
-    }
-
-    /// Send a message to this client, bypassing the label buffer.
-    /// Used by the label-flush code itself — without this, flushing
-    /// would recursively buffer. Normal sends should go through
-    /// `send()`.
+    /// Send a message to this client, bypassing the labeled-response
+    /// capture. Used by the flush code itself and by tasks that
+    /// explicitly want to avoid buffering. Normal sends should go
+    /// through `send()`.
     pub fn send_raw(&self, msg: Message) {
         use tokio::sync::mpsc::error::TrySendError;
         if let Err(TrySendError::Full(_)) = self.sender.try_send(msg) {
@@ -239,21 +221,37 @@ impl Client {
 
     /// Send a message to this client (non-blocking).
     ///
-    /// If a labeled-response buffer is active for this client the
-    /// message is captured there for the dispatcher to flush later;
-    /// otherwise it goes straight to the outbound queue. If the queue
-    /// is full the client is disconnected with "SendQ exceeded" —
-    /// dropping messages silently would cause state drift with the
-    /// rest of the network. `TrySendError::Closed` means the writer
-    /// task already exited, so there is nothing more to do.
+    /// If the current task has an active labeled-response capture
+    /// AND this client is the originator of the labeled command,
+    /// the message is captured for later flush. All other paths
+    /// (unrelated broadcasts from the S2S reader, other clients'
+    /// dispatchers, keepalive timers — none of which are in the
+    /// dispatching task) bypass the buffer and go straight to the
+    /// outbound queue. If the queue is full the client is
+    /// disconnected with "SendQ exceeded" — dropping messages
+    /// silently would cause state drift with the rest of the
+    /// network.
     pub fn send(&self, msg: Message) {
-        if let Ok(mut guard) = self.label_buffer.lock() {
-            if let Some(buf) = guard.as_mut() {
-                buf.replies.push(msg);
-                return;
-            }
+        if self.try_buffer_for_label(&msg) {
+            return;
         }
         self.send_raw(msg);
+    }
+
+    /// Push `msg` into the active labeled-response capture if we are
+    /// inside the dispatching task AND this client is the originator
+    /// of the labeled command. Returns true when captured.
+    fn try_buffer_for_label(&self, msg: &Message) -> bool {
+        LABEL_CAPTURE
+            .try_with(|cell| {
+                let mut guard = cell.lock().expect("label capture mutex poisoned");
+                if guard.originator_id != self.id {
+                    return false;
+                }
+                guard.replies.push(msg.clone());
+                true
+            })
+            .unwrap_or(false)
     }
 
     /// Send a user-originated event (PRIVMSG, NOTICE, JOIN, PART, …)
