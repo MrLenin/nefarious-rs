@@ -206,11 +206,6 @@ impl Channel {
         self.members.is_empty() && self.remote_members.is_empty()
     }
 
-    /// Total member count (local + remote).
-    pub fn total_members(&self) -> usize {
-        self.members.len() + self.remote_members.len()
-    }
-
     /// Check if a client can send to this channel.
     pub fn can_send(&self, id: &ClientId) -> bool {
         if !self.modes.no_external && !self.is_member(id) {

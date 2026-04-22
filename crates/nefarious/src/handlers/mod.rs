@@ -275,23 +275,27 @@ impl HandlerContext {
     /// numerics).
     ///
     /// Wire: `FAIL <command> <code> [<context>...] :<description>`.
+    #[allow(dead_code)]
     pub async fn fail(&self, command: &str, code: &str, context: &[&str], description: &str) {
         self.standard_reply(Command::Fail, command, code, context, description)
             .await;
     }
 
     /// IRCv3 standard-replies WARN.
+    #[allow(dead_code)]
     pub async fn warn(&self, command: &str, code: &str, context: &[&str], description: &str) {
         self.standard_reply(Command::Warn, command, code, context, description)
             .await;
     }
 
     /// IRCv3 standard-replies NOTE.
+    #[allow(dead_code)]
     pub async fn note(&self, command: &str, code: &str, context: &[&str], description: &str) {
         self.standard_reply(Command::Note, command, code, context, description)
             .await;
     }
 
+    #[allow(dead_code)]
     async fn standard_reply(
         &self,
         verb: Command,

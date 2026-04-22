@@ -1,6 +1,6 @@
 use tracing::{info, warn};
 
-use p10_proto::numeric::{capacity_to_base64, ip_to_base64};
+use p10_proto::numeric::ip_to_base64;
 
 use crate::s2s::types::ServerLink;
 use crate::state::ServerState;

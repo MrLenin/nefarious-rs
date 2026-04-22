@@ -1,6 +1,11 @@
-/// IRC numeric reply codes.
-///
-/// These follow RFC 2812 and Nefarious extensions.
+//! IRC numeric reply codes.
+//!
+//! These follow RFC 2812 and Nefarious extensions. The module is
+//! maintained as a complete reference registry, so some constants
+//! aren't referenced by current code paths — enable them as handlers
+//! grow without churning the definitions.
+
+#![allow(dead_code)]
 
 // Connection registration
 pub const RPL_WELCOME: u16 = 1;

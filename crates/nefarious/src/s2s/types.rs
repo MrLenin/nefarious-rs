@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
@@ -13,7 +12,13 @@ pub struct RemoteServer {
     pub hop_count: u16,
     pub description: String,
     pub uplink: ServerNumeric,
+    /// Server start timestamp from the SERVER/S intro. Consumed by
+    /// /LINKS output once we implement it; retained at burst time.
+    #[allow(dead_code)]
     pub timestamp: u64,
+    /// Server feature flags (hub, ipv6, oplevels, service) from the
+    /// SERVER line. Consumed by /LINKS and feature-gating remote opers.
+    #[allow(dead_code)]
     pub flags: ServerFlags,
 }
 
@@ -41,6 +46,7 @@ impl ServerFlags {
         flags
     }
 
+    #[allow(dead_code)]
     pub fn to_flag_str(&self) -> String {
         let mut s = String::from("+");
         if self.hub {
@@ -68,6 +74,9 @@ pub struct RemoteClient {
     pub user: String,
     pub host: String,
     pub realname: String,
+    /// P10 base64-encoded IP from the NICK burst. Consumed by /WHOX
+    /// "real IP" output and IAuth-style IP checks once implemented.
+    #[allow(dead_code)]
     pub ip_base64: String,
     pub modes: HashSet<char>,
     pub account: Option<String>,
@@ -102,7 +111,15 @@ pub struct RemoteClient {
 /// expansion.
 #[derive(Debug, Clone)]
 pub struct BouncerSession {
+    /// Account owning the session. Redundant with the map key but
+    /// carried here so BS handlers can fill/read it without a second
+    /// lookup. Consumed by the follow-up alias routing / persistence
+    /// work.
+    #[allow(dead_code)]
     pub account: String,
+    /// Session id (unique within the account). Same rationale as
+    /// `account` above.
+    #[allow(dead_code)]
     pub sessid: String,
     pub primary: Option<ClientNumeric>,
 }
@@ -160,11 +177,6 @@ impl ServerLink {
     /// Send a raw P10 line to the remote server.
     pub async fn send_line(&self, line: String) {
         let _ = self.sender.send(line).await;
-    }
-
-    /// Send a P10 message to the remote server.
-    pub async fn send_msg(&self, msg: &p10_proto::P10Message) {
-        self.send_line(msg.to_wire()).await;
     }
 }
 

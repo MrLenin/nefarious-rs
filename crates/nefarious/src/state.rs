@@ -465,7 +465,10 @@ impl ServerState {
         self.links.iter().next().map(|e| Arc::clone(e.value()))
     }
 
-    /// Send a raw P10 line to all server links.
+    /// Send a raw P10 line to all server links. Used by forthcoming
+    /// multi-link propagation paths; today we only have a single link
+    /// and `get_link().send_line` covers the case.
+    #[allow(dead_code)]
     pub async fn send_to_links(&self, line: &str) {
         for entry in self.links.iter() {
             entry.value().send_line(line.to_string()).await;
@@ -554,6 +557,9 @@ impl ServerState {
     }
 
     /// Mark a local client as logged out. Symmetric with `login_local`.
+    /// Not yet called — no /LOGOUT command or `AUTHENTICATE *` path
+    /// wires this yet; ready for when one does.
+    #[allow(dead_code)]
     pub async fn logout_local(&self, id: ClientId) {
         let (prefix, nick, channels, src, was_logged_in) = {
             let Some(client_arc) = self.clients.get(&id) else {
@@ -651,6 +657,8 @@ impl ServerState {
     /// `cap-notify` client. Called when the advertised set mutates
     /// (e.g. after a REHASH). `subcmd` is "NEW" or "DEL". Caps are
     /// sorted by name so the wire ordering is deterministic.
+    /// Not yet called — REHASH is a follow-up; keep ready.
+    #[allow(dead_code)]
     pub async fn broadcast_cap_notify(&self, subcmd: &str, caps: &[Capability]) {
         if caps.is_empty() {
             return;

@@ -33,7 +33,7 @@ pub async fn handle_server_link<S>(
     let remote_name = &server_msg_params[0];
     let _hop_count: u16 = server_msg_params[1].parse().unwrap_or(1);
     let start_ts: u64 = server_msg_params[2].parse().unwrap_or(0);
-    let link_ts: u64 = server_msg_params[3].parse().unwrap_or(0);
+    let _link_ts: u64 = server_msg_params[3].parse().unwrap_or(0);
     let protocol_str = &server_msg_params[4];
     let numeric_capacity = &server_msg_params[5];
     let flags_str = server_msg_params.get(6).map(|s| s.as_str()).unwrap_or("+");
@@ -51,7 +51,7 @@ pub async fn handle_server_link<S>(
     }
 
     // Parse remote server numeric from capacity string
-    let (remote_numeric, capacity_mask) =
+    let (remote_numeric, _capacity_mask) =
         match p10_proto::numeric::parse_server_numeric_capacity(numeric_capacity) {
             Some(v) => v,
             None => {

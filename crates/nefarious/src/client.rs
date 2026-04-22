@@ -35,7 +35,9 @@ pub struct Client {
     pub host: String,
     /// IP address.
     pub addr: SocketAddr,
-    /// Whether the client is using TLS.
+    /// Whether the client is using TLS. Consumed later by SASL EXTERNAL
+    /// cert-auth and /WHOIS "is using a secure connection" output.
+    #[allow(dead_code)]
     pub tls: bool,
     /// User modes (simplified as a set of chars).
     pub modes: HashSet<char>,
@@ -60,7 +62,9 @@ pub struct Client {
     pub nick_ts: u64,
     /// Channel for sending messages to this client.
     pub sender: mpsc::Sender<Message>,
-    /// Port the client connected on.
+    /// Port the client connected on. Carried for future /WHOIS and
+    /// IAuth decisions that dispatch on listener.
+    #[allow(dead_code)]
     pub listener_port: u16,
     /// Notified when the server needs this client's message loop to exit
     /// (e.g. after losing a P10 nick-TS collision). The loop uses this as
@@ -203,10 +207,6 @@ impl Client {
         ));
     }
 
-    /// Send an error numeric with a trailing message.
-    pub fn send_error(&self, server_name: &str, numeric: u16, message: &str) {
-        self.send_numeric(server_name, numeric, vec![message.to_string()]);
-    }
 }
 
 impl std::fmt::Debug for Client {
