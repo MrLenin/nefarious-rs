@@ -24,6 +24,13 @@ pub struct GeneralConfig {
     pub description: String,
     pub numeric: u16,
     pub vhost: Option<String>,
+    /// Suffix appended to an authenticated user's account to form
+    /// their visible cloaked host when +x is set — i.e. `<account>.<suffix>`.
+    /// Matches nefarious2 FEAT_HIDDEN_HOST (used when
+    /// FEAT_HOST_HIDING_STYLE is 1 or 3). When `None`, fall back to
+    /// the wire cloakhost carried in the P10 NICK intro. Must match
+    /// the peer network's setting for display consistency.
+    pub hidden_host_suffix: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -166,6 +173,10 @@ impl Config {
                             .and_then(|n| u16::try_from(n).ok())
                             .ok_or_else(|| ConfigError::Missing("General.numeric".into()))?,
                         vhost: block.get_str("vhost").map(|s| s.to_string()),
+                        hidden_host_suffix: block
+                            .get_str("hiddenhost")
+                            .or_else(|| block.get_str("hidden_host"))
+                            .map(|s| s.to_string()),
                     });
                 }
 

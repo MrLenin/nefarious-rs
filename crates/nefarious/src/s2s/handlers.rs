@@ -85,6 +85,48 @@ pub async fn handle_nick(state: &ServerState, msg: &P10Message) {
         HashSet::new()
     };
 
+    // If `+r` (registered / authenticated) is set, the next extension
+    // field carries the account name, optionally with a
+    // `:<register_ts>[:<flags>]` suffix that we drop. Position is
+    // fixed at params[6] when modes are present; matches the field
+    // order emitted by nefarious2 m_nick.c when SetAccount is true.
+    let account = if modes.contains(&'r') {
+        msg.params.get(6).and_then(|s| {
+            let core = s.split(':').next().unwrap_or("");
+            if core.is_empty() {
+                None
+            } else {
+                Some(core.to_string())
+            }
+        })
+    } else {
+        None
+    };
+
+    // Resolve the visible host. When `+x` is set nefarious2's display
+    // layer (s_user.c hide_hostmask) replaces the real host with one
+    // of:
+    //   - `<account>.<FEAT_HIDDEN_HOST>`        (style 1, or 3 + account)
+    //   - the wire cloakhost                    (style 2 or 3 w/o account)
+    //   - the real host                         (style 0)
+    // We emulate the most common path: if +x + account + a configured
+    // hidden_host_suffix, compute the account form; else if +x + a wire
+    // cloakhost, use it; else keep the real host. The cloakhost on the
+    // wire sits right after the account field at params[6+1].
+    let real_host = host.to_string();
+    let visible_host = if modes.contains(&'x') {
+        let wire_cloak = msg.params.get(7).cloned();
+        if let (Some(acct), Some(suffix)) = (&account, &state.config.general.hidden_host_suffix) {
+            format!("{acct}.{suffix}")
+        } else if let Some(c) = wire_cloak.filter(|s| !s.is_empty() && s != "_") {
+            c
+        } else {
+            real_host.clone()
+        }
+    } else {
+        real_host.clone()
+    };
+
     // In nefarious2's P10 NICK burst the tail is always:
     //   … <ip_base64> <YYXXX numeric> :<realname>
     // i.e. `parv[parc-2]` is the numeric and `parv[parc-3]` is the
@@ -215,11 +257,11 @@ pub async fn handle_nick(state: &ServerState, msg: &P10Message) {
         numeric,
         server: numeric.server,
         user: user.to_string(),
-        host: host.to_string(),
+        host: visible_host,
         realname,
         ip_base64: ip_base64.to_string(),
         modes,
-        account: None,
+        account,
         nick_ts,
         channels: HashSet::new(),
         away_message: None,
