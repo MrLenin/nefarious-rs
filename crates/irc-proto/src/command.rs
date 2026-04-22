@@ -16,6 +16,10 @@ pub enum Command {
     // IRCv3 batch framing
     Batch,
 
+    // IRCv3 labeled-response: empty-response acknowledgement
+    // (`@label=X :server ACK`).
+    Ack,
+
     // IRCv3 identity changes
     Chghost,
     Setname,
@@ -103,6 +107,7 @@ impl Command {
             "QUIT" => Command::Quit,
             "ERROR" => Command::Error,
             "BATCH" => Command::Batch,
+            "ACK" => Command::Ack,
             "CHGHOST" => Command::Chghost,
             "SETNAME" => Command::Setname,
             "FAIL" => Command::Fail,
@@ -156,6 +161,7 @@ impl fmt::Display for Command {
             Command::Quit => write!(f, "QUIT"),
             Command::Error => write!(f, "ERROR"),
             Command::Batch => write!(f, "BATCH"),
+            Command::Ack => write!(f, "ACK"),
             Command::Chghost => write!(f, "CHGHOST"),
             Command::Setname => write!(f, "SETNAME"),
             Command::Fail => write!(f, "FAIL"),

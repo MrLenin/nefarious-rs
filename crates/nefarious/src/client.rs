@@ -106,6 +106,25 @@ pub struct Client {
     /// (Phase 3.3) to map the certificate to an account without
     /// requiring a password.
     pub tls_cert_cn: Option<String>,
+    /// Active labeled-response capture. When `Some`, every call to
+    /// `send` pushes the message into the buffer instead of flushing
+    /// to the outbound queue. The dispatcher sets this at the start
+    /// of handling a labeled command and takes it back at the end,
+    /// choosing the ACK / single-with-label / batch-wrapped shape by
+    /// reply count. Interior mutability via `Mutex` because `send` is
+    /// called through `&self`.
+    pub label_buffer: std::sync::Mutex<Option<LabelBuffer>>,
+}
+
+/// Buffered replies to a client's labeled-response command.
+///
+/// `replies` contains the outbound messages that `send()` intercepted
+/// while the buffer was active. `label` is the `@label` value that
+/// must come back to the client on whichever final form the flush
+/// picks (ACK / single message / BATCH opener).
+pub struct LabelBuffer {
+    pub label: String,
+    pub replies: Vec<Message>,
 }
 
 impl Client {
@@ -142,6 +161,43 @@ impl Client {
             batch_counter: AtomicU32::new(1),
             sasl_mechanism: None,
             tls_cert_cn: None,
+            label_buffer: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Start buffering outgoing messages against a labeled-response
+    /// dispatch. Subsequent `send` calls push into the buffer rather
+    /// than flushing to the outbound queue. Caller must pair this
+    /// with `take_label_buffer` in the same dispatch to avoid
+    /// stranding replies.
+    pub fn begin_label_buffer(&self, label: String) {
+        *self
+            .label_buffer
+            .lock()
+            .expect("label buffer mutex poisoned") = Some(LabelBuffer {
+            label,
+            replies: Vec::new(),
+        });
+    }
+
+    /// End label buffering and return the captured replies (if any).
+    /// Returns `None` if `begin_label_buffer` was never called — safe
+    /// to call defensively.
+    pub fn take_label_buffer(&self) -> Option<LabelBuffer> {
+        self.label_buffer
+            .lock()
+            .expect("label buffer mutex poisoned")
+            .take()
+    }
+
+    /// Send a message to this client, bypassing the label buffer.
+    /// Used by the label-flush code itself — without this, flushing
+    /// would recursively buffer. Normal sends should go through
+    /// `send()`.
+    pub fn send_raw(&self, msg: Message) {
+        use tokio::sync::mpsc::error::TrySendError;
+        if let Err(TrySendError::Full(_)) = self.sender.try_send(msg) {
+            self.request_disconnect("SendQ exceeded");
         }
     }
 
@@ -183,15 +239,21 @@ impl Client {
 
     /// Send a message to this client (non-blocking).
     ///
-    /// If the outbound queue is full the client is disconnected with
-    /// "SendQ exceeded" — dropping messages silently would cause state
-    /// drift with the rest of the network. `TrySendError::Closed` means
-    /// the writer task already exited, so there is nothing more to do.
+    /// If a labeled-response buffer is active for this client the
+    /// message is captured there for the dispatcher to flush later;
+    /// otherwise it goes straight to the outbound queue. If the queue
+    /// is full the client is disconnected with "SendQ exceeded" —
+    /// dropping messages silently would cause state drift with the
+    /// rest of the network. `TrySendError::Closed` means the writer
+    /// task already exited, so there is nothing more to do.
     pub fn send(&self, msg: Message) {
-        use tokio::sync::mpsc::error::TrySendError;
-        if let Err(TrySendError::Full(_)) = self.sender.try_send(msg) {
-            self.request_disconnect("SendQ exceeded");
+        if let Ok(mut guard) = self.label_buffer.lock() {
+            if let Some(buf) = guard.as_mut() {
+                buf.replies.push(msg);
+                return;
+            }
         }
+        self.send_raw(msg);
     }
 
     /// Send a user-originated event (PRIVMSG, NOTICE, JOIN, PART, …)

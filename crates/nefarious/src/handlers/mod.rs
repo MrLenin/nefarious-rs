@@ -18,35 +18,36 @@ use crate::numeric::*;
 use crate::state::ServerState;
 
 /// Context for handling a message from a registered client.
-///
-/// `current_batch` is populated while the handler is executing inside a
-/// labeled-response batch so every reply attaches `@batch=<id>` and the
-/// encompassing `BATCH +<id>` / `BATCH -<id>` pair is emitted around the
-/// handler.
 pub struct HandlerContext {
     pub state: Arc<ServerState>,
     pub client: Arc<RwLock<Client>>,
-    pub current_batch: Option<String>,
 }
 
 impl HandlerContext {
-    /// Create a fresh context for a connection (no active batch).
+    /// Create a fresh context for a connection.
     pub fn new(state: Arc<ServerState>, client: Arc<RwLock<Client>>) -> Self {
-        Self {
-            state,
-            client,
-            current_batch: None,
-        }
+        Self { state, client }
     }
 
     /// Dispatch a message to the appropriate handler.
     ///
-    /// Before dispatching, inspect the inbound message for `@label=...`
-    /// and, if the sending client has `labeled-response` enabled, wrap
-    /// the handler's replies in a `BATCH +id labeled-response` / `-id`
-    /// pair. The inner handlers receive a context with `current_batch`
-    /// set so `ctx.send_numeric` / `ctx.reply` tag each reply with
-    /// `@batch=id` automatically.
+    /// If the inbound message carries an `@label=...` tag and the
+    /// client has the `labeled-response` cap enabled, a per-dispatch
+    /// label buffer is activated on the Client. All subsequent
+    /// `send`/`send_from` calls targeting this client are captured
+    /// into the buffer rather than flushed. When the handler returns
+    /// we pick the spec-correct shape by reply count:
+    ///
+    /// - 0 replies → `@label=X :server ACK`
+    /// - 1 reply  → attach `@label=X` to the reply, emit as-is
+    /// - ≥2       → emit `@label=X BATCH +id labeled-response`, each
+    ///              reply with `@batch=id`, then `BATCH -id`
+    ///
+    /// Opening the batch eagerly regardless of reply count — which
+    /// was our prior behaviour — violates the IRCv3 labeled-response
+    /// spec ("a batch is not used when the response consists of only
+    /// a single message"). Buffering preserves correctness without
+    /// asking every handler to know how many replies it emits.
     pub async fn dispatch(&self, msg: &Message) {
         let label = msg
             .tags
@@ -54,38 +55,21 @@ impl HandlerContext {
             .find(|t| t.key == "label")
             .and_then(|t| t.value.clone());
 
-        let use_batch = if let Some(ref _lbl) = label {
-            self.client.read().await.has_cap(Capability::LabeledResponse)
+        let buffering = if let Some(ref lbl) = label {
+            let c = self.client.read().await;
+            if c.has_cap(Capability::LabeledResponse) {
+                c.begin_label_buffer(lbl.clone());
+                true
+            } else {
+                false
+            }
         } else {
             false
-        };
-
-        let batch_id = if use_batch {
-            let id = self.client.read().await.next_batch_id();
-            // Emit `@label=lbl :server BATCH +id labeled-response`. The
-            // BATCH open is the only message that carries the @label
-            // tag; each enclosed reply carries @batch=<id>.
-            let mut open = Message::with_source(
-                &self.state.server_name,
-                Command::Batch,
-                vec![format!("+{id}"), "labeled-response".into()],
-            );
-            if let Some(ref lbl) = label {
-                open.tags.push(Tag {
-                    key: "label".to_string(),
-                    value: Some(lbl.clone()),
-                });
-            }
-            self.client.read().await.send(open);
-            Some(id)
-        } else {
-            None
         };
 
         let ctx = HandlerContext {
             state: Arc::clone(&self.state),
             client: Arc::clone(&self.client),
-            current_batch: batch_id.clone(),
         };
 
         match &msg.command {
@@ -181,14 +165,15 @@ impl HandlerContext {
             }
         }
 
-        // Close the labeled-response batch, if we opened one.
-        if let Some(id) = batch_id {
-            let close = Message::with_source(
-                &self.state.server_name,
-                Command::Batch,
-                vec![format!("-{id}")],
-            );
-            self.client.read().await.send(close);
+        // Flush the labeled-response buffer. The buffer is per-Client
+        // so another task broadcasting to this client during the
+        // handler will also be captured — that's accepted leakage;
+        // dispatches are short and broadcast-during-dispatch is rare.
+        if buffering {
+            let c = self.client.read().await;
+            if let Some(buf) = c.take_label_buffer() {
+                flush_label_buffer(&self.state.server_name, &c, buf).await;
+            }
         }
     }
 
@@ -213,8 +198,11 @@ impl HandlerContext {
     }
 
     /// Apply IRCv3 reply-path tags to `msg` before sending it to the
-    /// requesting client: `@time` if they have `server-time`, and
-    /// `@batch=<id>` if we're inside a labeled-response batch.
+    /// requesting client. Currently just `@time` when the client has
+    /// `server-time`. `@batch` is no longer added here — labeled-
+    /// response wrapping happens at flush time against the buffered
+    /// reply count, and any future explicit batches are attached at
+    /// their own emission site.
     pub fn apply_reply_tags(&self, msg: &mut Message, client: &Client) {
         if client.has_cap(Capability::ServerTime) {
             msg.tags.push(Tag {
@@ -222,16 +210,10 @@ impl HandlerContext {
                 value: Some(crate::tags::format_server_time(chrono::Utc::now())),
             });
         }
-        if let Some(ref id) = self.current_batch {
-            msg.tags.push(Tag {
-                key: "batch".to_string(),
-                value: Some(id.clone()),
-            });
-        }
     }
 
     /// Send a server-originated reply message to the requesting client,
-    /// attaching the reply-path tags (server-time + batch) first.
+    /// attaching the reply-path tags first.
     pub async fn reply(&self, mut msg: Message) {
         let client = self.client.read().await;
         self.apply_reply_tags(&mut msg, &client);
@@ -239,19 +221,13 @@ impl HandlerContext {
     }
 
     /// Send a user-originated reply (notably an `echo-message` self-copy
-    /// of a PRIVMSG/NOTICE) to the requesting client. Attaches
-    /// @server-time and @account via `tagged_for`, plus @batch if we're
-    /// inside a labeled-response batch. Deduplicated so @time isn't
-    /// attached twice.
+    /// of a PRIVMSG/NOTICE) to the requesting client. Goes through
+    /// `tagged_for` for per-cap tagging (server-time, account-tag,
+    /// msgid). The labeled-response buffer (if active) captures this
+    /// via `Client::send`.
     pub async fn reply_from(&self, msg: Message, src: &crate::tags::SourceInfo) {
         let client = self.client.read().await;
-        let mut out = crate::tags::tagged_for(msg, &client, src);
-        if let Some(ref id) = self.current_batch {
-            out.tags.push(Tag {
-                key: "batch".to_string(),
-                value: Some(id.clone()),
-            });
-        }
+        let out = crate::tags::tagged_for(msg, &client, src);
         client.send(out);
     }
 
@@ -318,5 +294,65 @@ impl HandlerContext {
         let mut msg = Message::with_source(&self.state.server_name, verb, params);
         self.apply_reply_tags(&mut msg, &client);
         client.send(msg);
+    }
+}
+
+/// Flush a labeled-response buffer in the shape dictated by reply
+/// count, per IRCv3 labeled-response spec:
+///
+/// - 0 replies → `@label=X :server ACK`  (empty-response ack)
+/// - 1 reply  → attach `@label=X` to the reply, emit as-is
+/// - ≥2       → `@label=X :server BATCH +id labeled-response`
+///              followed by each reply tagged `@batch=id`, closed
+///              by `:server BATCH -id`
+///
+/// Uses `send_raw` to bypass the buffer — otherwise the flush output
+/// would recursively land back in the same (now-empty) buffer.
+async fn flush_label_buffer(server_name: &str, client: &Client, buf: crate::client::LabelBuffer) {
+    use irc_proto::message::Tag;
+    let crate::client::LabelBuffer { label, replies } = buf;
+    match replies.len() {
+        0 => {
+            let mut ack = Message::with_source(server_name, Command::Ack, Vec::new());
+            ack.tags.push(Tag {
+                key: "label".to_string(),
+                value: Some(label),
+            });
+            client.send_raw(ack);
+        }
+        1 => {
+            let mut msg = replies.into_iter().next().unwrap();
+            msg.tags.push(Tag {
+                key: "label".to_string(),
+                value: Some(label),
+            });
+            client.send_raw(msg);
+        }
+        _ => {
+            let id = client.next_batch_id();
+            let mut open = Message::with_source(
+                server_name,
+                Command::Batch,
+                vec![format!("+{id}"), "labeled-response".into()],
+            );
+            open.tags.push(Tag {
+                key: "label".to_string(),
+                value: Some(label),
+            });
+            client.send_raw(open);
+            for mut msg in replies {
+                msg.tags.push(Tag {
+                    key: "batch".to_string(),
+                    value: Some(id.clone()),
+                });
+                client.send_raw(msg);
+            }
+            let close = Message::with_source(
+                server_name,
+                Command::Batch,
+                vec![format!("-{id}")],
+            );
+            client.send_raw(close);
+        }
     }
 }
