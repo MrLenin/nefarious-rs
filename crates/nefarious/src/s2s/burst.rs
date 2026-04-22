@@ -13,6 +13,7 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
 
     // 1. Send NICK messages for all local users
     let mut nick_count = 0;
+    let mut privs_count = 0;
     let mut skipped_unregistered = 0;
     let mut skipped_no_numeric = 0;
     for entry in state.clients.iter() {
@@ -112,6 +113,7 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
             for p in &client.privs {
                 if line.len() + 1 + p.len() > 400 {
                     link.send_line(line.clone()).await;
+                    privs_count += 1;
                     line.truncate(base_len);
                 }
                 line.push(' ');
@@ -119,12 +121,13 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
             }
             if line.len() > base_len {
                 link.send_line(line).await;
+                privs_count += 1;
             }
         }
     }
 
     info!(
-        "burst: sent {nick_count} NICK lines; skipped {skipped_unregistered} unregistered + {skipped_no_numeric} missing-numeric"
+        "burst: sent {nick_count} NICK lines ({privs_count} PRIVS); skipped {skipped_unregistered} unregistered + {skipped_no_numeric} missing-numeric"
     );
 
     // 2. Send BURST messages for all channels with local members

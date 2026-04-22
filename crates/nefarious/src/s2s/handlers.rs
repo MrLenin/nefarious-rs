@@ -2398,6 +2398,23 @@ async fn handle_bx_create(state: &ServerState, msg: &P10Message) {
     };
     let account = msg.params[3].clone();
 
+    // The trailing parameter carries a space-separated list of channels
+    // the alias shadows. Per nefarious2 bounce_alias_create, the alias
+    // must be added to each of these channels so MODE/KICK targeting
+    // the alias numeric stay addressable. Parse before doing anything
+    // else so we can attach the alias to channels inside the single
+    // register pass below.
+    let channels_param: Vec<String> = msg
+        .params
+        .last()
+        .map(|s| {
+            s.split_whitespace()
+                .filter(|c| !c.is_empty())
+                .map(|c| c.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Pull identity from primary. If primary isn't known locally we
     // can't render the alias, but we still record the alias entry so
     // that later MODE/KICK for that numeric land — the alias is
@@ -2438,14 +2455,35 @@ async fn handle_bx_create(state: &ServerState, msg: &P10Message) {
         rc.host = host;
         rc.realname = realname;
         rc.account = acct;
+        for ch in &channels_param {
+            rc.channels.insert(ch.clone());
+        }
         drop(rc);
+        // Ensure the alias appears in chan.remote_members for each
+        // listed channel. Plain member (no ops) — the primary carries
+        // any channel privileges; alias-specific mode changes would
+        // update its entry separately.
+        for ch in &channels_param {
+            let channel = state.get_or_create_channel(ch);
+            let mut c = channel.write().await;
+            c.remote_members
+                .entry(alias)
+                .or_insert_with(MembershipFlags::default);
+        }
         // An alias isn't in the nick hash — remove the stale mapping
         // if we put one there during its NICK introduction.
         state.remote_nicks.remove(&irc_casefold(&old_nick));
-        debug!("BX C: converted {alias} to alias of {primary}");
+        debug!(
+            "BX C: converted {alias} to alias of {primary}, attached to {} channels",
+            channels_param.len()
+        );
         return;
     }
 
+    let mut alias_channels: HashSet<String> = HashSet::new();
+    for ch in &channels_param {
+        alias_channels.insert(ch.clone());
+    }
     let new_alias = Arc::new(RwLock::new(RemoteClient {
         nick,
         numeric: alias,
@@ -2457,14 +2495,31 @@ async fn handle_bx_create(state: &ServerState, msg: &P10Message) {
         modes,
         account: acct,
         nick_ts: 0,
-        channels: HashSet::new(),
+        channels: alias_channels,
         away_message: None,
         privs: HashSet::new(),
         is_alias: true,
         primary: Some(primary),
     }));
     state.register_remote_alias(new_alias, alias);
-    debug!("BX C: registered alias {alias} → primary {primary}");
+
+    // Attach alias to each channel it shadows so MODE/KICK targeting
+    // the alias numeric resolve against a real roster entry. The
+    // membership carries no mode flags — the visible primary's entry
+    // carries any channel privileges (see bounce_alias_create in
+    // nefarious2/ircd/bouncer_session.c).
+    for ch in &channels_param {
+        let channel = state.get_or_create_channel(ch);
+        let mut c = channel.write().await;
+        c.remote_members
+            .entry(alias)
+            .or_insert_with(MembershipFlags::default);
+    }
+
+    debug!(
+        "BX C: registered alias {alias} → primary {primary}, attached to {} channels",
+        channels_param.len()
+    );
 }
 
 async fn handle_bx_destroy(state: &ServerState, msg: &P10Message) {

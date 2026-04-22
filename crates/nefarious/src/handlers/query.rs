@@ -163,6 +163,9 @@ pub async fn handle_whois(ctx: &HandlerContext, msg: &Message) {
             ],
         )
         .await;
+        if let Some(ref away) = t.away_message {
+            ctx.send_numeric(RPL_AWAY, vec![t.nick.clone(), away.clone()]).await;
+        }
         ctx.send_numeric(
             RPL_WHOISSERVER,
             vec![
@@ -172,6 +175,13 @@ pub async fn handle_whois(ctx: &HandlerContext, msg: &Message) {
             ],
         )
         .await;
+        if t.modes.contains(&'o') {
+            ctx.send_numeric(
+                RPL_WHOISOPERATOR,
+                vec![t.nick.clone(), "is an IRC operator".into()],
+            )
+            .await;
+        }
         if !t.channels.is_empty() {
             let mut chan_list = Vec::new();
             for chan_name in &t.channels {
@@ -221,6 +231,9 @@ pub async fn handle_whois(ctx: &HandlerContext, msg: &Message) {
             ],
         )
         .await;
+        if let Some(ref away) = r.away_message {
+            ctx.send_numeric(RPL_AWAY, vec![r.nick.clone(), away.clone()]).await;
+        }
         let server_info = ctx
             .state
             .remote_servers
@@ -237,6 +250,13 @@ pub async fn handle_whois(ctx: &HandlerContext, msg: &Message) {
             vec![r.nick.clone(), server_name, server_desc],
         )
         .await;
+        if r.modes.contains(&'o') {
+            ctx.send_numeric(
+                RPL_WHOISOPERATOR,
+                vec![r.nick.clone(), "is an IRC operator".into()],
+            )
+            .await;
+        }
         if !r.channels.is_empty() {
             let channels: Vec<String> = r.channels.iter().cloned().collect();
             ctx.send_numeric(
