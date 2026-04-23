@@ -73,6 +73,10 @@ pub fn spawn_reverse_lookup(
                 let mut c = client.write().await;
                 if !c.is_registered() {
                     c.host = name.clone();
+                    // Anchor real_host to the resolved name so
+                    // /SETHOST undo reverts to what the DNS said,
+                    // not to the raw IP.
+                    c.real_host = name.clone();
                 }
                 drop(c);
                 send_auth_notice(

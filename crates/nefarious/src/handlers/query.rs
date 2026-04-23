@@ -961,6 +961,96 @@ pub async fn handle_chghost(ctx: &HandlerContext, msg: &Message) {
     target.read().await.send(chghost_msg);
 }
 
+/// Handle SETHOST — self-targeted host change. Oper-only in our
+/// build; Undernet/nefarious2 tie this to SpoofHost config blocks
+/// so regular users can present a password and receive an
+/// operator-blessed vhost, but that config surface isn't wired
+/// here yet so we gate on `+o` to avoid exposing an unauthorised
+/// host-setter.
+///
+/// Forms:
+///   `SETHOST <host>`          — change host, keep user
+///   `SETHOST <user>@<host>`   — change both
+///   `SETHOST undo`            — revert to the real (DNS/WEBIRC) host
+pub async fn handle_sethost(ctx: &HandlerContext, msg: &Message) {
+    let is_oper = ctx.client.read().await.modes.contains(&'o');
+    if !is_oper {
+        ctx.send_numeric(
+            ERR_NOPRIVILEGES,
+            vec!["Permission Denied - You're not an IRC operator".into()],
+        )
+        .await;
+        return;
+    }
+
+    let arg = match msg.params.first() {
+        Some(a) if !a.is_empty() => a.clone(),
+        _ => {
+            ctx.send_numeric(
+                ERR_NEEDMOREPARAMS,
+                vec!["SETHOST".into(), "Not enough parameters".into()],
+            )
+            .await;
+            return;
+        }
+    };
+
+    let client_id = ctx.client_id().await;
+
+    // Parse mode. 'undo' reverts to the captured real_host. An '@'
+    // splits user@host. Bare host keeps the existing user.
+    let (new_user, new_host) = if arg.eq_ignore_ascii_case("undo") {
+        let c = ctx.client.read().await;
+        (c.user.clone(), c.real_host.clone())
+    } else if let Some((u, h)) = arg.split_once('@') {
+        if u.is_empty() || h.is_empty() {
+            ctx.send_numeric(
+                ERR_NEEDMOREPARAMS,
+                vec!["SETHOST".into(), "Malformed user@host".into()],
+            )
+            .await;
+            return;
+        }
+        (u.to_string(), h.to_string())
+    } else {
+        let c = ctx.client.read().await;
+        (c.user.clone(), arg.clone())
+    };
+
+    // Snapshot the old prefix, update the client, fan out CHGHOST
+    // to chghost-capable channel mates, and echo back so the user's
+    // own client sees the new identity.
+    let (old_prefix, channels) = {
+        let mut c = ctx.client.write().await;
+        let old_prefix = c.prefix();
+        c.user = new_user.clone();
+        c.host = new_host.clone();
+        let channels: std::collections::HashSet<String> =
+            c.channels.iter().cloned().collect();
+        (old_prefix, channels)
+    };
+
+    let chghost_msg = Message::with_source(
+        &old_prefix,
+        irc_proto::Command::Chghost,
+        vec![new_user.clone(), new_host.clone()],
+    );
+    let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
+    broadcast_to_shared_channels(
+        &ctx.state,
+        client_id,
+        &channels,
+        crate::capabilities::Capability::Chghost,
+        &chghost_msg,
+        &src,
+    )
+    .await;
+
+    // Echo to self regardless of cap negotiation so the client
+    // sees the change confirmed.
+    ctx.client.read().await.send(chghost_msg);
+}
+
 /// Deliver `msg` to every local user (other than `source_id`) who
 /// shares at least one of `source_channels` with the source AND has
 /// `cap` enabled. Per-recipient tag injection is applied via
@@ -1513,12 +1603,9 @@ fn irc_casefold_outer(s: &str) -> String {
 ///
 /// Comma-separated mask lists are accepted on +/-.
 ///
-/// S2S forwarding of silence updates is a follow-up — the initial
-/// landing enforces silence only for PRIVMSG/NOTICE whose delivery
-/// happens on this server (local→local and remote→local). Until
-/// peers receive our updates, remote servers will keep sending us
-/// messages that we then filter locally; that's correct but wastes
-/// bandwidth until the forward path lands.
+/// Accepted updates are propagated to peers as the P10 `U` token
+/// so remote senders drop filtered messages at their end. See the
+/// outbound emission at the bottom of this handler.
 pub async fn handle_silence(ctx: &HandlerContext, msg: &Message) {
     // No params — view own list.
     if msg.params.is_empty() || msg.params[0].is_empty() {

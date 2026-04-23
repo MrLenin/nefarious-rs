@@ -23,6 +23,10 @@ pub enum Command {
     // IRCv3 identity changes
     Chghost,
     Setname,
+    /// Client-initiated host change (oper-gated in our build).
+    /// Undernet / nefarious2 tie this to SpoofHost config blocks;
+    /// we keep it oper-only until that config surface exists.
+    Sethost,
 
     // IRCv3 standard replies
     Fail,
@@ -135,6 +139,7 @@ impl Command {
             "ACK" => Command::Ack,
             "CHGHOST" => Command::Chghost,
             "SETNAME" => Command::Setname,
+            "SETHOST" => Command::Sethost,
             "FAIL" => Command::Fail,
             "WARN" => Command::Warn,
             "NOTE" => Command::Note,
@@ -202,6 +207,7 @@ impl fmt::Display for Command {
             Command::Ack => write!(f, "ACK"),
             Command::Chghost => write!(f, "CHGHOST"),
             Command::Setname => write!(f, "SETNAME"),
+            Command::Sethost => write!(f, "SETHOST"),
             Command::Fail => write!(f, "FAIL"),
             Command::Warn => write!(f, "WARN"),
             Command::Note => write!(f, "NOTE"),

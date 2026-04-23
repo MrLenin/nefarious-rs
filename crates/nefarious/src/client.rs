@@ -51,6 +51,12 @@ pub struct Client {
     pub realname: String,
     /// Hostname (resolved or IP).
     pub host: String,
+    /// Original resolved host, captured once at connect. Used by
+    /// /SETHOST undo to revert the `host` field to the pre-cloak
+    /// value, and by oper-vision paths that want to see where a
+    /// client actually came from. Stays constant across the
+    /// connection's lifetime.
+    pub real_host: String,
     /// IP address.
     pub addr: SocketAddr,
     /// Whether the client is using TLS. Consumed later by SASL EXTERNAL
@@ -185,6 +191,7 @@ impl Client {
             user: String::new(),
             realname: String::new(),
             host: addr.ip().to_string(),
+            real_host: addr.ip().to_string(),
             addr,
             tls,
             modes: HashSet::new(),

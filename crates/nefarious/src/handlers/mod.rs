@@ -142,6 +142,7 @@ impl HandlerContext {
             // IRCv3 identity-change commands
             Command::Setname => query::handle_setname(&ctx, msg).await,
             Command::Chghost => query::handle_chghost(&ctx, msg).await,
+            Command::Sethost => query::handle_sethost(&ctx, msg).await,
 
             // Server queries
             Command::Stats => server_query::handle_stats(&ctx, msg).await,

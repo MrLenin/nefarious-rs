@@ -516,6 +516,7 @@ async fn registration_phase(
                         c.addr =
                             std::net::SocketAddr::new(ip, c.addr.port());
                         c.host = real_host.clone();
+                        c.real_host = real_host.clone();
                         info!(
                             "WEBIRC: {peer_ip} → {ip} (host {real_host})"
                         );
