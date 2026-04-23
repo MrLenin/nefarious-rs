@@ -165,6 +165,15 @@ pub struct Client {
     /// stable for the connection's lifetime; /REHASH does not
     /// re-bind existing clients to new classes.
     pub class: Option<String>,
+    /// Accumulating base64 payload for an in-progress AUTHENTICATE
+    /// exchange. IRCv3 SASL 3.1 splits payloads larger than 400
+    /// bytes across multiple AUTHENTICATE lines: each 400-byte
+    /// chunk means "more to come"; a shorter chunk (or empty `+`)
+    /// is the terminator. Reset to `None` whenever the mechanism
+    /// resolves (success / fail / abort). Capped at
+    /// `SASL_PAYLOAD_MAX` so a misbehaving client can't flood
+    /// memory pre-registration.
+    pub sasl_buffer: Option<String>,
 }
 
 /// Per-dispatch labeled-response capture.
@@ -236,6 +245,7 @@ impl Client {
             sasl_mechanism: None,
             tls_cert_cn: None,
             class: None,
+            sasl_buffer: None,
         }
     }
 

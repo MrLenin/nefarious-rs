@@ -147,13 +147,32 @@ pub async fn handle_nick_change(ctx: &HandlerContext, msg: &Message) {
     }
 }
 
+/// Maximum accumulated base64 AUTHENTICATE payload we'll buffer
+/// before aborting. 32 KiB comfortably holds OAUTHBEARER JWTs
+/// (typically <2 KiB) while capping pre-registration memory use
+/// at a predictable ceiling. A determined attacker can fill at
+/// most this much per connection before we cut them off with
+/// ERR_SASLTOOLONG.
+const SASL_PAYLOAD_MAX: usize = 32 * 1024;
+
+/// IRCv3 SASL chunk size. A chunk of exactly this many base64
+/// characters means "more to come"; a shorter chunk (or a bare
+/// `+`) terminates the payload.
+const SASL_CHUNK_BYTES: usize = 400;
+
 /// Handle the AUTHENTICATE command — SASL negotiation.
 ///
-/// Phase 3.2 implements the PLAIN mechanism. Later mechanisms
-/// (EXTERNAL, SCRAM-SHA-256, OAUTHBEARER) dispatch from the same
-/// function keyed off `Client.sasl_mechanism`.
+/// Supports the standard mechanism dispatch plus IRCv3 SASL 3.1
+/// payload chunking: clients send payloads larger than 400 bytes
+/// as a run of 400-byte chunks terminated by a shorter chunk (or
+/// a bare `+` when the total is an exact multiple of 400). We
+/// buffer chunks in `Client.sasl_buffer` and only decode + run the
+/// mechanism once the terminator arrives. This matters for
+/// OAUTHBEARER tokens (JWTs regularly exceed 400 bytes); PLAIN
+/// and EXTERNAL payloads are small enough that chunking is rare
+/// but legal.
 ///
-/// Wire flow:
+/// Wire flow (PLAIN, single-chunk):
 /// ```text
 /// C → S : AUTHENTICATE PLAIN
 /// S → C : AUTHENTICATE +
@@ -175,9 +194,14 @@ pub async fn handle_authenticate(ctx: &HandlerContext, msg: &Message) {
         }
     };
 
-    // Explicit abort: client sends `AUTHENTICATE *`.
+    // Explicit abort: client sends `AUTHENTICATE *`. Clears any
+    // in-progress chunk buffer along with the mechanism selection.
     if param == "*" {
-        ctx.client.write().await.sasl_mechanism = None;
+        {
+            let mut c = ctx.client.write().await;
+            c.sasl_mechanism = None;
+            c.sasl_buffer = None;
+        }
         ctx.send_numeric(
             crate::numeric::ERR_SASLABORTED,
             vec!["SASL authentication aborted".into()],
@@ -207,6 +231,7 @@ pub async fn handle_authenticate(ctx: &HandlerContext, msg: &Message) {
         {
             let mut c = ctx.client.write().await;
             c.sasl_mechanism = Some(mech_upper);
+            c.sasl_buffer = None;
         }
         // Prompt the client for the client-initial response.
         ctx.reply(Message::with_source(
@@ -218,12 +243,60 @@ pub async fn handle_authenticate(ctx: &HandlerContext, msg: &Message) {
         return;
     };
 
-    // Second phase: the client's base64-encoded mechanism payload.
-    // A single `+` is an empty payload; for PLAIN that's invalid.
-    let decoded = if param == "+" {
+    // Second phase: base64-encoded mechanism payload, possibly
+    // split across multiple AUTHENTICATE lines. A 400-byte chunk
+    // means "more coming"; anything shorter (including `+`) is
+    // the terminator.
+    //
+    // The `+` terminator has two meanings depending on buffer
+    // state: with no prior chunk it's a literal empty payload
+    // (PLAIN rejects this downstream); after a buffered run it
+    // finalises a payload whose length is an exact multiple of
+    // 400 by adding nothing.
+    let is_continuation = param.len() == SASL_CHUNK_BYTES && param != "+";
+
+    let combined_b64 = {
+        let mut c = ctx.client.write().await;
+        if is_continuation {
+            let buf = c.sasl_buffer.get_or_insert_with(String::new);
+            if buf.len() + param.len() > SASL_PAYLOAD_MAX {
+                c.sasl_mechanism = None;
+                c.sasl_buffer = None;
+                drop(c);
+                ctx.send_numeric(
+                    crate::numeric::ERR_SASLTOOLONG,
+                    vec!["SASL payload too long".into()],
+                )
+                .await;
+                return;
+            }
+            buf.push_str(&param);
+            return;
+        }
+        // Terminator. Fold any previously-buffered chunks, then
+        // reset the buffer. A bare `+` with no buffer is just an
+        // empty payload.
+        let mut buf = c.sasl_buffer.take().unwrap_or_default();
+        if param != "+" {
+            if buf.len() + param.len() > SASL_PAYLOAD_MAX {
+                c.sasl_mechanism = None;
+                drop(c);
+                ctx.send_numeric(
+                    crate::numeric::ERR_SASLTOOLONG,
+                    vec!["SASL payload too long".into()],
+                )
+                .await;
+                return;
+            }
+            buf.push_str(&param);
+        }
+        buf
+    };
+
+    let decoded = if combined_b64.is_empty() {
         Vec::new()
     } else {
-        match base64::engine::general_purpose::STANDARD.decode(param.as_bytes()) {
+        match base64::engine::general_purpose::STANDARD.decode(combined_b64.as_bytes()) {
             Ok(v) => v,
             Err(_) => {
                 reset_sasl_and_fail(ctx, "malformed base64 payload").await;
@@ -299,7 +372,9 @@ async fn handle_sasl_plain(ctx: &HandlerContext, payload: &[u8]) {
     )
     .await;
 
-    ctx.client.write().await.sasl_mechanism = None;
+    let mut c = ctx.client.write().await;
+    c.sasl_mechanism = None;
+    c.sasl_buffer = None;
 }
 
 /// Finish SASL EXTERNAL. `payload` is the requested authzid (often
@@ -350,11 +425,17 @@ async fn handle_sasl_external(ctx: &HandlerContext, payload: &[u8]) {
     )
     .await;
 
-    ctx.client.write().await.sasl_mechanism = None;
+    let mut c = ctx.client.write().await;
+    c.sasl_mechanism = None;
+    c.sasl_buffer = None;
 }
 
 async fn reset_sasl_and_fail(ctx: &HandlerContext, _reason: &str) {
-    ctx.client.write().await.sasl_mechanism = None;
+    {
+        let mut c = ctx.client.write().await;
+        c.sasl_mechanism = None;
+        c.sasl_buffer = None;
+    }
     ctx.send_numeric(
         crate::numeric::ERR_SASLFAIL,
         vec!["SASL authentication failed".into()],
