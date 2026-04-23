@@ -851,6 +851,16 @@ impl Config {
     pub fn client_ports(&self) -> impl Iterator<Item = &PortConfig> {
         self.ports.iter().filter(|p| !p.server)
     }
+
+    /// Look up a Class block by name (case-insensitive). Returns
+    /// `None` when no class with that name is configured — callers
+    /// generally treat that as "no per-class policy", i.e. the
+    /// permissive default.
+    pub fn find_class(&self, name: &str) -> Option<&ClassConfig> {
+        self.classes
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(name))
+    }
 }
 
 /// Parse a comma-separated DNSBL index list (e.g. `"2,3,5,6"`)

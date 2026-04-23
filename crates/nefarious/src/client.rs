@@ -157,6 +157,14 @@ pub struct Client {
     /// (Phase 3.3) to map the certificate to an account without
     /// requiring a password.
     pub tls_cert_cn: Option<String>,
+    /// Name of the `Class {}` config block this client was matched
+    /// to via its `Client {}` allow-rule, or `None` if no Client
+    /// block matched (default-allow path). Drives per-class
+    /// behaviour like `require_sasl` enforcement at registration
+    /// completion and — later — pingfreq / sendq / maxlinks. Stays
+    /// stable for the connection's lifetime; /REHASH does not
+    /// re-bind existing clients to new classes.
+    pub class: Option<String>,
 }
 
 /// Per-dispatch labeled-response capture.
@@ -227,6 +235,7 @@ impl Client {
             batch_counter: AtomicU32::new(1),
             sasl_mechanism: None,
             tls_cert_cn: None,
+            class: None,
         }
     }
 

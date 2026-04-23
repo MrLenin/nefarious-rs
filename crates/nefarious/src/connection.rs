@@ -21,35 +21,48 @@ use crate::state::ServerState;
 /// when authentication passes (either a password-protected block
 /// accepted or no password was required).
 fn check_client_block_password(
-    clients: &[irc_config::ClientConfig],
-    ip: &str,
-    host: &str,
+    block: Option<&irc_config::ClientConfig>,
     presented: Option<&str>,
 ) -> Option<String> {
-    for block in clients {
+    let Some(block) = block else { return None };
+    match &block.password {
+        None => None,
+        Some(required) => match presented {
+            Some(p) if crate::password::verify(p, required) => None,
+            Some(_) => Some("Invalid password".into()),
+            None => Some("Password required".into()),
+        },
+    }
+}
+
+/// First Client {} block whose `ip`, `host`, and `port` predicates
+/// all match the connecting peer. Returned by reference so callers
+/// can inspect both the password (for the gate above) and the
+/// `class` (for require_sasl / per-class policy).
+///
+/// `port` is matched only when the block specifies one; absent
+/// means "any port". This is the testnet's pattern — a Bouncer
+/// Client block restricted to `port = 6697` so plain-text 6667
+/// users don't accidentally land in the SASL-required class.
+fn match_client_block<'a>(
+    clients: &'a [irc_config::ClientConfig],
+    ip: &str,
+    host: &str,
+    listener_port: u16,
+) -> Option<&'a irc_config::ClientConfig> {
+    clients.iter().find(|block| {
         let ip_match = block.ip == "*"
             || crate::channel::wildcard_match(&block.ip, ip);
         let host_match = match &block.host {
             Some(pat) => crate::channel::wildcard_match(pat, host),
             None => true,
         };
-        if !(ip_match && host_match) {
-            continue;
-        }
-        match &block.password {
-            None => return None, // match, no password required
-            Some(required) => {
-                return match presented {
-                    Some(p) if crate::password::verify(p, required) => None,
-                    Some(_) => Some("Invalid password".into()),
-                    None => Some("Password required".into()),
-                };
-            }
-        }
-    }
-    // No Client block matched — allow through for now. A future
-    // FEAT_DENY_UNKNOWN_CLIENT can flip this to a refusal.
-    None
+        let port_match = match block.port {
+            Some(p) => p == listener_port,
+            None => true,
+        };
+        ip_match && host_match && port_match
+    })
 }
 
 /// Search config Kill blocks for one matching `user_host` or `ip`.
@@ -181,21 +194,27 @@ pub async fn handle_connection<S>(
     let client_id = client.read().await.id;
     let nick = client.read().await.nick.clone();
 
-    // Client-block password gate. If any Client {} config block
-    // matches this peer (by ip or host glob) and has a password
-    // set, the client must have sent a matching PASS during
-    // registration. A matching block without a password allows
-    // through; no matching block at all also allows through (the
-    // strict "deny without I-line" mode is a separate feature
-    // flag we haven't wired yet).
-    let pass_fail = {
+    // Client-block resolution. Match this peer against the
+    // configured Client {} blocks (by ip / host / listener port),
+    // pick the first one, then stash the matched block's class on
+    // the Client. The class drives subsequent per-class policy:
+    // password gate here, require_sasl gate below, and (later)
+    // pingfreq / sendq / maxlinks. No matching block means
+    // permissive default — the strict "deny without I-line" mode
+    // is a separate feature flag we haven't wired yet.
+    let cfg = state.config();
+    let (matched_class, pass_fail) = {
         let c = client.read().await;
         let ip = c.addr.ip().to_string();
         let host = c.host.clone();
         let pass = c.pass.clone();
         drop(c);
-        check_client_block_password(&state.config.load().clients, &ip, &host, pass.as_deref())
+        let block = match_client_block(&cfg.clients, &ip, &host, listener_port);
+        let class = block.map(|b| b.class.clone());
+        let fail = check_client_block_password(block, pass.as_deref());
+        (class, fail)
     };
+    client.write().await.class = matched_class;
     if let Some(reason) = pass_fail {
         info!("refusing registration of {nick} ({addr}): {reason}");
         let (id, nick_for_release) = {
@@ -282,7 +301,6 @@ pub async fn handle_connection<S>(
     // refuse the connection; Mark and BlockAnon-when-authed tag
     // the Client for oper visibility. Whitelist hits suppress all
     // blocks/marks for this IP.
-    let cfg = state.config();
     let dnsbl_blocks = cfg.dnsbl.clone();
     if !dnsbl_blocks.is_empty() {
         if let Some(resolver) = state.dns_resolver.as_ref() {
@@ -339,6 +357,47 @@ pub async fn handle_connection<S>(
                 }
             }
         }
+    }
+
+    // require_sasl gate. If the client's matched Class has
+    // `require_sasl = yes` and no SASL exchange authenticated the
+    // user during the CAP phase, refuse registration. This is the
+    // standard nefarious2 bouncer-port pattern — a 6697 Client
+    // block that points at a Bouncer class with require_sasl =
+    // yes, so plaintext users can't land on that port. We send an
+    // ERR_SASLFAIL-shaped notice so clients surface a meaningful
+    // error rather than a bare QUIT.
+    let require_sasl_fail = {
+        let c = client.read().await;
+        let needs_sasl = c
+            .class
+            .as_deref()
+            .and_then(|name| cfg.find_class(name))
+            .is_some_and(|cls| cls.require_sasl);
+        needs_sasl && c.account.is_none()
+    };
+    if require_sasl_fail {
+        info!(
+            "refusing registration of {nick} ({addr}): class requires SASL authentication"
+        );
+        let (id, nick_for_release) = {
+            let c = client.read().await;
+            (c.id, c.nick.clone())
+        };
+        let c = client.read().await;
+        c.send_raw(irc_proto::Message::with_source(
+            &state.server_name,
+            irc_proto::Command::Error,
+            vec!["Closing Link: SASL authentication required for this connection class".into()],
+        ));
+        drop(c);
+        if !nick_for_release.is_empty() {
+            state.release_nick(&nick_for_release, id);
+        }
+        state.release_numeric(id);
+        state.ipcheck.release(addr.ip());
+        writer_handle.abort();
+        return;
     }
 
     // GeoIP tagging. Cheap synchronous MMDB lookup (memory-mapped

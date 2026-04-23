@@ -69,6 +69,7 @@ async fn check_user(ctx: &HandlerContext, nick: &str) {
         let addr = c.addr;
         let geo = c.geoip.clone();
         let dnsbl_mark = c.dnsbl_mark.clone();
+        let class = c.class.clone();
         drop(c);
 
         notice(ctx, &format!("USER   {prefix}")).await;
@@ -77,6 +78,7 @@ async fn check_user(ctx: &HandlerContext, nick: &str) {
         notice(ctx, &format!("  modes:     +{modes}")).await;
         notice(ctx, &format!("  tls:       {tls}")).await;
         notice(ctx, &format!("  account:   {account}")).await;
+        notice(ctx, &format!("  class:     {}", class.as_deref().unwrap_or("-"))).await;
         notice(ctx, &format!("  idle:      {idle}s")).await;
         if let Some(g) = geo {
             notice(
