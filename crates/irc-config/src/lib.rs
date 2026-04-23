@@ -149,6 +149,14 @@ impl Config {
             .unwrap_or(128)
     }
 
+    /// `MAXSILES` — per-client cap on the SILENCE list size. Defaults
+    /// to 25, matching nefarious2's F_I(MAXSILES, …, 25).
+    pub fn max_siles(&self) -> u32 {
+        self.feature("MAXSILES")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(25)
+    }
+
     /// Load a configuration from a file path, resolving includes.
     pub fn from_file(path: &Path) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path).map_err(|e| ConfigError::Io(e.to_string()))?;

@@ -78,6 +78,9 @@ pub enum Command {
     Userip,
     Ison,
 
+    // Silence list
+    Silence,
+
     // Server queries (Admin and Info already exist above under Queries)
     Stats,
     Time,
@@ -145,6 +148,7 @@ impl Command {
             "AWAY" => Command::Away,
             "USERHOST" => Command::Userhost,
             "ISON" => Command::Ison,
+            "SILENCE" => Command::Silence,
             "STATS" => Command::Stats,
             "TIME" => Command::Time,
             "LINKS" => Command::Links,
@@ -201,6 +205,7 @@ impl fmt::Display for Command {
             Command::Userhost => write!(f, "USERHOST"),
             Command::Userip => write!(f, "USERIP"),
             Command::Ison => write!(f, "ISON"),
+            Command::Silence => write!(f, "SILENCE"),
             Command::Stats => write!(f, "STATS"),
             Command::Time => write!(f, "TIME"),
             Command::Links => write!(f, "LINKS"),

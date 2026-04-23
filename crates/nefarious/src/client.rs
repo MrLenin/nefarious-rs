@@ -10,6 +10,19 @@ use irc_proto::{Command, Message};
 use crate::capabilities::Capability;
 
 
+/// A single entry in a client's SILENCE list.
+///
+/// Stored in the order the user added them; match order doesn't matter
+/// because exceptions always win regardless of position. Masks are
+/// nick!user@host globs (`*` and `?` wildcards), rfc1459-casefolded at
+/// match time — the stored form is whatever the user typed so /SILENCE
+/// echoes back cleanly.
+#[derive(Debug, Clone)]
+pub struct SilenceEntry {
+    pub mask: String,
+    pub exception: bool,
+}
+
 /// Unique client identifier (monotonically increasing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClientId(pub u64);
@@ -60,6 +73,12 @@ pub struct Client {
     /// `monitored_by` so state-change broadcasts can find watchers
     /// without scanning every client.
     pub monitored: HashSet<String>,
+    /// SILENCE entries — masks whose senders are filtered before
+    /// delivery. An entry with `exception = true` is a positive-match
+    /// override: messages matching an exception pass through even if
+    /// a non-exception entry would otherwise silence them. Matches
+    /// nefarious2 cli_user(sptr)->silence ordering (exceptions win).
+    pub silence: Vec<SilenceEntry>,
     /// Channels this client is in.
     pub channels: HashSet<String>,
     /// Connection timestamp.
@@ -161,6 +180,7 @@ impl Client {
             account: None,
             privs: HashSet::new(),
             monitored: HashSet::new(),
+            silence: Vec::new(),
             channels: HashSet::new(),
             connected_at: now,
             last_active: now,
@@ -216,6 +236,28 @@ impl Client {
     /// Whether the given capability is active for this client.
     pub fn has_cap(&self, cap: Capability) -> bool {
         self.enabled_caps.contains(&cap)
+    }
+
+    /// Whether `sender_prefix` (nick!user@host form) is filtered by
+    /// this client's SILENCE list. Exceptions (`~mask`) override
+    /// matching silence masks — if any exception matches, the sender
+    /// is allowed through regardless of other entries. Used by the
+    /// private PRIVMSG/NOTICE path both locally and when dispatching
+    /// inbound S2S messages that target a local user.
+    pub fn is_silenced(&self, sender_prefix: &str) -> bool {
+        if self.silence.is_empty() {
+            return false;
+        }
+        let mut silenced = false;
+        for entry in &self.silence {
+            if crate::channel::wildcard_match(&entry.mask, sender_prefix) {
+                if entry.exception {
+                    return false;
+                }
+                silenced = true;
+            }
+        }
+        silenced
     }
 
     /// Allocate a unique BATCH id string for this client. Short base36

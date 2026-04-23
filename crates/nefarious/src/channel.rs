@@ -323,7 +323,7 @@ pub enum JoinCheck {
 }
 
 /// Simple IRC wildcard matching (* and ?), rfc1459-case-insensitive.
-fn wildcard_match(pattern: &str, input: &str) -> bool {
+pub(crate) fn wildcard_match(pattern: &str, input: &str) -> bool {
     let pattern = irc_casefold(pattern);
     let input = irc_casefold(input);
     wildcard_match_inner(pattern.as_bytes(), input.as_bytes())

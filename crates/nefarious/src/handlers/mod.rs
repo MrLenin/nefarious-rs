@@ -133,6 +133,7 @@ impl HandlerContext {
             Command::Userhost => query::handle_userhost(&ctx, msg).await,
             Command::Userip => query::handle_userip(&ctx, msg).await,
             Command::Ison => query::handle_ison(&ctx, msg).await,
+            Command::Silence => query::handle_silence(&ctx, msg).await,
             Command::Oper => query::handle_oper(&ctx, msg).await,
 
             // IRCv3 identity-change commands

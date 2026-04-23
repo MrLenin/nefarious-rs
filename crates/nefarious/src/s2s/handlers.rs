@@ -1188,12 +1188,20 @@ pub async fn handle_privmsg_notice(state: &ServerState, msg: &P10Message) {
             };
 
         if let Some(arc) = client_arc {
+            let target_client = arc.read().await;
+            // SILENCE applies to remote senders too — drop on arrival
+            // so a silenced user's message never hits the target's
+            // output queue, matching C behaviour where filtering
+            // happens on the target's home server.
+            if target_client.is_silenced(&sender_prefix) {
+                return;
+            }
             let irc_msg = irc_proto::Message::with_source(
                 &sender_prefix,
                 command,
                 vec![recipient_nick, text.clone()],
             );
-            arc.read().await.send_from(irc_msg, &src);
+            target_client.send_from(irc_msg, &src);
         }
     }
 }

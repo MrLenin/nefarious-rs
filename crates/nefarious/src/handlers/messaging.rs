@@ -159,6 +159,13 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
         // Private message to a user — check local first, then remote
         if let Some(target_client) = ctx.state.find_client_by_nick(target) {
             let tc = target_client.read().await;
+            // SILENCE: drop before delivery if the sender matches a
+            // filter on the recipient. PRIVMSG is dropped silently
+            // (no error) to mirror C forward_silences' quiet drop;
+            // clients that want feedback can /SILENCE themselves.
+            if tc.is_silenced(&prefix) {
+                return;
+            }
             tc.send_from(out_msg.clone(), &src);
             drop(tc);
             // echo-message: send the sender a labeled copy.

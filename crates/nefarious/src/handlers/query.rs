@@ -1147,3 +1147,146 @@ pub async fn handle_version(ctx: &HandlerContext, _msg: &Message) {
     )
     .await;
 }
+
+/// Handle SILENCE — per-client filter list that drops inbound private
+/// PRIVMSG/NOTICE from any sender matching a non-exception entry.
+/// Entries starting with `~` are exceptions (positive matches that
+/// override a silencing match).
+///
+/// Forms:
+///   `SILENCE`              → view our own list (271/272)
+///   `SILENCE <nick>`       → view a remote user's list (allowed only
+///                             for opers / channel services in C —
+///                             we mirror the C behaviour of silently
+///                             emitting just the 272 sentinel for
+///                             unprivileged queries)
+///   `SILENCE +<mask>`      → add a silencing entry
+///   `SILENCE +~<mask>`     → add an exception entry
+///   `SILENCE -<mask>`      → remove the matching entry (by mask)
+///   `SILENCE <mask>`       → same as `+<mask>` (bare mask implies add)
+///
+/// Comma-separated mask lists are accepted on +/-.
+///
+/// S2S forwarding of silence updates is a follow-up — the initial
+/// landing enforces silence only for PRIVMSG/NOTICE whose delivery
+/// happens on this server (local→local and remote→local). Until
+/// peers receive our updates, remote servers will keep sending us
+/// messages that we then filter locally; that's correct but wastes
+/// bandwidth until the forward path lands.
+pub async fn handle_silence(ctx: &HandlerContext, msg: &Message) {
+    // No params — view own list.
+    if msg.params.is_empty() || msg.params[0].is_empty() {
+        let (nick, entries) = {
+            let c = ctx.client.read().await;
+            (c.nick.clone(), c.silence.clone())
+        };
+        for entry in &entries {
+            let sigil = if entry.exception { "~" } else { "" };
+            ctx.send_numeric(
+                RPL_SILELIST,
+                vec![nick.clone(), format!("{sigil}{}", entry.mask)],
+            )
+            .await;
+        }
+        ctx.send_numeric(
+            RPL_ENDOFSILELIST,
+            vec![nick, "End of SILENCE list".into()],
+        )
+        .await;
+        return;
+    }
+
+    let arg = &msg.params[0];
+    let first = arg.chars().next().unwrap();
+
+    // View form: bare nick (no +/-/~ prefix and no mask characters).
+    // Nefarious only reveals a non-self user's silence list to opers
+    // or ChannelService users; we don't yet distinguish, so emit just
+    // the sentinel for unprivileged lookups. Querying our own nick is
+    // equivalent to the no-params form.
+    if first != '+' && first != '-' && first != '~' && !arg.contains('!') && !arg.contains('@') {
+        let own_nick = ctx.client.read().await.nick.clone();
+        if arg.eq_ignore_ascii_case(&own_nick) {
+            let entries = ctx.client.read().await.silence.clone();
+            for entry in &entries {
+                let sigil = if entry.exception { "~" } else { "" };
+                ctx.send_numeric(
+                    RPL_SILELIST,
+                    vec![own_nick.clone(), format!("{sigil}{}", entry.mask)],
+                )
+                .await;
+            }
+        }
+        ctx.send_numeric(
+            RPL_ENDOFSILELIST,
+            vec![arg.clone(), "End of SILENCE list".into()],
+        )
+        .await;
+        return;
+    }
+
+    // Update form: comma-separated list of `[+-]?~?<mask>` tokens.
+    let max_siles = ctx.state.config.max_siles() as usize;
+    let mut echo_updates: Vec<String> = Vec::new();
+    {
+        let mut c = ctx.client.write().await;
+        for raw in arg.split(',').filter(|t| !t.is_empty()) {
+            let mut token = raw;
+            let mut adding = true;
+            if let Some(rest) = token.strip_prefix('-') {
+                adding = false;
+                token = rest;
+            } else if let Some(rest) = token.strip_prefix('+') {
+                token = rest;
+            }
+            let exception = token.starts_with('~');
+            let mask = if exception { &token[1..] } else { token };
+            if mask.is_empty() {
+                continue;
+            }
+
+            if adding {
+                if c.silence.iter().any(|e| e.mask == mask && e.exception == exception) {
+                    continue;
+                }
+                if c.silence.len() >= max_siles {
+                    let owner = c.nick.clone();
+                    // Drop the write lock before sending so the
+                    // recipient's Client::send doesn't contend with
+                    // anything on the same RwLock.
+                    drop(c);
+                    ctx.send_numeric(
+                        ERR_SILELISTFULL,
+                        vec![owner, mask.to_string(), "Your silence list is full".into()],
+                    )
+                    .await;
+                    return;
+                }
+                c.silence.push(crate::client::SilenceEntry {
+                    mask: mask.to_string(),
+                    exception,
+                });
+                let sigil = if exception { "~" } else { "" };
+                echo_updates.push(format!("+{sigil}{mask}"));
+            } else {
+                let before = c.silence.len();
+                c.silence.retain(|e| !(e.mask == mask && e.exception == exception));
+                if c.silence.len() != before {
+                    let sigil = if exception { "~" } else { "" };
+                    echo_updates.push(format!("-{sigil}{mask}"));
+                }
+            }
+        }
+    }
+
+    // Echo the accepted updates back so clients can confirm the list
+    // changed. C nefarious2 forward_silences does this via
+    // CMD_SILENCE to the source; we mirror its `SILENCE` form.
+    if !echo_updates.is_empty() {
+        let c = ctx.client.read().await;
+        let prefix = c.prefix();
+        let joined = echo_updates.join(",");
+        let out = Message::with_source(&prefix, irc_proto::Command::Silence, vec![joined]);
+        c.send(out);
+    }
+}

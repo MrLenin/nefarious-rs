@@ -79,6 +79,19 @@ pub const RPL_TRACEEND: u16 = 262;
 pub const RPL_USERHOST: u16 = 302;
 pub const RPL_ISON: u16 = 303;
 
+// Silence list (RFC-undocumented Undernet/Nefarious extension)
+/// 271: one line per entry `<target_nick> [~]<mask>`; sent in response
+/// to `SILENCE` without args (view own list).
+pub const RPL_SILELIST: u16 = 271;
+/// 272: sentinel after the list.
+pub const RPL_ENDOFSILELIST: u16 = 272;
+/// 511: emitted when the silence list for the user is full (exceeds
+/// FEAT_MAXSILES).
+pub const ERR_SILELISTFULL: u16 = 511;
+/// 507: emitted when a silence mask is too broad (covers too many
+/// addresses in its IP subnet form).
+pub const ERR_MASKTOOWIDE: u16 = 507;
+
 // Away
 pub const RPL_AWAY: u16 = 301;
 pub const RPL_UNAWAY: u16 = 305;
