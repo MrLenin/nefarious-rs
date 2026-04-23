@@ -73,6 +73,12 @@ pub enum Command {
     Kill,
     Wallops,
 
+    // Network bans (oper-only)
+    Gline,
+    Shun,
+    Zline,
+    Jupe,
+
     // Away
     Away,
 
@@ -149,6 +155,10 @@ impl Command {
             "OPER" => Command::Oper,
             "KILL" => Command::Kill,
             "WALLOPS" => Command::Wallops,
+            "GLINE" => Command::Gline,
+            "SHUN" => Command::Shun,
+            "ZLINE" => Command::Zline,
+            "JUPE" => Command::Jupe,
             "AWAY" => Command::Away,
             "USERHOST" => Command::Userhost,
             "ISON" => Command::Ison,
@@ -206,6 +216,10 @@ impl fmt::Display for Command {
             Command::Oper => write!(f, "OPER"),
             Command::Kill => write!(f, "KILL"),
             Command::Wallops => write!(f, "WALLOPS"),
+            Command::Gline => write!(f, "GLINE"),
+            Command::Shun => write!(f, "SHUN"),
+            Command::Zline => write!(f, "ZLINE"),
+            Command::Jupe => write!(f, "JUPE"),
             Command::Away => write!(f, "AWAY"),
             Command::Userhost => write!(f, "USERHOST"),
             Command::Userip => write!(f, "USERIP"),

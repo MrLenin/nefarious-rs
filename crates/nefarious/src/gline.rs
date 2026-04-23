@@ -84,3 +84,61 @@ pub type GlineStore = DashMap<String, Arc<RwLock<Gline>>>;
 pub fn mask_key(mask: &str) -> String {
     mask.to_ascii_lowercase()
 }
+
+/// Parse an interval string like `1d`, `3h30m`, or bare `3600` into
+/// seconds. Matches nefarious2 ParseInterval in ircd_string.c:
+/// digits before a unit char scale by that unit, trailing digits
+/// are seconds. Unknown unit chars contribute zero. Returns 0 on
+/// empty input.
+pub fn parse_interval(s: &str) -> u64 {
+    let mut seconds: u64 = 0;
+    let mut partial: u64 = 0;
+    for c in s.chars() {
+        if let Some(d) = c.to_digit(10) {
+            partial = partial.saturating_mul(10).saturating_add(d as u64);
+        } else {
+            let unit = match c {
+                'y' => 365 * 24 * 60 * 60,
+                'M' => 31 * 24 * 60 * 60,
+                'w' => 7 * 24 * 60 * 60,
+                'd' => 24 * 60 * 60,
+                'h' => 60 * 60,
+                'm' => 60,
+                's' => 1,
+                _ => 0,
+            };
+            seconds = seconds.saturating_add(partial.saturating_mul(unit));
+            partial = 0;
+        }
+    }
+    seconds.saturating_add(partial)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interval_bare_seconds() {
+        assert_eq!(parse_interval("3600"), 3600);
+    }
+
+    #[test]
+    fn interval_units() {
+        assert_eq!(parse_interval("1d"), 86400);
+        assert_eq!(parse_interval("1h30m"), 5400);
+        assert_eq!(parse_interval("7d"), 604800);
+    }
+
+    #[test]
+    fn interval_trailing_seconds() {
+        // "1m30" → 60 + 30 = 90
+        assert_eq!(parse_interval("1m30"), 90);
+    }
+
+    #[test]
+    fn interval_unknown_unit() {
+        // Unknown unit treated as 0 multiplier; digits before it are lost.
+        assert_eq!(parse_interval("5q"), 0);
+    }
+}

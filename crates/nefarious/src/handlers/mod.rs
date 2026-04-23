@@ -1,6 +1,7 @@
 pub mod channel;
 pub mod messaging;
 pub mod mode;
+pub mod oper_ban;
 pub mod query;
 pub mod registration;
 pub mod server_query;
@@ -152,6 +153,12 @@ impl HandlerContext {
 
             // Wallops (operator broadcast)
             Command::Wallops => messaging::handle_wallops(&ctx, msg).await,
+
+            // Network bans (oper-only)
+            Command::Gline => oper_ban::handle_gline(&ctx, msg).await,
+            Command::Shun => oper_ban::handle_shun(&ctx, msg).await,
+            Command::Zline => oper_ban::handle_zline(&ctx, msg).await,
+            Command::Jupe => oper_ban::handle_jupe(&ctx, msg).await,
 
             // Registration (nick change after registration)
             Command::Nick => registration::handle_nick_change(&ctx, msg).await,
