@@ -29,6 +29,8 @@ pub const RPL_ADMINEMAIL: u16 = 259;
 pub const RPL_LUSERCLIENT: u16 = 251;
 pub const RPL_LUSEROP: u16 = 252;
 pub const RPL_LUSERUNKNOWN: u16 = 253;
+pub const RPL_LOCALUSERS: u16 = 265;
+pub const RPL_GLOBALUSERS: u16 = 266;
 pub const RPL_LUSERCHANNELS: u16 = 254;
 pub const RPL_LUSERME: u16 = 255;
 

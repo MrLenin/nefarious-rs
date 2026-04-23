@@ -426,6 +426,15 @@ pub async fn send_lusers(
         vec![channels.to_string(), "channels formed".into()],
     );
 
+    // RPL_LUSERUNKNOWN (253) — unknown connections. We don't track
+    // registration-in-progress connections in state, so baseline-emit 0.
+    // Matches the C block ordering between LUSERCHANNELS and LUSERME.
+    c.send_numeric(
+        &server_name,
+        RPL_LUSERUNKNOWN,
+        vec!["0".to_string(), "unknown connection(s)".into()],
+    );
+
     c.send_numeric(
         &server_name,
         RPL_LUSERME,
@@ -433,6 +442,30 @@ pub async fn send_lusers(
             "I have {local_clients} clients and {} servers",
             servers.saturating_sub(1)
         )],
+    );
+
+    // RPL_LOCALUSERS (265) / RPL_GLOBALUSERS (266) — the current
+    // plus historical peak counts. We don't track peaks yet, so
+    // repeat the current number for both. Typical clients display
+    // "Current local users N, max N / Current global users M,
+    // max M".
+    c.send_numeric(
+        &server_name,
+        RPL_LOCALUSERS,
+        vec![
+            local_clients.to_string(),
+            local_clients.to_string(),
+            format!("Current local users {local_clients}, max {local_clients}"),
+        ],
+    );
+    c.send_numeric(
+        &server_name,
+        RPL_GLOBALUSERS,
+        vec![
+            total_users.to_string(),
+            total_users.to_string(),
+            format!("Current global users {total_users}, max {total_users}"),
+        ],
     );
 }
 
