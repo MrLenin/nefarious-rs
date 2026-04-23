@@ -342,6 +342,33 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
         info!("burst: sent {zline_count} ZLINE entries");
     }
 
+    // 3d. JUPEs — simpler wire shape (no lifetime, no user@host
+    // split) but same position in the burst stream.
+    let mut jupe_count = 0;
+    for entry in state.jupes.iter() {
+        let ju = entry.value().read().await;
+        if ju.lastmod == 0 {
+            continue;
+        }
+        let sign = if ju.active { '+' } else { '-' };
+        let expire_offset = match ju.expires_at {
+            Some(exp) => (exp.timestamp() - now_secs).max(0),
+            None => 0,
+        };
+        link.send_line(format!(
+            "{server_name} JU * {sign}{name} {expire_offset} {lastmod} :{reason}",
+            server_name = state.server_name,
+            name = ju.server,
+            lastmod = ju.lastmod,
+            reason = ju.reason,
+        ))
+        .await;
+        jupe_count += 1;
+    }
+    if jupe_count > 0 {
+        info!("burst: sent {jupe_count} JUPE entries");
+    }
+
     // 4. Send END_OF_BURST
     let eb = format!("{} EB", our_numeric);
     link.send_line(eb).await;

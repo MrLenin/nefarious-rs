@@ -201,6 +201,9 @@ pub struct ServerState {
     /// Matches on client IP rather than user@host; enforced at
     /// connect like glines.
     pub zlines: crate::zline::ZlineStore,
+    /// Active + suspended Jupe set, keyed by lowercased server name.
+    /// Enforced at server-introduction time (inbound SERVER / S).
+    pub jupes: crate::jupe::JupeStore,
 }
 
 /// One past-user record kept for `/WHOWAS` lookups.
@@ -262,6 +265,7 @@ impl ServerState {
             glines: DashMap::new(),
             shuns: DashMap::new(),
             zlines: DashMap::new(),
+            jupes: DashMap::new(),
         }
     }
 
@@ -544,6 +548,20 @@ impl ServerState {
             let zl = entry.value().read().await;
             if zl.is_enforceable(now) && zl.matches(ip) {
                 return Some((zl.mask.clone(), zl.reason.clone()));
+            }
+        }
+        None
+    }
+
+    /// Check whether a server name is currently juped. Returns the
+    /// (server, reason) snapshot so callers can log/propagate the
+    /// refusal cleanly. Case-insensitive name comparison.
+    pub async fn find_matching_jupe(&self, server_name: &str) -> Option<(String, String)> {
+        let now = chrono::Utc::now();
+        for entry in self.jupes.iter() {
+            let ju = entry.value().read().await;
+            if ju.is_enforceable(now) && ju.matches(server_name) {
+                return Some((ju.server.clone(), ju.reason.clone()));
             }
         }
         None

@@ -6,6 +6,7 @@ mod connection;
 mod dns;
 mod gline;
 mod handlers;
+mod jupe;
 mod numeric;
 mod s2s;
 mod server;

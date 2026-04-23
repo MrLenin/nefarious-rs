@@ -367,6 +367,9 @@ pub async fn handle_server_link<S>(
             P10Token::Zline => {
                 super::handlers::handle_zline(&state, &msg, remote_numeric).await;
             }
+            P10Token::Jupe => {
+                super::handlers::handle_jupe(&state, &msg, remote_numeric).await;
+            }
             P10Token::Squit => {
                 info!("received SQUIT from {remote_name}");
                 break;

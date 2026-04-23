@@ -34,6 +34,18 @@ pub async fn handle_server(state: &ServerState, msg: &P10Message) {
         None => return,
     };
 
+    // JUPE: refuse to record a server whose name is currently
+    // juped. The rogue server can't introduce users on our side and
+    // won't appear in our server tree, so later nick-collision
+    // resolution won't consider them. We keep the line from
+    // propagating further by simply not forwarding to any peers.
+    if let Some((juped_name, reason)) = state.find_matching_jupe(name).await {
+        warn!(
+            "refusing SERVER introduction of {name}: juped by {juped_name} ({reason})"
+        );
+        return;
+    }
+
     let uplink = msg
         .origin
         .as_ref()
@@ -3425,6 +3437,103 @@ pub async fn handle_shun(
         format!("{origin} SU {head} :{trailing}")
     } else {
         format!("{origin} SU {}", msg.params.join(" "))
+    };
+    for entry in state.links.iter() {
+        if *entry.key() != skip {
+            entry.value().send_line(wire.clone()).await;
+        }
+    }
+}
+
+/// Handle inbound S2S JUPE (token `JU`). Simpler than GLINE on the
+/// wire — no lifetime, no user@host split, just a server name.
+/// Format: `<origin> JU <target> [+/-]<servername> <expire_offset>
+/// <lastmod> :<reason>`.
+pub async fn handle_jupe(
+    state: &ServerState,
+    msg: &P10Message,
+    skip: ServerNumeric,
+) {
+    if msg.params.len() < 2 {
+        return;
+    }
+    let origin = match &msg.origin {
+        Some(o) => o.as_str(),
+        None => return,
+    };
+    let target = &msg.params[0];
+    let name_with_action = &msg.params[1];
+    let (action, server_name) = match name_with_action.chars().next() {
+        Some('+') => ('+', &name_with_action[1..]),
+        Some('-') => ('-', &name_with_action[1..]),
+        _ => return,
+    };
+    if server_name.is_empty() {
+        return;
+    }
+    let is_global = target == "*";
+    let key = crate::jupe::name_key(server_name);
+    let now = chrono::Utc::now();
+
+    match action {
+        '+' if is_global => {
+            if msg.params.len() < 4 {
+                tracing::debug!("JU +{server_name} from {origin}: too few params");
+            } else {
+                let expire_offset: i64 = msg.params[2].parse().unwrap_or(0);
+                let lastmod: u64 = msg.params[3].parse().unwrap_or_else(|_| now.timestamp() as u64);
+                let reason = msg
+                    .params
+                    .last()
+                    .filter(|s| !s.is_empty() && msg.params.len() >= 5)
+                    .cloned()
+                    .unwrap_or_else(|| "No reason".to_string());
+                let expires_at = if expire_offset > 0 {
+                    Some(now + chrono::Duration::seconds(expire_offset))
+                } else {
+                    None
+                };
+                let ju = crate::jupe::Jupe {
+                    server: server_name.to_string(),
+                    reason,
+                    expires_at,
+                    set_by: origin.to_string(),
+                    set_at: now,
+                    lastmod,
+                    active: true,
+                };
+                let expires_display = expires_at
+                    .map(|t| t.to_rfc3339())
+                    .unwrap_or_else(|| "never".to_string());
+                state.jupes.insert(key.clone(), Arc::new(RwLock::new(ju)));
+                tracing::info!(
+                    "JU +{server_name} from {origin}: stored, expires={expires_display}"
+                );
+            }
+        }
+        '-' if is_global => {
+            if let Some(entry) = state.jupes.get(&key) {
+                let mut ju = entry.write().await;
+                ju.active = false;
+                if let Some(lm) = msg.params.get(2).and_then(|v| v.parse::<u64>().ok()) {
+                    ju.lastmod = lm;
+                }
+                tracing::info!("JU -{server_name} from {origin}: marked inactive");
+            }
+        }
+        _ => {
+            tracing::debug!(
+                "JU action {action}{server_name} target={target} from {origin}: passthrough only"
+            );
+        }
+    }
+
+    let wire = if msg.params.len() >= 4 {
+        let head = msg.params[..msg.params.len() - 1].join(" ");
+        let trailing = &msg.params[msg.params.len() - 1];
+        format!("{origin} JU {head} :{trailing}")
+    } else {
+        format!("{origin} JU {}", msg.params.join(" "))
     };
     for entry in state.links.iter() {
         if *entry.key() != skip {
