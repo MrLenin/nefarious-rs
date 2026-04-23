@@ -619,6 +619,84 @@ impl ServerState {
         None
     }
 
+    /// Sweep the four ban stores for expired entries and drop them.
+    /// An entry is purge-eligible when its `expires_at` is in the
+    /// past AND any deactivation grace has elapsed. Meant to run
+    /// from a periodic background task — safe to call any time;
+    /// holds the store's shard locks only as long as it takes to
+    /// snapshot keys and inspect each value.
+    pub async fn sweep_expired_bans(&self) -> (usize, usize, usize, usize) {
+        let now = chrono::Utc::now();
+        let mut g = 0usize;
+        let mut s = 0usize;
+        let mut z = 0usize;
+        let mut j = 0usize;
+
+        // Collect keys first so we don't hold the DashMap shard lock
+        // across the per-entry await.
+        let gkeys: Vec<String> =
+            self.glines.iter().map(|e| e.key().clone()).collect();
+        for key in gkeys {
+            let drop_it = match self.glines.get(&key) {
+                Some(e) => {
+                    let gl = e.read().await;
+                    gl.expires_at.map(|t| t <= now).unwrap_or(false)
+                }
+                None => false,
+            };
+            if drop_it {
+                self.glines.remove(&key);
+                g += 1;
+            }
+        }
+        let skeys: Vec<String> =
+            self.shuns.iter().map(|e| e.key().clone()).collect();
+        for key in skeys {
+            let drop_it = match self.shuns.get(&key) {
+                Some(e) => {
+                    let sh = e.read().await;
+                    sh.expires_at.map(|t| t <= now).unwrap_or(false)
+                }
+                None => false,
+            };
+            if drop_it {
+                self.shuns.remove(&key);
+                s += 1;
+            }
+        }
+        let zkeys: Vec<String> =
+            self.zlines.iter().map(|e| e.key().clone()).collect();
+        for key in zkeys {
+            let drop_it = match self.zlines.get(&key) {
+                Some(e) => {
+                    let zl = e.read().await;
+                    zl.expires_at.map(|t| t <= now).unwrap_or(false)
+                }
+                None => false,
+            };
+            if drop_it {
+                self.zlines.remove(&key);
+                z += 1;
+            }
+        }
+        let jkeys: Vec<String> =
+            self.jupes.iter().map(|e| e.key().clone()).collect();
+        for key in jkeys {
+            let drop_it = match self.jupes.get(&key) {
+                Some(e) => {
+                    let ju = e.read().await;
+                    ju.expires_at.map(|t| t <= now).unwrap_or(false)
+                }
+                None => false,
+            };
+            if drop_it {
+                self.jupes.remove(&key);
+                j += 1;
+            }
+        }
+        (g, s, z, j)
+    }
+
     /// Check whether a server name is currently juped. Returns the
     /// (server, reason) snapshot so callers can log/propagate the
     /// refusal cleanly. Case-insensitive name comparison.

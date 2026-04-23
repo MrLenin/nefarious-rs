@@ -100,6 +100,31 @@ pub async fn run(
         return;
     }
 
+    // Background sweeper: purge expired GLINE/SHUN/ZLINE/JUPE
+    // entries once a minute. Match-time already treats expired
+    // entries as non-enforceable so correctness doesn't depend on
+    // the sweep, but without it a long-running server accumulates
+    // permanently-dead rows in the ban stores.
+    let sweep_state = Arc::clone(&state);
+    let sweep_shutdown = Arc::clone(&state.shutdown);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                _ = sweep_shutdown.notified() => return,
+                _ = ticker.tick() => {}
+            }
+            let (g, s, z, j) = sweep_state.sweep_expired_bans().await;
+            if g + s + z + j > 0 {
+                info!(
+                    "ban sweep: dropped {g} glines, {s} shuns, {z} zlines, {j} jupes"
+                );
+            }
+        }
+    });
+
     // Signal handler: flip state.shutdown on SIGINT (Ctrl-C) and —
     // on Unix — SIGTERM. Listener loops select on the Notify and
     // exit accept(), which lets the outer handle joins resolve and
