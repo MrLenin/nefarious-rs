@@ -7,6 +7,7 @@ mod connection;
 mod dns;
 mod dnsbl;
 mod geoip;
+mod gitsync;
 mod gline;
 mod handlers;
 mod ipcheck;

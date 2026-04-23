@@ -89,6 +89,7 @@ pub enum Command {
     Die,
     Connect,
     Check,
+    Gitsync,
 
     // WEBIRC — trusted-gateway IP/host passthrough during registration.
     Webirc,
@@ -179,6 +180,7 @@ impl Command {
             "DIE" => Command::Die,
             "CONNECT" => Command::Connect,
             "CHECK" => Command::Check,
+            "GITSYNC" => Command::Gitsync,
             "WEBIRC" => Command::Webirc,
             "AWAY" => Command::Away,
             "USERHOST" => Command::Userhost,
@@ -247,6 +249,7 @@ impl fmt::Display for Command {
             Command::Die => write!(f, "DIE"),
             Command::Connect => write!(f, "CONNECT"),
             Command::Check => write!(f, "CHECK"),
+            Command::Gitsync => write!(f, "GITSYNC"),
             Command::Webirc => write!(f, "WEBIRC"),
             Command::Away => write!(f, "AWAY"),
             Command::Userhost => write!(f, "USERHOST"),

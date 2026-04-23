@@ -172,6 +172,7 @@ impl HandlerContext {
             Command::Die => server_admin::handle_die(&ctx, msg).await,
             Command::Connect => server_admin::handle_connect(&ctx, msg).await,
             Command::Check => check::handle_check(&ctx, msg).await,
+            Command::Gitsync => server_admin::handle_gitsync(&ctx, msg).await,
 
             // Registration (nick change after registration)
             Command::Nick => registration::handle_nick_change(&ctx, msg).await,

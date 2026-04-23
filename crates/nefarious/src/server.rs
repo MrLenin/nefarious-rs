@@ -145,6 +145,19 @@ pub async fn run(
         }
     });
 
+    // Git config sync: if GIT_CONFIG_PATH is set, spawn a
+    // background loop that runs `git pull --ff-only` on the
+    // configured interval and, when HEAD moves, triggers a
+    // reload_config(). /GITSYNC lets opers force a pull between
+    // scheduled runs.
+    if state.config.load().git_config_path().is_some() {
+        let sync_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            crate::gitsync::run_loop(sync_state).await;
+        });
+        info!("git config sync enabled");
+    }
+
     // Autoconnect: every Connect block with `autoconnect = yes`
     // gets a background task that tries to open the link once at
     // startup and retries on a back-off if the attempt fails. The

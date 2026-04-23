@@ -288,6 +288,26 @@ impl Config {
         self.feature("MMDB_FILE")
     }
 
+    /// `GIT_CONFIG_PATH` — working-tree path of a git checkout
+    /// containing the config file. When set, a background task
+    /// runs `git pull --ff-only` every `GIT_SYNC_INTERVAL`
+    /// seconds; if the HEAD moved, it triggers a reload_config
+    /// automatically so ops can roll a network-wide config change
+    /// by pushing to the repo.
+    pub fn git_config_path(&self) -> Option<&str> {
+        self.feature("GIT_CONFIG_PATH")
+    }
+
+    /// `GIT_SYNC_INTERVAL` — seconds between automatic git pulls.
+    /// Defaults to 300 (5 minutes). Set to 0 to disable the
+    /// background loop while keeping /GITSYNC available for
+    /// manual pulls.
+    pub fn git_sync_interval(&self) -> u64 {
+        self.feature("GIT_SYNC_INTERVAL")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300)
+    }
+
     /// `HOST_HIDING_STYLE` — which cloak strategy applies on +x.
     /// 0 = no cloak, 1 = account-based only, 2 = crypto cloak
     /// only, 3 = both (account wins when logged in, crypto

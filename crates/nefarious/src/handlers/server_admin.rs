@@ -6,6 +6,8 @@
 //! protocol-correct refusal instead of actually restarting the
 //! process, since neither has a clean shutdown path landed yet.
 
+use std::sync::Arc;
+
 use irc_proto::Message;
 
 use crate::numeric::*;
@@ -136,6 +138,44 @@ pub async fn handle_connect(ctx: &HandlerContext, msg: &Message) {
                     .await;
             }
         }
+    });
+}
+
+/// Oper-invoked /GITSYNC — force an immediate `git pull` on the
+/// configured GIT_CONFIG_PATH working tree and, when HEAD moves,
+/// trigger a live reload. Same code path as the background loop;
+/// this just runs it on demand.
+pub async fn handle_gitsync(ctx: &HandlerContext, _msg: &Message) {
+    let is_oper = ctx.client.read().await.modes.contains(&'o');
+    if !is_oper {
+        ctx.send_numeric(
+            ERR_NOPRIVILEGES,
+            vec!["Permission Denied - You're not an IRC operator".into()],
+        )
+        .await;
+        return;
+    }
+
+    let nick = ctx.client.read().await.nick.clone();
+    tracing::info!("/GITSYNC by {nick}");
+    let state = ctx.state.clone();
+    // Don't block the handler on the pull — spawn, then echo the
+    // result as a NOTICE when it completes. Also surface to +s
+    // opers via snotice so the whole ops team sees the outcome.
+    let send_ch = ctx.client.read().await.sender.clone();
+    let server_name = ctx.state.server_name.clone();
+    notice(ctx, "GITSYNC: pull started").await;
+    tokio::spawn(async move {
+        let outcome = crate::gitsync::sync_once(Arc::clone(&state)).await;
+        let summary = outcome.summary();
+        let _ = send_ch
+            .send(irc_proto::Message::with_source(
+                &server_name,
+                irc_proto::Command::Notice,
+                vec![nick, summary.clone()],
+            ))
+            .await;
+        state.snotice(&summary).await;
     });
 }
 

@@ -26,3 +26,4 @@ bcrypt = "0.17"
 md-5 = "0.10"
 maxminddb = "0.26"
 serde = { version = "1", features = ["derive"] }
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "ssh"] }
