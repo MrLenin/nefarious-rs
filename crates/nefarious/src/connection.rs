@@ -31,6 +31,23 @@ pub async fn handle_connection<S>(
         tls_cert_cn.as_deref().unwrap_or("-")
     );
 
+    // Rate limit: refuse the connection up front if this IP has
+    // burned through FEAT_IPCHECK_CLONE_LIMIT connects within the
+    // configured window. The socket closes before any state is
+    // allocated so a determined attacker gets as little resource
+    // consumption as we can manage. Loopback is always allowed so
+    // local tooling and health checks don't hit the cap.
+    let limit = state.config.ipcheck_clone_limit();
+    let period = std::time::Duration::from_secs(state.config.ipcheck_clone_period());
+    if let Err(count) = state.ipcheck.record(addr.ip(), limit, period) {
+        tracing::warn!(
+            "refusing connection from {addr}: IPcheck clone limit ({limit}) exceeded \
+             (count={count}, period={}s)",
+            period.as_secs()
+        );
+        return;
+    }
+
     // Create the message channel for outbound messages
     let (tx, mut rx) = mpsc::channel::<Message>(256);
 
@@ -91,6 +108,7 @@ pub async fn handle_connection<S>(
             state.release_nick(&nick, id);
         }
         state.release_numeric(id);
+        state.ipcheck.release(addr.ip());
         debug!("client {addr} disconnected during registration");
         writer_handle.abort();
         return;
@@ -137,6 +155,7 @@ pub async fn handle_connection<S>(
             state.release_nick(&nick_for_release, id);
         }
         state.release_numeric(id);
+        state.ipcheck.release(addr.ip());
         writer_handle.abort();
         return;
     }
@@ -203,6 +222,7 @@ pub async fn handle_connection<S>(
 
     // Remove from state
     state.remove_client(client_id).await;
+    state.ipcheck.release(addr.ip());
     writer_handle.abort();
 }
 

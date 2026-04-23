@@ -204,6 +204,11 @@ pub struct ServerState {
     /// Active + suspended Jupe set, keyed by lowercased server name.
     /// Enforced at server-introduction time (inbound SERVER / S).
     pub jupes: crate::jupe::JupeStore,
+    /// Per-IP rolling-window connection rate limiter. Checked at
+    /// socket accept; refuses inbound connections from IPs that
+    /// blow through FEAT_IPCHECK_CLONE_LIMIT in the configured
+    /// period.
+    pub ipcheck: crate::ipcheck::IpCheck,
 }
 
 /// One past-user record kept for `/WHOWAS` lookups.
@@ -266,6 +271,7 @@ impl ServerState {
             shuns: DashMap::new(),
             zlines: DashMap::new(),
             jupes: DashMap::new(),
+            ipcheck: crate::ipcheck::IpCheck::new(),
         }
     }
 

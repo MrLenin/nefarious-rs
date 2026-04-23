@@ -186,6 +186,23 @@ impl Config {
         self.feature_bool("HIS_WHO_HOPCOUNT", true)
     }
 
+    /// `IPCHECK_CLONE_LIMIT` — maximum connections a single IP may
+    /// have in-flight within `IPCHECK_CLONE_PERIOD` seconds.
+    /// Defaults to 4 (matches nefarious2 ipcheck.c).
+    pub fn ipcheck_clone_limit(&self) -> u32 {
+        self.feature("IPCHECK_CLONE_LIMIT")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(4)
+    }
+
+    /// `IPCHECK_CLONE_PERIOD` — rolling window in seconds for
+    /// IPCHECK_CLONE_LIMIT enforcement. Defaults to 40s.
+    pub fn ipcheck_clone_period(&self) -> u64 {
+        self.feature("IPCHECK_CLONE_PERIOD")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(40)
+    }
+
     /// `MAXWATCHS` — per-client cap on the WATCH/MONITOR list size.
     /// Defaults to 128, matching nefarious2's F_I(MAXWATCHS, …, 128).
     /// Invalid values in the config silently fall back to the default.
