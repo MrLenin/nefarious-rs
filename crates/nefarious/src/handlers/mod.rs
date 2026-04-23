@@ -154,6 +154,9 @@ impl HandlerContext {
             // Wallops (operator broadcast)
             Command::Wallops => messaging::handle_wallops(&ctx, msg).await,
 
+            // KILL — oper-forced disconnect.
+            Command::Kill => messaging::handle_kill(&ctx, msg).await,
+
             // Network bans (oper-only)
             Command::Gline => oper_ban::handle_gline(&ctx, msg).await,
             Command::Shun => oper_ban::handle_shun(&ctx, msg).await,

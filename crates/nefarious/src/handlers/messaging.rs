@@ -57,6 +57,155 @@ pub async fn handle_wallops(ctx: &HandlerContext, msg: &Message) {
     }
 }
 
+/// Handle KILL — operator-forced disconnect of a user.
+///
+/// `/KILL <nick> :<reason>` routes to the user's home server via
+/// the P10 `D` token when they're remote, or teardowns locally and
+/// announces QUIT across the network when they're one of ours.
+/// Opers only. A wallops-style server notice lets every +w user
+/// know a kill just happened, which matches nefarious2
+/// m_kill.c:mo_kill — operator transparency is part of the kill
+/// contract.
+pub async fn handle_kill(ctx: &HandlerContext, msg: &Message) {
+    let target = match msg.params.first() {
+        Some(t) if !t.is_empty() => t.clone(),
+        _ => {
+            ctx.send_numeric(
+                ERR_NEEDMOREPARAMS,
+                vec!["KILL".into(), "Not enough parameters".into()],
+            )
+            .await;
+            return;
+        }
+    };
+
+    let (killer_prefix, killer_nick, is_oper) = {
+        let c = ctx.client.read().await;
+        (c.prefix(), c.nick.clone(), c.modes.contains(&'o'))
+    };
+    if !is_oper {
+        ctx.send_numeric(
+            ERR_NOPRIVILEGES,
+            vec!["Permission Denied - You're not an IRC operator".into()],
+        )
+        .await;
+        return;
+    }
+
+    // Reason is the last param; if absent, synthesize the
+    // nefarious2 default so peers see a non-empty string.
+    let raw_reason = msg
+        .params
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| "No reason".to_string());
+    // Prefix the reason with "<our_server>!<killer>" so everyone
+    // downstream knows who issued the kill. Matches the
+    // "path!nick (reason)" tail C emits.
+    let stamped_reason = format!(
+        "{server}!{killer} ({raw_reason})",
+        server = ctx.state.server_name,
+        killer = killer_nick,
+    );
+
+    // Local target first — short-circuit if we own the victim.
+    if let Some(victim_arc) = ctx.state.find_client_by_nick(&target) {
+        let (victim_nick, victim_numeric) = {
+            let v = victim_arc.read().await;
+            let numeric = crate::s2s::routing::local_numeric(&ctx.state, v.id);
+            (v.nick.clone(), numeric)
+        };
+
+        // Announce to the network first, before the local client
+        // drops — peers need to learn of the death regardless of
+        // whether our QUIT fan-out races the disconnect.
+        let killer_numeric_wire = {
+            let c = ctx.client.read().await;
+            crate::s2s::routing::local_numeric(&ctx.state, c.id)
+        };
+        let kill_wire = format!(
+            "{killer_numeric_wire} D {victim_numeric} :{stamped_reason}"
+        );
+        for entry in ctx.state.links.iter() {
+            entry.value().send_line(kill_wire.clone()).await;
+        }
+
+        // Local teardown — request_disconnect drives the normal
+        // QUIT broadcast so every local channel-mate sees them
+        // leave, same shape as a self-initiated /QUIT.
+        victim_arc
+            .read()
+            .await
+            .request_disconnect(format!("Killed ({stamped_reason})"));
+
+        // Server notice to +w users (local only — the remote side
+        // will see its own copy when they process the D token).
+        announce_kill(ctx, &killer_prefix, &victim_nick, &stamped_reason).await;
+        return;
+    }
+
+    // Remote target — route the kill token via S2S. We use the
+    // target's numeric when we have it; otherwise fall back to the
+    // raw nick and let peers resolve.
+    if let Some(remote_arc) = ctx.state.find_remote_by_nick(&target) {
+        let r = remote_arc.read().await;
+        let victim_numeric = r.numeric;
+        let victim_nick = r.nick.clone();
+        drop(r);
+
+        let killer_numeric_wire = {
+            let c = ctx.client.read().await;
+            crate::s2s::routing::local_numeric(&ctx.state, c.id)
+        };
+        let kill_wire = format!(
+            "{killer_numeric_wire} D {victim_numeric} :{stamped_reason}"
+        );
+        for entry in ctx.state.links.iter() {
+            entry.value().send_line(kill_wire.clone()).await;
+        }
+
+        // Drop from our own remote_clients table so we don't keep
+        // stale state until the peer's QUIT echoes back.
+        ctx.state.remove_remote_client(victim_numeric).await;
+
+        announce_kill(ctx, &killer_prefix, &victim_nick, &stamped_reason).await;
+        return;
+    }
+
+    // No such user on either side.
+    ctx.send_numeric(
+        ERR_NOSUCHNICK,
+        vec![target, "No such nick/channel".into()],
+    )
+    .await;
+}
+
+/// Emit a local +w server notice so every wallops-subscriber sees
+/// the kill. This is informational only (not propagated) — remote
+/// opers see the same notice when their own server processes the
+/// D token.
+async fn announce_kill(
+    ctx: &HandlerContext,
+    killer_prefix: &str,
+    victim_nick: &str,
+    reason: &str,
+) {
+    let notice = Message::with_source(
+        &ctx.state.server_name,
+        Command::Wallops,
+        vec![format!(
+            "Received KILL message for {victim_nick} from {killer_prefix}: {reason}"
+        )],
+    );
+    let src = crate::tags::SourceInfo::now();
+    for entry in ctx.state.clients.iter() {
+        let c = entry.value().read().await;
+        if c.modes.contains(&'w') {
+            c.send_from(notice.clone(), &src);
+        }
+    }
+}
+
 /// Handle PRIVMSG command.
 pub async fn handle_privmsg(ctx: &HandlerContext, msg: &Message) {
     handle_message(ctx, msg, Command::Privmsg).await;
