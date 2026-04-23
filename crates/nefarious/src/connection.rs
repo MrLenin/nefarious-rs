@@ -586,13 +586,16 @@ async fn send_welcome(client: &Arc<RwLock<Client>>, state: &ServerState) {
     let c = client.read().await;
     let server = &state.server_name;
 
+    // RPL_WELCOME greets with just the nick, not the full
+    // nick!user@host prefix. Matches nefarious2 s_err.c format:
+    //   ":Welcome to the %s IRC Network, %s"
     c.send_numeric(
         server,
         RPL_WELCOME,
         vec![format!(
-            "Welcome to the {} Internet Relay Chat Network {}",
+            "Welcome to the {} IRC Network, {}",
             state.config.load().network(),
-            c.prefix()
+            c.nick,
         )],
     );
 

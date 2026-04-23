@@ -782,9 +782,12 @@ fn apply_burst_modes(chan: &mut Channel, mode_str: &str) {
             // Extended nefarious2 parameterless flags. We store the
             // char verbatim so to_mode_string round-trips and any
             // future enforcement can read the flag straight out of
-            // the set. Mirrors `infochanmodes` in channel.h without
-            // hard-coding semantics we haven't implemented.
-            'C' | 'c' | 'D' | 'M' | 'N' | 'Q' | 'R' | 'r' | 'S' | 'T' | 'u' | 'z' => {
+            // the set. Full set from nefarious2 s_user.c's CHANMODES
+            // type-D group: a C c D d H M N O P Q R r S T u Z z.
+            // We accept whatever peers send even if we don't enforce
+            // it locally yet; mismatched sets would break round-trip.
+            'a' | 'C' | 'c' | 'D' | 'd' | 'H' | 'M' | 'N' | 'O' | 'P'
+            | 'Q' | 'R' | 'r' | 'S' | 'T' | 'u' | 'Z' | 'z' => {
                 chan.modes.extended_flags.insert(c);
             }
             _ => {}
@@ -1775,8 +1778,10 @@ async fn apply_remote_channel_mode(
                 }
             }
             // Extended nefarious2 parameterless flags — round-trip
-            // state only, no enforcement yet.
-            'C' | 'c' | 'D' | 'M' | 'N' | 'Q' | 'R' | 'r' | 'S' | 'T' | 'u' | 'z' => {
+            // state only, no enforcement yet for most. Full set
+            // matches s_user.c CHANMODES type-D group.
+            'a' | 'C' | 'c' | 'D' | 'd' | 'H' | 'M' | 'N' | 'O' | 'P'
+            | 'Q' | 'R' | 'r' | 'S' | 'T' | 'u' | 'Z' | 'z' => {
                 if adding {
                     chan.modes.extended_flags.insert(c);
                 } else {

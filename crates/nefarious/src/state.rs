@@ -1266,18 +1266,33 @@ impl ServerState {
         let max_siles = cfg.max_siles();
         let max_watchs = cfg.max_watchs();
         let max_channels = cfg.max_channels_per_user();
+        // CHANMODES groups (IRCv3 / Undernet convention):
+        //   A — list modes (take a mask param, added to a list)
+        //   B — param always (both +set and -unset carry it)
+        //   C — param when set only
+        //   D — no param
+        // We keep the full nefarious2 type-D set advertised even
+        // where enforcement is partial — peers use this list to
+        // decide whether a MODE they see needs a param, so missing
+        // a flag here would desync param parsing on the client side.
+        let chanmodes = "be,k,Ll,aCcDdHiMmNnOPpQRrSTtuZz";
         vec![
             "CASEMAPPING=rfc1459".to_string(),
+            "CHANTYPES=#&".to_string(),
             format!("CHANLIMIT=#:{max_channels}"),
-            "CHANMODES=b,k,l,imnpst".to_string(),
+            format!("CHANMODES={chanmodes}"),
             format!("CHANNELLEN={channellen}"),
+            "EXCEPTS=e".to_string(),
             format!("MAXBANS={max_bans}"),
             format!("MAXCHANNELS={max_channels}"),
-            format!("MAXLIST=b:{max_bans}"),
+            format!("MAXLIST=b:{max_bans},e:{max_bans}"),
             format!("NETWORK={}", cfg.network()),
             format!("NICKLEN={nicklen}"),
-            "PREFIX=(ov)@+".to_string(),
+            // PREFIX and STATUSMSG include halfop (%) since our
+            // MembershipFlags carries it and NAMES renders it.
+            "PREFIX=(ohv)@%+".to_string(),
             format!("SILENCE={max_siles}"),
+            "STATUSMSG=@%+".to_string(),
             "TOPICLEN=390".to_string(),
             format!("WATCH={max_watchs}"),
             "MODES=6".to_string(),
