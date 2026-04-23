@@ -250,7 +250,43 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
     }
     info!("burst: sent {channel_count} channel BURST lines");
 
-    // 3. Send END_OF_BURST
+    // 3. Send all known global G-lines before EB so peers have the
+    // full ban set before they start announcing users that could
+    // match. Wire (nefarious2 gline.c gline_burst):
+    //   <server_name> GL * [+/-]<mask> <expire_offset> <lastmod> <lifetime> :<reason>
+    // We use origin=server_name (not numeric) because gline_burst
+    // uses `&me` which serializes to the server name. Inactive
+    // glines still go out so their state (and lastmod) replicates;
+    // peers can then activate if their local state says so.
+    let mut gline_count = 0;
+    let now_secs = chrono::Utc::now().timestamp();
+    for entry in state.glines.iter() {
+        let gl = entry.value().read().await;
+        // Skip entries with no lastmod — matches C gliter filter.
+        if gl.lastmod == 0 {
+            continue;
+        }
+        let sign = if gl.active { '+' } else { '-' };
+        let expire_offset = match gl.expires_at {
+            Some(exp) => (exp.timestamp() - now_secs).max(0),
+            None => 0,
+        };
+        let lifetime = gl.lifetime.unwrap_or(0);
+        link.send_line(format!(
+            "{server} GL * {sign}{mask} {expire_offset} {lastmod} {lifetime} :{reason}",
+            server = state.server_name,
+            mask = gl.mask,
+            lastmod = gl.lastmod,
+            reason = gl.reason,
+        ))
+        .await;
+        gline_count += 1;
+    }
+    if gline_count > 0 {
+        info!("burst: sent {gline_count} GLINE entries");
+    }
+
+    // 4. Send END_OF_BURST
     let eb = format!("{} EB", our_numeric);
     link.send_line(eb).await;
 
