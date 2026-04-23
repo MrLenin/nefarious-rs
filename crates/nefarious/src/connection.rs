@@ -15,6 +15,43 @@ use crate::handlers::registration::{handle_cap, is_valid_nick};
 use crate::numeric::*;
 use crate::state::ServerState;
 
+/// Pick the first Client config block matching this peer's
+/// ip/host and, if it has a password, compare against the stashed
+/// PASS. Returns `Some(reason)` when the match is refused, `None`
+/// when authentication passes (either a password-protected block
+/// accepted or no password was required).
+fn check_client_block_password(
+    clients: &[irc_config::ClientConfig],
+    ip: &str,
+    host: &str,
+    presented: Option<&str>,
+) -> Option<String> {
+    for block in clients {
+        let ip_match = block.ip == "*"
+            || crate::channel::wildcard_match(&block.ip, ip);
+        let host_match = match &block.host {
+            Some(pat) => crate::channel::wildcard_match(pat, host),
+            None => true,
+        };
+        if !(ip_match && host_match) {
+            continue;
+        }
+        match &block.password {
+            None => return None, // match, no password required
+            Some(required) => {
+                return match presented {
+                    Some(p) if p == required => None,
+                    Some(_) => Some("Invalid password".into()),
+                    None => Some("Password required".into()),
+                };
+            }
+        }
+    }
+    // No Client block matched — allow through for now. A future
+    // FEAT_DENY_UNKNOWN_CLIENT can flip this to a refusal.
+    None
+}
+
 /// Search config Kill blocks for one matching `user_host` or `ip`.
 /// Either field being empty counts as a wildcard — a block with only
 /// `host` matches by user@host, only `ip` matches by IP, both
@@ -140,6 +177,49 @@ pub async fn handle_connection<S>(
 
     let client_id = client.read().await.id;
     let nick = client.read().await.nick.clone();
+
+    // Client-block password gate. If any Client {} config block
+    // matches this peer (by ip or host glob) and has a password
+    // set, the client must have sent a matching PASS during
+    // registration. A matching block without a password allows
+    // through; no matching block at all also allows through (the
+    // strict "deny without I-line" mode is a separate feature
+    // flag we haven't wired yet).
+    let pass_fail = {
+        let c = client.read().await;
+        let ip = c.addr.ip().to_string();
+        let host = c.host.clone();
+        let pass = c.pass.clone();
+        drop(c);
+        check_client_block_password(&state.config.clients, &ip, &host, pass.as_deref())
+    };
+    if let Some(reason) = pass_fail {
+        info!("refusing registration of {nick} ({addr}): {reason}");
+        let (id, nick_for_release) = {
+            let c = client.read().await;
+            (c.id, c.nick.clone())
+        };
+        let c = client.read().await;
+        c.send_raw(irc_proto::Message::with_source(
+            &state.server_name,
+            irc_proto::Command::Error,
+            vec![format!("Closing Link: {nick} [{reason}]")],
+        ));
+        drop(c);
+        if !nick_for_release.is_empty() {
+            state.release_nick(&nick_for_release, id);
+        }
+        state.release_numeric(id);
+        state.ipcheck.release(addr.ip());
+        writer_handle.abort();
+        return;
+    }
+
+    // Wipe the stashed password now that authentication is done.
+    // Keeping it in memory longer than necessary is a needless
+    // exposure if anything later spills client state (debug dumps,
+    // stats, etc).
+    client.write().await.pass = None;
 
     // Network-ban gates. Happen *after* nick/USER are parsed so we
     // have `user` + a resolved hostname, but *before* we tell the
@@ -339,7 +419,14 @@ async fn registration_phase(
             }
 
             Command::Pass => {
-                // Accept and ignore for now (no password auth in Phase 0)
+                // Stash the password — enforcement happens at the
+                // end of registration against the matching Client
+                // config block. Accept multiple PASS commands; the
+                // most recent wins (matches ircu's semantics).
+                if let Some(pass) = msg.params.first() {
+                    let mut c = client.write().await;
+                    c.pass = Some(pass.clone());
+                }
             }
 
             Command::Webirc => {

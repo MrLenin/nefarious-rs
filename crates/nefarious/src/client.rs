@@ -40,6 +40,11 @@ pub struct Client {
     pub id: ClientId,
     /// Current nickname.
     pub nick: String,
+    /// PASS value presented during registration, if any. Checked
+    /// against the matching Client config block's password at the
+    /// end of registration. Cleared after verification so it
+    /// doesn't linger in memory.
+    pub pass: Option<String>,
     /// Username (from USER command).
     pub user: String,
     /// Realname (from USER command).
@@ -176,6 +181,7 @@ impl Client {
         Self {
             id: ClientId::next(),
             nick: String::new(),
+            pass: None,
             user: String::new(),
             realname: String::new(),
             host: addr.ip().to_string(),
