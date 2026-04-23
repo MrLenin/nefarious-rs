@@ -231,7 +231,12 @@ impl Channel {
     }
 
     /// Check if a client can send to this channel.
-    pub fn can_send(&self, id: &ClientId) -> bool {
+    pub fn can_send(&self, id: &ClientId, is_account: bool) -> bool {
+        // +R — registered users only. Applies to both members and
+        // non-member senders, so check first.
+        if self.modes.extended_flags.contains(&'R') && !is_account {
+            return false;
+        }
         if !self.modes.no_external && !self.is_member(id) {
             // External messages allowed and not a member
             return true;
@@ -253,10 +258,19 @@ impl Channel {
     }
 
     /// Check if a user can join this channel.
-    pub fn can_join(&self, id: &ClientId, prefix: &str, key: Option<&str>) -> JoinCheck {
+    pub fn can_join(
+        &self,
+        id: &ClientId,
+        prefix: &str,
+        key: Option<&str>,
+        is_account: bool,
+        is_tls: bool,
+    ) -> JoinCheck {
         if self.is_member(id) {
             return JoinCheck::AlreadyMember;
         }
+        // Invites bypass +b / +i / +k / +l / +r / +z per standard
+        // IRC semantics — user was explicitly let in.
         if self.invites.contains(id) {
             return JoinCheck::Ok;
         }
@@ -265,6 +279,14 @@ impl Channel {
         }
         if self.modes.invite_only {
             return JoinCheck::InviteOnly;
+        }
+        // +r — authenticated users only.
+        if self.modes.extended_flags.contains(&'r') && !is_account {
+            return JoinCheck::RegisteredOnly;
+        }
+        // +z — SSL-only.
+        if self.modes.extended_flags.contains(&'z') && !is_tls {
+            return JoinCheck::SslOnly;
         }
         if let Some(ref chan_key) = self.modes.key {
             if key != Some(chan_key.as_str()) {
@@ -288,6 +310,10 @@ pub enum JoinCheck {
     InviteOnly,
     BadKey,
     Full,
+    /// `+r` set and the user has no authenticated account.
+    RegisteredOnly,
+    /// `+z` set and the user is not on a TLS connection.
+    SslOnly,
 }
 
 /// Simple IRC wildcard matching (* and ?), rfc1459-case-insensitive.

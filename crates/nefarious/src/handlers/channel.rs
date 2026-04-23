@@ -44,11 +44,16 @@ pub async fn handle_join(ctx: &HandlerContext, msg: &Message) {
         let channel = ctx.state.get_or_create_channel(chan_name);
         let is_new;
 
+        let (is_account, is_tls) = {
+            let c = ctx.client.read().await;
+            (c.account.is_some(), c.tls)
+        };
+
         {
             let mut chan = channel.write().await;
 
             // Check join eligibility
-            match chan.can_join(&client_id, &prefix, key) {
+            match chan.can_join(&client_id, &prefix, key, is_account, is_tls) {
                 JoinCheck::Ok => {}
                 JoinCheck::AlreadyMember => continue,
                 JoinCheck::Banned => {
@@ -82,6 +87,34 @@ pub async fn handle_join(ctx: &HandlerContext, msg: &Message) {
                     ctx.send_numeric(
                         ERR_CHANNELISFULL,
                         vec![chan_name.to_string(), "Cannot join channel (+l)".into()],
+                    )
+                    .await;
+                    continue;
+                }
+                JoinCheck::RegisteredOnly => {
+                    // 477 ERR_NEEDREGGEDNICK / ERR_REGONLYCHAN (nefarious2
+                    // uses 477 for +r gates). Reuse BANNEDFROMCHAN's
+                    // code-gate surface — the numeric code is
+                    // channel-specific and our numeric module doesn't
+                    // have it defined yet.
+                    ctx.send_numeric(
+                        477,
+                        vec![
+                            chan_name.to_string(),
+                            "Cannot join channel (+r) — you need to authenticate".into(),
+                        ],
+                    )
+                    .await;
+                    continue;
+                }
+                JoinCheck::SslOnly => {
+                    // 489 ERR_SECUREONLYCHAN per nefarious2
+                    ctx.send_numeric(
+                        489,
+                        vec![
+                            chan_name.to_string(),
+                            "Cannot join channel (+z) — SSL only".into(),
+                        ],
                     )
                     .await;
                     continue;

@@ -106,9 +106,10 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
         };
 
         let chan = channel.read().await;
+        let is_account = ctx.client.read().await.account.is_some();
 
         // Check if client can send to channel
-        if !chan.can_send(&client_id) {
+        if !chan.can_send(&client_id, is_account) {
             if cmd == Command::Privmsg {
                 ctx.send_numeric(
                     ERR_CANNOTSENDTOCHAN,
