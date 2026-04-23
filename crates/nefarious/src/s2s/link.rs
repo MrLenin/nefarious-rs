@@ -339,6 +339,9 @@ pub async fn handle_server_link<S>(
             P10Token::Whois => {
                 super::handlers::handle_whois(&state, &msg).await;
             }
+            P10Token::Wallops => {
+                super::handlers::handle_wallops(&state, &msg).await;
+            }
             P10Token::Squit => {
                 info!("received SQUIT from {remote_name}");
                 break;

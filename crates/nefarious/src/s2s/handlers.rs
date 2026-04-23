@@ -1867,10 +1867,26 @@ pub async fn handle_topic(state: &ServerState, msg: &P10Message) {
     let chan_name = &msg.params[0];
     let source_prefix = get_source_prefix(state, msg).await;
 
-    // TOPIC format varies:
-    // <origin> T <channel> <setter> <ts> <ts> :<topic>
-    // or simpler: <origin> T <channel> :<topic>
+    // TOPIC wire per nefarious2/ircd/m_topic.c:185 —
+    //   <origin> T <channel> <setter> <chan_ts> <topic_ts> :<topic>   (4-arg)
+    //   <origin> T <channel> <chan_ts> <topic_ts> :<topic>             (3-arg, setter=server)
+    //   <origin> T <channel> :<topic>                                   (legacy/short)
+    //
+    // Parse topic_ts from the 4th-from-last slot when present so the
+    // stored `topic_time` matches when the topic was actually set on
+    // its home server — not when we happened to receive the S2S line.
+    // Local /TOPIC queries emitting 333 RPL_TOPICWHOTIME will then
+    // show the right time, consistent across the network.
     let topic = msg.params.last().cloned().unwrap_or_default();
+    let parc = msg.params.len();
+    let topic_ts_epoch: Option<u64> = if parc >= 4 {
+        // 4-arg: params[parc-2] is topic_ts; 3-arg: params[parc-2] is
+        // topic_ts; both put the topic_ts at position parc-2 since the
+        // trailing is always the topic text.
+        msg.params.get(parc - 2).and_then(|s| s.parse().ok())
+    } else {
+        None
+    };
 
     if let Some(channel) = state.get_channel(chan_name) {
         {
@@ -1881,7 +1897,9 @@ pub async fn handle_topic(state: &ServerState, msg: &P10Message) {
                 Some(topic.clone())
             };
             chan.topic_setter = Some(source_prefix.clone());
-            chan.topic_time = Some(chrono::Utc::now());
+            chan.topic_time = topic_ts_epoch
+                .and_then(|ms| chrono::DateTime::from_timestamp(ms as i64, 0))
+                .or_else(|| Some(chrono::Utc::now()));
         }
 
         // Notify local members
@@ -2494,6 +2512,36 @@ async fn send_whois_numeric(
         }
     }
     link.send_line(line).await;
+}
+
+/// Handle WA (WALLOPS) from a remote source.
+///
+/// Wire per nefarious2 m_wallops.c: `<origin> WA :<text>`. Delivered
+/// verbatim to every local user with umode `+w` set. Origin is
+/// either a user numeric (oper wallops) or a server numeric (server
+/// wallops). We don't gate on FEAT_WALLOPS_OPER_ONLY — that's a
+/// feature flag for receive-side filtering that belongs to a later
+/// commit.
+pub async fn handle_wallops(state: &ServerState, msg: &P10Message) {
+    if msg.params.is_empty() {
+        return;
+    }
+    let text = msg.params[0].clone();
+    let source_prefix = get_source_prefix(state, msg).await;
+    let src = source_info_from_origin(state, msg).await;
+
+    let wallops_msg = irc_proto::Message::with_source(
+        &source_prefix,
+        irc_proto::Command::Wallops,
+        vec![text],
+    );
+
+    for entry in state.clients.iter() {
+        let c = entry.value().read().await;
+        if c.modes.contains(&'w') {
+            c.send_from(wallops_msg.clone(), &src);
+        }
+    }
 }
 
 /// Handle DE (DESTRUCT) — channel destruction.

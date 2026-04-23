@@ -124,6 +124,14 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
                 privs_count += 1;
             }
         }
+
+        // 1d. If the user is away, follow with A token so peers can
+        // drive their own away-notify emissions from burst onwards
+        // without waiting for a state change. Matches nefarious2
+        // m_burst.c / s_serv.c which emit CMD_AWAY during burst.
+        if let Some(ref away) = client.away_message {
+            link.send_line(format!("{client_numeric} A :{away}")).await;
+        }
     }
 
     info!(
@@ -190,6 +198,30 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
 
         link.send_line(line).await;
         channel_count += 1;
+
+        // 2b. Follow with TOPIC if the channel has one. Matches
+        // nefarious2 m_burst.c:384 TOPIC_BURST behaviour — without
+        // this, new peers see topic-less channels until the next
+        // /TOPIC set. The 3-arg form (chan <chan_ts> <topic_ts>
+        // :<topic>) is used when we don't track a specific setter
+        // as a user; we store setter as a prefix string so use the
+        // 4-arg form with our server name as setter when unknown.
+        if let Some(ref topic) = chan.topic {
+            let topic_ts = chan
+                .topic_time
+                .map(|t| t.timestamp() as u64)
+                .unwrap_or(chan.created_ts);
+            let setter = chan
+                .topic_setter
+                .clone()
+                .unwrap_or_else(|| state.server_name.clone());
+            let chan_ts = chan.created_ts;
+            link.send_line(format!(
+                "{our_numeric} T {name} {setter} {chan_ts} {topic_ts} :{topic}",
+                name = chan.name,
+            ))
+            .await;
+        }
     }
     info!("burst: sent {channel_count} channel BURST lines");
 
