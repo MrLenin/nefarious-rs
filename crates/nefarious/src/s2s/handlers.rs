@@ -2439,6 +2439,18 @@ pub async fn handle_whois(state: &ServerState, msg: &P10Message) {
                 .await;
             }
 
+            // 671 RPL_WHOISSSL if connected via TLS.
+            if t.tls {
+                send_whois_numeric(
+                    state,
+                    &our,
+                    &req_str,
+                    671,
+                    &[&t.nick, "is using a secure connection (SSL)"],
+                )
+                .await;
+            }
+
             // 330 RPL_WHOISACCOUNT if logged in
             if let Some(ref account) = t.account {
                 send_whois_numeric(

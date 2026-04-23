@@ -195,6 +195,13 @@ pub async fn handle_whois(ctx: &HandlerContext, msg: &Message) {
             )
             .await;
         }
+        if t.tls {
+            ctx.send_numeric(
+                RPL_WHOISSSL,
+                vec![t.nick.clone(), "is using a secure connection (SSL)".into()],
+            )
+            .await;
+        }
         if !t.channels.is_empty() {
             let requester_id = ctx.client_id().await;
             let mut chan_list = Vec::new();
@@ -298,6 +305,16 @@ pub async fn handle_whois(ctx: &HandlerContext, msg: &Message) {
             ctx.send_numeric(
                 RPL_WHOISOPERATOR,
                 vec![r.nick.clone(), "is an IRC operator".into()],
+            )
+            .await;
+        }
+        // Remote users don't carry a direct TLS flag — nefarious2
+        // marks SSL-connected users with umode +z, carried in
+        // RemoteClient.modes.
+        if r.modes.contains(&'z') {
+            ctx.send_numeric(
+                RPL_WHOISSSL,
+                vec![r.nick.clone(), "is using a secure connection (SSL)".into()],
             )
             .await;
         }

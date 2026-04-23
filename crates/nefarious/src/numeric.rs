@@ -31,6 +31,13 @@ pub const RPL_LUSEROP: u16 = 252;
 pub const RPL_LUSERUNKNOWN: u16 = 253;
 pub const RPL_LOCALUSERS: u16 = 265;
 pub const RPL_GLOBALUSERS: u16 = 266;
+
+// WHOIS extensions
+/// RPL_WHOISSSL: `<nick> :is using a secure connection (SSL)`
+pub const RPL_WHOISSSL: u16 = 671;
+/// RPL_HOSTHIDDEN: `<host> :is now your displayed host` — emitted
+/// when a user's host is cloaked on +x activation.
+pub const RPL_HOSTHIDDEN: u16 = 396;
 pub const RPL_LUSERCHANNELS: u16 = 254;
 pub const RPL_LUSERME: u16 = 255;
 
