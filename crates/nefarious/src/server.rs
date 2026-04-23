@@ -125,6 +125,59 @@ pub async fn run(
         }
     });
 
+    // Autoconnect: every Connect block with `autoconnect = yes`
+    // gets a background task that tries to open the link once at
+    // startup and retries on a back-off if the attempt fails. The
+    // retry cadence is intentionally simple (fixed 60s) — more
+    // sophisticated back-off / jitter can layer on if we start
+    // seeing flapping links. Uses the same outbound handshake as
+    // the oper-invoked /CONNECT.
+    for connect in &config.connects {
+        if !connect.autoconnect {
+            continue;
+        }
+        let state = Arc::clone(&state);
+        let name = connect.name.clone();
+        let shutdown = Arc::clone(&state.shutdown);
+        tokio::spawn(async move {
+            loop {
+                if state.links.iter().any(|e| e.value().name == name) {
+                    // Already linked — nothing to do. Sleep then
+                    // re-check; if the link drops we'll retry.
+                    let sleep = tokio::time::sleep(std::time::Duration::from_secs(60));
+                    tokio::pin!(sleep);
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.notified() => return,
+                        _ = &mut sleep => {}
+                    }
+                    continue;
+                }
+                info!("autoconnect: attempting link to {name}");
+                match initiate_server_connection(
+                    Arc::clone(&state),
+                    name.clone(),
+                    None,
+                )
+                .await
+                {
+                    Ok(()) => info!("autoconnect: {name} established"),
+                    Err(e) => tracing::warn!("autoconnect {name}: {e}"),
+                }
+                // Whether success or failure, wait before the next
+                // attempt. Success means the link is up now; loop
+                // top sees it and sleeps without reconnecting.
+                let sleep = tokio::time::sleep(std::time::Duration::from_secs(60));
+                tokio::pin!(sleep);
+                tokio::select! {
+                    biased;
+                    _ = shutdown.notified() => return,
+                    _ = &mut sleep => {}
+                }
+            }
+        });
+    }
+
     // Signal handler: flip state.shutdown on SIGINT (Ctrl-C) and —
     // on Unix — SIGTERM. Listener loops select on the Notify and
     // exit accept(), which lets the outer handle joins resolve and
