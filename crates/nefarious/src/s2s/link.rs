@@ -355,6 +355,9 @@ pub async fn handle_server_link<S>(
             P10Token::Clearmode => {
                 super::handlers::handle_clearmode(&state, &msg).await;
             }
+            P10Token::Silence => {
+                super::handlers::handle_silence(&state, &msg, remote_numeric).await;
+            }
             P10Token::Squit => {
                 info!("received SQUIT from {remote_name}");
                 break;

@@ -1283,10 +1283,32 @@ pub async fn handle_silence(ctx: &HandlerContext, msg: &Message) {
     // changed. C nefarious2 forward_silences does this via
     // CMD_SILENCE to the source; we mirror its `SILENCE` form.
     if !echo_updates.is_empty() {
-        let c = ctx.client.read().await;
-        let prefix = c.prefix();
+        let (prefix, numeric) = {
+            let c = ctx.client.read().await;
+            let prefix = c.prefix();
+            let numeric = crate::s2s::routing::local_numeric(&ctx.state, c.id);
+            (prefix, numeric)
+        };
         let joined = echo_updates.join(",");
-        let out = Message::with_source(&prefix, irc_proto::Command::Silence, vec![joined]);
-        c.send(out);
+        let out = Message::with_source(
+            &prefix,
+            irc_proto::Command::Silence,
+            vec![joined.clone()],
+        );
+        ctx.client.read().await.send(out);
+
+        // Forward to every S2S peer so remote senders start dropping
+        // their outgoing messages to us for matching silences, and
+        // peers can replay the filter to their own routing table.
+        // Broadcast target `*` — nefarious2's forward_silences uses
+        // the same when the update is a deletion / exception whose
+        // scope isn't limited to a specific peer. For the initial
+        // landing we broadcast every update; a later pass can prune
+        // to just the peers the user has messaged (FEAT_SILENCE_CHANMSGS-
+        // style optimisation).
+        let wire = format!("{numeric} U * {joined}");
+        for entry in ctx.state.links.iter() {
+            entry.value().send_line(wire.clone()).await;
+        }
     }
 }

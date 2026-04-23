@@ -72,6 +72,14 @@ pub enum P10Token {
     Opmode,
     Clearmode,
 
+    // Per-user sender filter. Wire form:
+    //   <sender> U <target_or_*> <silence_updates>
+    // where <sender> is the silenced user's numeric (or the server's
+    // when propagated), <target> is the directed forward target
+    // numeric (or "*" for a broadcast), and <silence_updates> is a
+    // comma-separated list of [+-]?~?<mask> tokens.
+    Silence,
+
     // Unknown token
     Unknown(String),
 }
@@ -137,6 +145,9 @@ impl P10Token {
             "OPMODE" => P10Token::Opmode,
             "CM" => P10Token::Clearmode,
             "CLEARMODE" => P10Token::Clearmode,
+
+            "U" => P10Token::Silence,
+            "SILENCE" => P10Token::Silence,
 
             // Also accept full command names
             "PASS" => P10Token::Pass,
@@ -219,6 +230,7 @@ impl P10Token {
             P10Token::Whois => "W",
             P10Token::Opmode => "OM",
             P10Token::Clearmode => "CM",
+            P10Token::Silence => "U",
             P10Token::Unknown(s) => s,
         }
     }

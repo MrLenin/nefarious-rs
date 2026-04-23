@@ -3198,6 +3198,97 @@ pub async fn propagate_end_of_burst(
     }
 }
 
+/// Handle inbound S2S SILENCE (token `U`).
+///
+/// Wire:
+///   `<sender> U <target_or_*> <comma_updates>`
+///
+/// `<sender>` is either a user numeric (the user whose silence list
+/// is being updated) or a server numeric (when broadcasting on
+/// their behalf). `<target>` is a user numeric when the update is
+/// directed at a specific peer (because the sender has positive
+/// silences and we're telling that peer how to filter), or `*` for
+/// a broadcast (removal / exception that everyone needs).
+///
+/// Local effect: if the sender is one of our local users, apply the
+/// updates to their stored silence list. Otherwise it's a remote
+/// user's list and we don't track it on this node — we just pass
+/// the update through to the next hop.
+///
+/// S2S relay: forward to every link except the one we received it
+/// on, directed if `<target>` is a non-`*` user numeric and we know
+/// a route to them, broadcast otherwise. Matches ms_silence in
+/// nefarious2 m_silence.c:326.
+pub async fn handle_silence(
+    state: &ServerState,
+    msg: &P10Message,
+    skip: ServerNumeric,
+) {
+    if msg.params.len() < 2 {
+        return;
+    }
+    let origin = match &msg.origin {
+        Some(o) => o.as_str(),
+        None => return,
+    };
+    let target = &msg.params[0];
+    let updates = &msg.params[1];
+
+    // Is the sender a local user? If so, mirror the update into our
+    // own state so /SILENCE shows the right list even though the
+    // update came in over the wire (e.g. a services bot that used
+    // SVSSILENCE). If the sender is remote, we just forward.
+    if let Some(num) = ClientNumeric::from_str(origin) {
+        if num.server == state.numeric {
+            if let Some(id) = state.client_by_numeric_slot(num.client) {
+                if let Some(arc) = state.clients.get(&id) {
+                    let mut c = arc.write().await;
+                    for raw in updates.split(',').filter(|t| !t.is_empty()) {
+                        let (adding, rest) = if let Some(r) = raw.strip_prefix('-') {
+                            (false, r)
+                        } else if let Some(r) = raw.strip_prefix('+') {
+                            (true, r)
+                        } else {
+                            (true, raw)
+                        };
+                        let (exception, mask) = if let Some(r) = rest.strip_prefix('~') {
+                            (true, r)
+                        } else {
+                            (false, rest)
+                        };
+                        if mask.is_empty() {
+                            continue;
+                        }
+                        if adding {
+                            if !c.silence.iter().any(|e| e.mask == mask && e.exception == exception)
+                            {
+                                c.silence.push(crate::client::SilenceEntry {
+                                    mask: mask.to_string(),
+                                    exception,
+                                });
+                            }
+                        } else {
+                            c.silence.retain(|e| !(e.mask == mask && e.exception == exception));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Forward to every link except the one we received this on.
+    // Matches propagate_end_of_burst's fan-out style; in our current
+    // single-link topology this effectively no-ops (origin is our
+    // only peer). When multi-link support lands the fan-out already
+    // does the right thing.
+    let wire = format!("{origin} U {target} {updates}");
+    for entry in state.links.iter() {
+        if *entry.key() != skip {
+            entry.value().send_line(wire.clone()).await;
+        }
+    }
+}
+
 /// Propagate a forwarded `EA` (End of Burst Ack) to every outbound
 /// link except the one it arrived on (`skip`).
 ///
