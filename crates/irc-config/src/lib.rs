@@ -174,6 +174,18 @@ impl Config {
         self.feature_bool("HIS_LINKS", true)
     }
 
+    /// `HIS_WHO_SERVERNAME` — hide the real server column in WHO
+    /// replies for non-opers (substitute HIS_SERVERNAME). Default true.
+    pub fn his_who_servername(&self) -> bool {
+        self.feature_bool("HIS_WHO_SERVERNAME", true)
+    }
+
+    /// `HIS_WHO_HOPCOUNT` — report 0 as the hop count in WHO replies
+    /// for non-opers rather than the real value. Default true.
+    pub fn his_who_hopcount(&self) -> bool {
+        self.feature_bool("HIS_WHO_HOPCOUNT", true)
+    }
+
     /// `MAXWATCHS` — per-client cap on the WATCH/MONITOR list size.
     /// Defaults to 128, matching nefarious2's F_I(MAXWATCHS, …, 128).
     /// Invalid values in the config silently fall back to the default.

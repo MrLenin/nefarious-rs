@@ -7,11 +7,18 @@ use super::HandlerContext;
 /// Handle WHO command.
 pub async fn handle_who(ctx: &HandlerContext, msg: &Message) {
     let mask = msg.params.first().map(|s| s.as_str()).unwrap_or("*");
-    let multi_prefix = ctx
-        .client
-        .read()
-        .await
-        .has_cap(crate::capabilities::Capability::MultiPrefix);
+    let (multi_prefix, is_oper) = {
+        let c = ctx.client.read().await;
+        (
+            c.has_cap(crate::capabilities::Capability::MultiPrefix),
+            c.modes.contains(&'o'),
+        )
+    };
+    // HIS_WHO_SERVERNAME/HOPCOUNT are enforced here — opers always see
+    // the unmangled columns, everyone else gets the sanitised form.
+    let hide_server = !is_oper && ctx.state.config.his_who_servername();
+    let hide_hops = !is_oper && ctx.state.config.his_who_hopcount();
+    let his_servername = ctx.state.config.his_servername().map(|s| s.to_string());
 
     if mask.starts_with('#') || mask.starts_with('&') {
         // WHO for a channel — include both local and remote members.
@@ -21,13 +28,18 @@ pub async fn handle_who(ctx: &HandlerContext, msg: &Message) {
                 if let Some(member) = ctx.state.clients.get(&member_id) {
                     let m = member.read().await;
                     let status = who_status(flags, multi_prefix);
+                    let server = who_server_display(
+                        &ctx.state.server_name,
+                        hide_server,
+                        his_servername.as_deref(),
+                    );
                     ctx.send_numeric(
                         RPL_WHOREPLY,
                         vec![
                             mask.to_string(),
                             m.user.clone(),
                             m.host.clone(),
-                            ctx.state.server_name.clone(),
+                            server,
                             m.nick.clone(),
                             status,
                             format!("0 {}", m.realname),
@@ -43,27 +55,33 @@ pub async fn handle_who(ctx: &HandlerContext, msg: &Message) {
                     if r.is_alias {
                         continue;
                     }
-                    let server_name = ctx
+                    let real_server = ctx
                         .state
                         .remote_servers
                         .get(&r.server)
                         .map(|s| s.value().clone());
-                    let server_display = if let Some(s) = server_name {
+                    let real_name = if let Some(s) = real_server {
                         s.read().await.name.clone()
                     } else {
                         ctx.state.server_name.clone()
                     };
+                    let server = who_server_display(
+                        &real_name,
+                        hide_server,
+                        his_servername.as_deref(),
+                    );
                     let status = who_status(flags, multi_prefix);
+                    let hops = if hide_hops { 0 } else { 1 };
                     ctx.send_numeric(
                         RPL_WHOREPLY,
                         vec![
                             mask.to_string(),
                             r.user.clone(),
                             r.host.clone(),
-                            server_display,
+                            server,
                             r.nick.clone(),
                             status,
-                            format!("1 {}", r.realname),
+                            format!("{hops} {}", r.realname),
                         ],
                     )
                     .await;
@@ -72,13 +90,18 @@ pub async fn handle_who(ctx: &HandlerContext, msg: &Message) {
         }
     } else if let Some(target) = ctx.state.find_client_by_nick(mask) {
         let m = target.read().await;
+        let server = who_server_display(
+            &ctx.state.server_name,
+            hide_server,
+            his_servername.as_deref(),
+        );
         ctx.send_numeric(
             RPL_WHOREPLY,
             vec![
                 "*".to_string(),
                 m.user.clone(),
                 m.host.clone(),
-                ctx.state.server_name.clone(),
+                server,
                 m.nick.clone(),
                 "H".to_string(),
                 format!("0 {}", m.realname),
@@ -87,26 +110,32 @@ pub async fn handle_who(ctx: &HandlerContext, msg: &Message) {
         .await;
     } else if let Some(remote) = ctx.state.find_remote_by_nick(mask) {
         let r = remote.read().await;
-        let server_display = ctx
+        let real_server = ctx
             .state
             .remote_servers
             .get(&r.server)
             .map(|s| s.value().clone());
-        let server_name = if let Some(s) = server_display {
+        let real_name = if let Some(s) = real_server {
             s.read().await.name.clone()
         } else {
             ctx.state.server_name.clone()
         };
+        let server = who_server_display(
+            &real_name,
+            hide_server,
+            his_servername.as_deref(),
+        );
+        let hops = if hide_hops { 0 } else { 1 };
         ctx.send_numeric(
             RPL_WHOREPLY,
             vec![
                 "*".to_string(),
                 r.user.clone(),
                 r.host.clone(),
-                server_name,
+                server,
                 r.nick.clone(),
                 "H".to_string(),
-                format!("1 {}", r.realname),
+                format!("{hops} {}", r.realname),
             ],
         )
         .await;
@@ -117,6 +146,22 @@ pub async fn handle_who(ctx: &HandlerContext, msg: &Message) {
         vec![mask.to_string(), "End of /WHO list".into()],
     )
     .await;
+}
+
+/// Pick the server display column for a WHO row. When `hide` is set,
+/// return the HIS_SERVERNAME override if configured; otherwise fall
+/// through to the real name so the row doesn't get mangled with an
+/// empty string.
+fn who_server_display(
+    real: &str,
+    hide: bool,
+    his_servername: Option<&str>,
+) -> String {
+    if hide {
+        his_servername.unwrap_or(real).to_string()
+    } else {
+        real.to_string()
+    }
 }
 
 /// Build the "status" field of an RPL_WHOREPLY row. `multi_prefix`
