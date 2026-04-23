@@ -4,6 +4,7 @@ mod channel;
 mod client;
 mod connection;
 mod dns;
+mod gline;
 mod handlers;
 mod numeric;
 mod s2s;

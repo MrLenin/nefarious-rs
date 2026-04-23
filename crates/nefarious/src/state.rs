@@ -189,6 +189,10 @@ pub struct ServerState {
     /// lifecycle hooks fire to both; which numerics a watcher sees
     /// depends on which index they're in for the given nick.
     pub watched_by: DashMap<String, std::collections::HashSet<ClientId>>,
+    /// Active + suspended G-line set, keyed by lowercased mask.
+    /// Shared by inbound GL handling, enforcement on connect, and
+    /// outbound burst emission.
+    pub glines: crate::gline::GlineStore,
 }
 
 /// One past-user record kept for `/WHOWAS` lookups.
@@ -247,6 +251,7 @@ impl ServerState {
             whowas: tokio::sync::Mutex::new(std::collections::VecDeque::with_capacity(WHOWAS_MAX)),
             monitored_by: DashMap::new(),
             watched_by: DashMap::new(),
+            glines: DashMap::new(),
         }
     }
 

@@ -3310,3 +3310,147 @@ pub async fn propagate_end_of_burst_ack(
         }
     }
 }
+
+/// Handle inbound S2S GLINE (token `GL`).
+///
+/// Wire shapes we accept (matches nefarious2 m_gline.c ms_gline):
+///   `<origin> GL <target> +<mask> <expire_offset> <lastmod> [<lifetime>] :<reason>`
+///   `<origin> GL <target> +<mask> <expire_offset> <lastmod> :<reason>`
+///   `<origin> GL <target> -<mask> <lastmod>`
+///   `<origin> GL <target> >|<<mask>`  (local activate/deactivate — not enforced)
+///
+/// `<target>` is `*` for a global G-line, a server numeric for a
+/// local one. We only handle the global case; local targeting
+/// requires full server-tree routing which we haven't landed yet.
+///
+/// `<expire_offset>` is *relative seconds from now* in nefarious2's
+/// wire format — the sender computes `expire - TStime()` and the
+/// receiver adds `TStime()` back on to reconstruct the absolute
+/// expiry. That's what we do too.
+pub async fn handle_gline(
+    state: &ServerState,
+    msg: &P10Message,
+    skip: ServerNumeric,
+) {
+    if msg.params.len() < 2 {
+        return;
+    }
+    let origin = match &msg.origin {
+        Some(o) => o.as_str(),
+        None => return,
+    };
+    let target = &msg.params[0];
+    let mask_with_action = &msg.params[1];
+
+    // `!` prefix signals an oper-force add. We don't enforce the
+    // WIDE_GLINE priv check yet, so just skip the marker.
+    let mask_with_action = mask_with_action
+        .strip_prefix('!')
+        .unwrap_or(mask_with_action);
+
+    // Split action char from the mask body.
+    let (action, mask) = match mask_with_action.chars().next() {
+        Some('+') => ('+', &mask_with_action[1..]),
+        Some('-') => ('-', &mask_with_action[1..]),
+        Some('>') => ('>', &mask_with_action[1..]),
+        Some('<') => ('<', &mask_with_action[1..]),
+        _ => return,
+    };
+    if mask.is_empty() {
+        return;
+    }
+
+    // Only handle global-target GLs on this pass. Local (per-server)
+    // GLs need target-server routing; we'll forward them below but
+    // not store/enforce.
+    let is_global = target == "*";
+
+    let key = crate::gline::mask_key(mask);
+    let now = chrono::Utc::now();
+
+    match action {
+        '+' if is_global => {
+            // Activate/add. Expire offset is relative seconds; we
+            // convert to absolute. Lastmod anchors the Lamport-clock
+            // ordering so later relays can tell which update is
+            // newest. Reason is always the trailing param if we
+            // have it — empty means "No reason".
+            if msg.params.len() < 4 {
+                // +mask with no expire → malformed, ignore.
+                tracing::debug!("GL +{mask} from {origin}: too few params, ignoring");
+            } else {
+                let expire_offset: i64 = msg.params[2].parse().unwrap_or(0);
+                let lastmod: u64 = msg.params[3].parse().unwrap_or_else(|_| now.timestamp() as u64);
+                let lifetime: Option<u64> = msg.params.get(4).and_then(|v| v.parse().ok());
+                let reason = msg
+                    .params
+                    .last()
+                    .filter(|s| !s.is_empty() && msg.params.len() >= 5)
+                    .cloned()
+                    .unwrap_or_else(|| "No reason".to_string());
+                let expires_at = if expire_offset > 0 {
+                    Some(now + chrono::Duration::seconds(expire_offset))
+                } else {
+                    None
+                };
+                let gl = crate::gline::Gline {
+                    mask: mask.to_string(),
+                    reason,
+                    expires_at,
+                    set_by: origin.to_string(),
+                    set_at: now,
+                    lastmod,
+                    lifetime,
+                    active: true,
+                };
+                let expires_display = expires_at
+                    .map(|t| t.to_rfc3339())
+                    .unwrap_or_else(|| "never".to_string());
+                state
+                    .glines
+                    .insert(key.clone(), Arc::new(RwLock::new(gl)));
+                tracing::info!(
+                    "GL +{mask} from {origin}: stored, expires={expires_display}"
+                );
+            }
+        }
+        '-' if is_global => {
+            // Deactivate or delete. We just flag inactive so later
+            // re-activation doesn't lose the history; callers that
+            // want full removal can run a later prune pass.
+            if let Some(entry) = state.glines.get(&key) {
+                let mut gl = entry.write().await;
+                gl.active = false;
+                if let Some(lm) = msg.params.get(2).and_then(|v| v.parse::<u64>().ok()) {
+                    gl.lastmod = lm;
+                }
+                tracing::info!("GL -{mask} from {origin}: marked inactive");
+            }
+        }
+        _ => {
+            // Local / modify / badchan variants — out of scope for
+            // the first landing. Log and fall through to the relay.
+            tracing::debug!(
+                "GL action {action}{mask} target={target} from {origin}: passthrough only"
+            );
+        }
+    }
+
+    // Propagate to other links regardless of whether we understood
+    // the variant, so peers stay in sync. Matches nefarious2's
+    // "propagate even when we don't have it" behaviour at
+    // m_gline.c:360. The trailing param keeps its `:` prefix so
+    // reason text with embedded spaces survives the relay.
+    let wire = if msg.params.len() >= 5 {
+        let head = msg.params[..msg.params.len() - 1].join(" ");
+        let trailing = &msg.params[msg.params.len() - 1];
+        format!("{origin} GL {head} :{trailing}")
+    } else {
+        format!("{origin} GL {}", msg.params.join(" "))
+    };
+    for entry in state.links.iter() {
+        if *entry.key() != skip {
+            entry.value().send_line(wire.clone()).await;
+        }
+    }
+}
