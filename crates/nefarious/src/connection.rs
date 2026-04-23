@@ -15,6 +15,30 @@ use crate::handlers::registration::{handle_cap, is_valid_nick};
 use crate::numeric::*;
 use crate::state::ServerState;
 
+/// Search config Kill blocks for one matching `user_host` or `ip`.
+/// Either field being empty counts as a wildcard — a block with only
+/// `host` matches by user@host, only `ip` matches by IP, both
+/// require both to match. Returns the first matching KillConfig so
+/// the caller can log which rule fired.
+fn match_kill_config<'a>(
+    kills: &'a [irc_config::KillConfig],
+    user_host: &str,
+    ip: &str,
+) -> Option<&'a irc_config::KillConfig> {
+    for kill in kills {
+        let host_match = kill.host == "*"
+            || crate::channel::wildcard_match(&kill.host, user_host);
+        let ip_match = match &kill.ip {
+            Some(pattern) => crate::channel::wildcard_match(pattern, ip),
+            None => true,
+        };
+        if host_match && ip_match {
+            return Some(kill);
+        }
+    }
+    None
+}
+
 /// Handle a client connection over any async stream (plain TCP or TLS).
 pub async fn handle_connection<S>(
     stream: S,
@@ -123,15 +147,19 @@ pub async fn handle_connection<S>(
     // announced on the wire and never touches the channel graph,
     // matching register_user() in nefarious2 s_user.c.
     //
-    // Two checks run in sequence: ZLINE (IP match) first because
-    // it's cheaper and strictly cruder than GLINE; GLINE's
-    // user@host match covers everything a ZLINE would plus more.
+    // Three checks run in sequence: ZLINE (IP match), then local
+    // K-lines from the config file, then GLINE (user@host). K-lines
+    // fall between ZLINE and GLINE because they're local-authored
+    // but can still match on user@host patterns the operator baked
+    // into the config.
     let ban_match = {
         let c = client.read().await;
         let ip = c.addr.ip().to_string();
         let user_host = format!("{}@{}", c.user, c.host);
         if let Some((mask, reason)) = state.find_matching_zline(&ip).await {
             Some(("Z-lined", mask, reason))
+        } else if let Some(kill) = match_kill_config(&state.config.kills, &user_host, &ip) {
+            Some(("K-lined", kill.host.clone(), kill.reason.clone()))
         } else if let Some((mask, reason)) = state.find_matching_gline(&user_host).await {
             Some(("G-lined", mask, reason))
         } else {

@@ -15,7 +15,22 @@ pub struct Config {
     pub clients: Vec<ClientConfig>,
     pub operators: Vec<OperatorConfig>,
     pub connects: Vec<ConnectConfig>,
+    pub kills: Vec<KillConfig>,
     pub features: Vec<(String, String)>,
+}
+
+/// A local connection ban sourced from a `Kill { ... }` config
+/// block. Static (tied to the config file) rather than the dynamic
+/// GLINE/SHUN/ZLINE path — reloaded on /REHASH.
+#[derive(Debug, Clone)]
+pub struct KillConfig {
+    /// `user@host` glob. Supports `*` and `?` wildcards.
+    pub host: String,
+    /// Optional IP/CIDR; when set, matches on the peer's IP as well
+    /// as the resolved host. Mirrors nefarious2 ircd.conf Kill block.
+    pub ip: Option<String>,
+    /// Reason text shown to the refused client.
+    pub reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -302,6 +317,7 @@ impl Config {
         let mut clients = Vec::new();
         let mut operators = Vec::new();
         let mut connects = Vec::new();
+        let mut kills = Vec::new();
         let mut features = Vec::new();
 
         for block in blocks {
@@ -435,6 +451,30 @@ impl Config {
                     });
                 }
 
+                "Kill" => {
+                    // Kill blocks match on host (user@host glob),
+                    // optionally ip (CIDR or glob). At least one
+                    // must be present; silently drop malformed
+                    // entries rather than bailing the whole
+                    // config so a typo doesn't brick the server.
+                    let host = block.get_str("host").map(|s| s.to_string());
+                    let ip = block.get_str("ip").map(|s| s.to_string());
+                    if host.is_none() && ip.is_none() {
+                        tracing::warn!(
+                            "Kill block missing both host and ip; ignoring"
+                        );
+                    } else {
+                        kills.push(KillConfig {
+                            host: host.unwrap_or_else(|| "*".into()),
+                            ip,
+                            reason: block
+                                .get_str("reason")
+                                .unwrap_or("Banned")
+                                .to_string(),
+                        });
+                    }
+                }
+
                 "Features" => {
                     for entry in &block.entries {
                         if let parser::Entry::KeyValue(k, v) = entry {
@@ -468,6 +508,7 @@ impl Config {
             clients,
             operators,
             connects,
+            kills,
             features,
         })
     }
