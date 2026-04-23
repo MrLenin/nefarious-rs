@@ -94,20 +94,18 @@ async fn handle_server_link_inner<S>(
         remote_name, remote_numeric, protocol_str, flags_str
     );
 
-    // Validate password against Connect blocks
-    let connect = state
-        .config
-        .connects
-        .iter()
-        .find(|c| c.name == *remote_name);
-
-    let connect = match connect {
-        Some(c) => c,
+    // Validate password against Connect blocks. Snapshot the
+    // config and clone the matching entry so the guard doesn't
+    // need to stay alive for the rest of this handler.
+    let cfg = state.config.load();
+    let connect = match cfg.connects.iter().find(|c| c.name == *remote_name) {
+        Some(c) => c.clone(),
         None => {
             error!("no Connect block for server {remote_name}");
             return;
         }
     };
+    drop(cfg);
 
     if !crate::password::verify(&password_received, &connect.password) {
         error!("password mismatch for server {remote_name}");

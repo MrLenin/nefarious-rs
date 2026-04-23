@@ -1259,12 +1259,13 @@ impl ServerState {
         // Values sourced from Features block where present; defaults
         // below match nefarious2 ircd_features.c so a bare config
         // produces the same ISUPPORT advertisement the C build does.
-        let nicklen = self.config.nicklen();
-        let channellen = self.config.channellen();
-        let max_bans = self.config.max_bans();
-        let max_siles = self.config.max_siles();
-        let max_watchs = self.config.max_watchs();
-        let max_channels = self.config.max_channels_per_user();
+        let cfg = self.config.load();
+        let nicklen = cfg.nicklen();
+        let channellen = cfg.channellen();
+        let max_bans = cfg.max_bans();
+        let max_siles = cfg.max_siles();
+        let max_watchs = cfg.max_watchs();
+        let max_channels = cfg.max_channels_per_user();
         vec![
             "CASEMAPPING=rfc1459".to_string(),
             format!("CHANLIMIT=#:{max_channels}"),
@@ -1273,7 +1274,7 @@ impl ServerState {
             format!("MAXBANS={max_bans}"),
             format!("MAXCHANNELS={max_channels}"),
             format!("MAXLIST=b:{max_bans}"),
-            format!("NETWORK={}", self.config.network()),
+            format!("NETWORK={}", cfg.network()),
             format!("NICKLEN={nicklen}"),
             "PREFIX=(ov)@+".to_string(),
             format!("SILENCE={max_siles}"),
