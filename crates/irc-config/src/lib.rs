@@ -329,6 +329,26 @@ impl Config {
             .unwrap_or(21600)
     }
 
+    /// `SASL_SERVER` — the name of the services server that runs the
+    /// SASL mechanism. When set and reachable over S2S, client
+    /// AUTHENTICATE exchanges get relayed through that server using
+    /// the P10 `SASL` token. `None` means local-only SASL (in-memory
+    /// store / Keycloak-direct). The testnet sets this to
+    /// `x3.services`.
+    pub fn sasl_server(&self) -> Option<&str> {
+        self.feature("SASL_SERVER")
+    }
+
+    /// `SASL_TIMEOUT` — seconds to wait for a services reply to an
+    /// AUTHENTICATE relay before aborting the session with
+    /// ERR_SASLFAIL. Defaults to 30s, matching nefarious2
+    /// ircd_features.c.
+    pub fn sasl_timeout(&self) -> u64 {
+        self.feature("SASL_TIMEOUT")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(30)
+    }
+
     /// `GIT_CONFIG_PATH` — working-tree path of a git checkout
     /// containing the config file. When set, a background task
     /// runs `git pull --ff-only` every `GIT_SYNC_INTERVAL`

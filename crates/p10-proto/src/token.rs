@@ -80,6 +80,24 @@ pub enum P10Token {
     // comma-separated list of [+-]?~?<mask> tokens.
     Silence,
 
+    // IRCv3 SASL relay. Token is the full word "SASL" — nefarious2
+    // did not mint a short form (see include/msg.h:487-489). Wire
+    // form varies by direction and action:
+    //   ircd → services (client auth):
+    //     SASL <target_server> <session_token> S [<mechanism>] [:<b64>]
+    //     SASL <target_server> <session_token> C :<b64_chunk>
+    //     SASL <target_server> <session_token> D A          (abort)
+    //     SASL <target_server> <session_token> H :<user>@<host>:<ip>
+    //   services → ircd (reply):
+    //     SASL <client_server> <session_token> C :<challenge_b64>
+    //     SASL <client_server> <session_token> L :<account_name>
+    //     SASL <client_server> <session_token> D S          (success)
+    //     SASL <client_server> <session_token> D F          (fail)
+    //     SASL <client_server> <session_token> M :<mechs>   (mech list)
+    // The <session_token> is `<server_numnick>!<local_id>.<cookie>`,
+    // correlating replies to the originating client.
+    Sasl,
+
     // Unknown token
     Unknown(String),
 }
@@ -148,6 +166,8 @@ impl P10Token {
 
             "U" => P10Token::Silence,
             "SILENCE" => P10Token::Silence,
+
+            "SASL" => P10Token::Sasl,
 
             // Also accept full command names
             "PASS" => P10Token::Pass,
@@ -231,6 +251,7 @@ impl P10Token {
             P10Token::Opmode => "OM",
             P10Token::Clearmode => "CM",
             P10Token::Silence => "U",
+            P10Token::Sasl => "SASL",
             P10Token::Unknown(s) => s,
         }
     }
