@@ -2545,6 +2545,109 @@ async fn send_whois_numeric(
     link.send_line(line).await;
 }
 
+/// Handle CM (CLEARMODE) from a remote server.
+///
+/// Wire per nefarious2 m_clearmode.c:310 — `<origin> CM <channel>
+/// <control_string>`. Control string is a set of mode chars to clear
+/// — `o` strips ops from every member, `v` strips voice, `h` strips
+/// halfop, `b` clears the ban list, `k`/`l`/`L` unset those with
+/// their param, `e`/`I` clear excepts/invites, and any parameterless
+/// channel mode (n, t, m, i, s, p, C, c, D, …) gets reset.
+///
+/// Emits a MODE broadcast to local channel members summarising the
+/// net removals, mirroring the wire form the C side produces via
+/// `do_clearmode` → modebuf. Silently no-ops if the channel is
+/// unknown.
+pub async fn handle_clearmode(state: &ServerState, msg: &P10Message) {
+    if msg.params.len() < 2 {
+        return;
+    }
+    let chan_name = &msg.params[0];
+    let control = &msg.params[1];
+
+    let channel = match state.get_channel(chan_name) {
+        Some(c) => c,
+        None => return,
+    };
+
+    // Collect which members were ops/halfops/voices before the
+    // clear — need their nicks to emit the MODE -ohv broadcast.
+    let mut deopped_local: Vec<(crate::client::ClientId, bool, bool, bool)> = Vec::new();
+
+    {
+        let mut chan = channel.write().await;
+        for c in control.chars() {
+            match c {
+                'o' | 'h' | 'v' => {
+                    for (&id, flags) in chan.members.iter() {
+                        if (c == 'o' && flags.op)
+                            || (c == 'h' && flags.halfop)
+                            || (c == 'v' && flags.voice)
+                        {
+                            deopped_local.push((id, flags.op, flags.halfop, flags.voice));
+                        }
+                    }
+                    let clear = |f: &mut MembershipFlags| match c {
+                        'o' => f.op = false,
+                        'h' => f.halfop = false,
+                        'v' => {
+                            f.voice = false;
+                        }
+                        _ => {}
+                    };
+                    for f in chan.members.values_mut() {
+                        clear(f);
+                    }
+                    for f in chan.remote_members.values_mut() {
+                        clear(f);
+                    }
+                }
+                'b' => chan.bans.clear(),
+                'e' => chan.excepts.clear(),
+                'k' => chan.modes.key = None,
+                'l' => chan.modes.limit = None,
+                'L' => chan.modes.redirect = None,
+                'n' => chan.modes.no_external = false,
+                't' => chan.modes.topic_ops_only = false,
+                'm' => chan.modes.moderated = false,
+                'i' => chan.modes.invite_only = false,
+                's' => chan.modes.secret = false,
+                'p' => chan.modes.private = false,
+                other if "CcDMNQRrSTuz".contains(other) => {
+                    chan.modes.extended_flags.remove(&other);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Broadcast the net removal to local channel members so IRC
+    // clients drop their @/%/+ prefixes and reflect the cleared
+    // channel modes. Cheap rendering: emit `-<control_string>`
+    // targeted at the channel; clients sort out the rest from
+    // current state.
+    let prefix = get_source_prefix(state, msg).await;
+    let src = source_info_from_origin(state, msg).await;
+    let mode_msg = irc_proto::Message::with_source(
+        &prefix,
+        irc_proto::Command::Mode,
+        vec![chan_name.clone(), format!("-{control}")],
+    );
+    {
+        let chan = channel.read().await;
+        for (&member_id, _) in &chan.members {
+            if let Some(member) = state.clients.get(&member_id) {
+                let m = member.read().await;
+                m.send_from(mode_msg.clone(), &src);
+            }
+        }
+    }
+    debug!(
+        "CLEARMODE {chan_name} {control}: {} local member(s) had ops/halfop/voice stripped",
+        deopped_local.len()
+    );
+}
+
 /// Handle WA (WALLOPS) from a remote source.
 ///
 /// Wire per nefarious2 m_wallops.c: `<origin> WA :<text>`. Delivered

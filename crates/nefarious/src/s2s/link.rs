@@ -342,6 +342,19 @@ pub async fn handle_server_link<S>(
             P10Token::Wallops => {
                 super::handlers::handle_wallops(&state, &msg).await;
             }
+            P10Token::Opmode => {
+                // OPMODE is MODE without ops/TS checks (matches
+                // nefarious2 m_opmode.c:125 delegating to the
+                // modebuf/mode_parse path). Our remote MODE handler
+                // is already server-authoritative — no TS gate, no
+                // op check — so routing OPMODE through it is
+                // correct. The broadcast to local clients still goes
+                // out as a regular MODE event.
+                super::handlers::handle_mode(&state, &msg).await;
+            }
+            P10Token::Clearmode => {
+                super::handlers::handle_clearmode(&state, &msg).await;
+            }
             P10Token::Squit => {
                 info!("received SQUIT from {remote_name}");
                 break;

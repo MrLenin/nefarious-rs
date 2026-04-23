@@ -66,6 +66,12 @@ pub enum P10Token {
     // Information queries forwarded across servers.
     Whois,
 
+    // Oper-bypass channel mode ops. OPMODE behaves like MODE but the
+    // receiver skips ops/TS checks; CLEARMODE wipes all set modes
+    // and per-member op/voice flags on a channel at once.
+    Opmode,
+    Clearmode,
+
     // Unknown token
     Unknown(String),
 }
@@ -126,6 +132,11 @@ impl P10Token {
 
             "W" => P10Token::Whois,
             "WHOIS" => P10Token::Whois,
+
+            "OM" => P10Token::Opmode,
+            "OPMODE" => P10Token::Opmode,
+            "CM" => P10Token::Clearmode,
+            "CLEARMODE" => P10Token::Clearmode,
 
             // Also accept full command names
             "PASS" => P10Token::Pass,
@@ -206,6 +217,8 @@ impl P10Token {
             P10Token::Setname => "SR",
             P10Token::Privs => "PRIVS",
             P10Token::Whois => "W",
+            P10Token::Opmode => "OM",
+            P10Token::Clearmode => "CM",
             P10Token::Unknown(s) => s,
         }
     }
