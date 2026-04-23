@@ -654,6 +654,16 @@ async fn message_loop(
     // holding the client's RwLock across .await points.
     let disconnect_signal = ctx.client.read().await.disconnect_signal.clone();
 
+    // Ping-timer tick period. A tick every 15s gives us sub-30s
+    // resolution on the idle check without burning many wakeups.
+    // The actual PINGFREQ / CONNECTTIMEOUT thresholds come from
+    // config and are re-read every tick so a /REHASH picks them up.
+    let mut ping_tick = tokio::time::interval(std::time::Duration::from_secs(15));
+    ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Whether we've sent a PING waiting for PONG. Cleared whenever
+    // the client produces any inbound message (last_active bumped).
+    let mut ping_pending_since: Option<chrono::DateTime<chrono::Utc>> = None;
+
     loop {
         tokio::select! {
             biased;
@@ -668,6 +678,39 @@ async fn message_loop(
                     .and_then(|mut slot| slot.take())
                     .unwrap_or_else(|| "Killed".to_string());
                 return reason;
+            }
+            _ = ping_tick.tick() => {
+                let ping_freq = ctx.state.config.ping_freq();
+                let timeout = ctx.state.config.connect_timeout();
+                let (last_active, nick) = {
+                    let c = ctx.client.read().await;
+                    (c.last_active, c.nick.clone())
+                };
+                let now = chrono::Utc::now();
+                let idle = (now - last_active).num_seconds().max(0) as u64;
+
+                if let Some(sent_at) = ping_pending_since {
+                    // Already pinged — if they haven't answered in
+                    // CONNECTTIMEOUT seconds, drop them.
+                    let waited = (now - sent_at).num_seconds().max(0) as u64;
+                    if waited >= timeout {
+                        debug!("ping timeout for {nick} after {waited}s");
+                        return format!("Ping timeout: {waited} seconds");
+                    }
+                } else if idle >= ping_freq {
+                    // Idle long enough to warrant a probe. Send PING
+                    // and record the moment so the next tick can
+                    // measure waited-for-PONG against timeout.
+                    let server = ctx.state.server_name.clone();
+                    let c = ctx.client.read().await;
+                    c.send_raw(Message::with_source(
+                        &server,
+                        Command::Ping,
+                        vec![server.clone()],
+                    ));
+                    drop(c);
+                    ping_pending_since = Some(now);
+                }
             }
             maybe = stream.next() => {
                 let result = match maybe {
@@ -695,6 +738,10 @@ async fn message_loop(
                     let mut client = ctx.client.write().await;
                     client.last_active = chrono::Utc::now();
                 }
+                // Any inbound message — PONG included — counts as
+                // liveness. Clear the pending-ping marker so the
+                // timeout clock resets.
+                ping_pending_since = None;
 
                 ctx.dispatch(&msg).await;
             }

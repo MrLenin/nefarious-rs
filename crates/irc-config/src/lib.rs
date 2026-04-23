@@ -259,6 +259,24 @@ impl Config {
             .unwrap_or(30)
     }
 
+    /// `PINGFREQ` — seconds of idle before the server sends a PING
+    /// to a client to verify it's still alive. Defaults to 120.
+    pub fn ping_freq(&self) -> u64 {
+        self.feature("PINGFREQ")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(120)
+    }
+
+    /// `CONNECTTIMEOUT` — additional grace seconds after PING before
+    /// the connection is killed for unresponsiveness. Effective
+    /// max-idle before disconnect is `PINGFREQ + CONNECTTIMEOUT`.
+    /// Defaults to 60 (so default total is 180s).
+    pub fn connect_timeout(&self) -> u64 {
+        self.feature("CONNECTTIMEOUT")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(60)
+    }
+
     /// `MAXWATCHS` — per-client cap on the WATCH/MONITOR list size.
     /// Defaults to 128, matching nefarious2's F_I(MAXWATCHS, …, 128).
     /// Invalid values in the config silently fall back to the default.
