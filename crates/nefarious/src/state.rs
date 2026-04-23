@@ -955,15 +955,29 @@ impl ServerState {
 
     /// Generate ISUPPORT (005) tokens.
     pub fn isupport_tokens(&self) -> Vec<String> {
+        // Values sourced from Features block where present; defaults
+        // below match nefarious2 ircd_features.c so a bare config
+        // produces the same ISUPPORT advertisement the C build does.
+        let nicklen = self.config.nicklen();
+        let channellen = self.config.channellen();
+        let max_bans = self.config.max_bans();
+        let max_siles = self.config.max_siles();
+        let max_watchs = self.config.max_watchs();
+        let max_channels = self.config.max_channels_per_user();
         vec![
             "CASEMAPPING=rfc1459".to_string(),
-            "CHANLIMIT=#:100".to_string(),
+            format!("CHANLIMIT=#:{max_channels}"),
             "CHANMODES=b,k,l,imnpst".to_string(),
-            "CHANNELLEN=200".to_string(),
+            format!("CHANNELLEN={channellen}"),
+            format!("MAXBANS={max_bans}"),
+            format!("MAXCHANNELS={max_channels}"),
+            format!("MAXLIST=b:{max_bans}"),
             format!("NETWORK={}", self.config.network()),
-            "NICKLEN=30".to_string(),
+            format!("NICKLEN={nicklen}"),
             "PREFIX=(ov)@+".to_string(),
+            format!("SILENCE={max_siles}"),
             "TOPICLEN=390".to_string(),
+            format!("WATCH={max_watchs}"),
             "MODES=6".to_string(),
         ]
     }

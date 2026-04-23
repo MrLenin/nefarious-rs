@@ -157,6 +157,37 @@ impl Config {
             .unwrap_or(25)
     }
 
+    /// `NICKLEN` — maximum nickname length, exposed via ISUPPORT.
+    /// Defaults to 15 to match nefarious2's F_I(NICKLEN, …, 15).
+    pub fn nicklen(&self) -> u32 {
+        self.feature("NICKLEN")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(15)
+    }
+
+    /// `CHANNELLEN` — maximum channel name length. Defaults to 200.
+    pub fn channellen(&self) -> u32 {
+        self.feature("CHANNELLEN")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(200)
+    }
+
+    /// `MAXBANS` — per-channel ban list cap; ISUPPORT `MAXBANS` and
+    /// one half of `MAXLIST`. Defaults to 50.
+    pub fn max_bans(&self) -> u32 {
+        self.feature("MAXBANS")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(50)
+    }
+
+    /// `MAXCHANNELSPERUSER` — per-client cap on joined channels;
+    /// ISUPPORT `MAXCHANNELS`. Defaults to 20.
+    pub fn max_channels_per_user(&self) -> u32 {
+        self.feature("MAXCHANNELSPERUSER")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(20)
+    }
+
     /// Load a configuration from a file path, resolving includes.
     pub fn from_file(path: &Path) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path).map_err(|e| ConfigError::Io(e.to_string()))?;
