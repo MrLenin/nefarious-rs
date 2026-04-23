@@ -83,6 +83,7 @@ pub enum Command {
     Rehash,
     Restart,
     Die,
+    Connect,
 
     // WEBIRC — trusted-gateway IP/host passthrough during registration.
     Webirc,
@@ -170,6 +171,7 @@ impl Command {
             "REHASH" => Command::Rehash,
             "RESTART" => Command::Restart,
             "DIE" => Command::Die,
+            "CONNECT" => Command::Connect,
             "WEBIRC" => Command::Webirc,
             "AWAY" => Command::Away,
             "USERHOST" => Command::Userhost,
@@ -235,6 +237,7 @@ impl fmt::Display for Command {
             Command::Rehash => write!(f, "REHASH"),
             Command::Restart => write!(f, "RESTART"),
             Command::Die => write!(f, "DIE"),
+            Command::Connect => write!(f, "CONNECT"),
             Command::Webirc => write!(f, "WEBIRC"),
             Command::Away => write!(f, "AWAY"),
             Command::Userhost => write!(f, "USERHOST"),

@@ -23,6 +23,35 @@ pub async fn handle_server_link<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    handle_server_link_inner(stream, state, password_received, server_msg_params, false)
+        .await;
+}
+
+/// Same as `handle_server_link` but for the outbound side of a link,
+/// where we've already sent PASS + SERVER before reading the remote
+/// greeting. Setting `suppress_greeting = true` skips the second
+/// PASS/SERVER emission that the inbound path uses as its reply.
+pub async fn handle_server_link_outbound<S>(
+    stream: S,
+    state: Arc<ServerState>,
+    password_received: String,
+    server_msg_params: Vec<String>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    handle_server_link_inner(stream, state, password_received, server_msg_params, true)
+        .await;
+}
+
+async fn handle_server_link_inner<S>(
+    stream: S,
+    state: Arc<ServerState>,
+    password_received: String,
+    server_msg_params: Vec<String>,
+    suppress_greeting: bool,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     // Parse the SERVER message we already received during detection
     // SERVER <name> <hopcount> <start_ts> <link_ts> <protocol> <numeric_capacity> <flags> :<info>
     if server_msg_params.len() < 8 {
@@ -114,14 +143,23 @@ pub async fn handle_server_link<S>(
         p10_proto::numeric::capacity_to_base64(4096)
     );
 
-    let pass_line = format!("PASS :{}", connect.password);
-    let server_line = format!(
-        "SERVER {} 1 {} {} J10 {} +6 :{}",
-        our_name, our_start_ts, link_ts_now, our_capacity, state.server_description
-    );
-
-    let _ = tx.send(pass_line).await;
-    let _ = tx.send(server_line).await;
+    if !suppress_greeting {
+        let pass_line = format!("PASS :{}", connect.password);
+        let server_line = format!(
+            "SERVER {} 1 {} {} J10 {} +6 :{}",
+            our_name, our_start_ts, link_ts_now, our_capacity, state.server_description
+        );
+        let _ = tx.send(pass_line).await;
+        let _ = tx.send(server_line).await;
+    } else {
+        // Outbound: we already sent PASS+SERVER before the handoff,
+        // so the greeting step is a no-op. The rest of this
+        // function (register remote_server, drive burst, run the
+        // read loop) runs identically.
+        let _ = our_start_ts; // keep the symbol live
+        let _ = our_capacity;
+        let _ = link_ts_now;
+    }
 
     // Register the remote server
     let remote_server = Arc::new(tokio::sync::RwLock::new(RemoteServer {

@@ -168,6 +168,7 @@ impl HandlerContext {
             Command::Rehash => server_admin::handle_rehash(&ctx, msg).await,
             Command::Restart => server_admin::handle_restart(&ctx, msg).await,
             Command::Die => server_admin::handle_die(&ctx, msg).await,
+            Command::Connect => server_admin::handle_connect(&ctx, msg).await,
 
             // Registration (nick change after registration)
             Command::Nick => registration::handle_nick_change(&ctx, msg).await,

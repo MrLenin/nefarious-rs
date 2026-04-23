@@ -81,6 +81,64 @@ pub async fn handle_restart(ctx: &HandlerContext, _msg: &Message) {
     .await;
 }
 
+/// Oper-invoked /CONNECT — open an outbound S2S link to a
+/// configured peer. Syntax:
+///   `CONNECT <server_name> [<port>] [<target>]`
+/// Target routing (the third param) isn't supported; we only
+/// initiate from *this* server for now.
+pub async fn handle_connect(ctx: &HandlerContext, msg: &Message) {
+    let is_oper = ctx.client.read().await.modes.contains(&'o');
+    if !is_oper {
+        ctx.send_numeric(
+            ERR_NOPRIVILEGES,
+            vec!["Permission Denied - You're not an IRC operator".into()],
+        )
+        .await;
+        return;
+    }
+    let name = match msg.params.first() {
+        Some(n) if !n.is_empty() => n.clone(),
+        _ => {
+            ctx.send_numeric(
+                ERR_NEEDMOREPARAMS,
+                vec!["CONNECT".into(), "Not enough parameters".into()],
+            )
+            .await;
+            return;
+        }
+    };
+    let port = msg.params.get(1).and_then(|s| s.parse::<u16>().ok());
+
+    notice(ctx, &format!("Initiating outbound link to {name}")).await;
+
+    // Spawn — the handshake + link handling live for the life of
+    // the connection. The oper's /CONNECT returns immediately;
+    // result is reported asynchronously via server log and, on
+    // failure, a NOTICE back to the oper if we can snapshot their
+    // send channel.
+    let state = ctx.state.clone();
+    let send_ch = ctx.client.read().await.sender.clone();
+    let server_name = ctx.state.server_name.clone();
+    let nick = ctx.client.read().await.nick.clone();
+    tokio::spawn(async move {
+        match crate::server::initiate_server_connection(state, name.clone(), port).await {
+            Ok(()) => {
+                tracing::info!("/CONNECT {name}: link established");
+            }
+            Err(e) => {
+                tracing::warn!("/CONNECT {name}: {e}");
+                let _ = send_ch
+                    .send(irc_proto::Message::with_source(
+                        &server_name,
+                        irc_proto::Command::Notice,
+                        vec![nick, format!("CONNECT {name} failed: {e}")],
+                    ))
+                    .await;
+            }
+        }
+    });
+}
+
 pub async fn handle_die(ctx: &HandlerContext, _msg: &Message) {
     let is_oper = ctx.client.read().await.modes.contains(&'o');
     if !is_oper {

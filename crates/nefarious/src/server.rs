@@ -355,6 +355,129 @@ where
     crate::s2s::link::handle_server_link(stream, state, password, server_params).await;
 }
 
+/// Initiate an outbound S2S connection to a configured Connect
+/// block. Opens the TCP socket, sends our PASS + SERVER intro
+/// first (reverse of the inbound handshake), reads the remote's
+/// PASS + SERVER reply, then hands off to the regular link
+/// handler with `suppress_greeting = true` so the greeting isn't
+/// repeated.
+///
+/// Used by the oper-invoked /CONNECT command and (eventually) by
+/// an autoconnect task that walks Connect blocks with
+/// `autoconnect = yes` at startup.
+pub async fn initiate_server_connection(
+    state: Arc<ServerState>,
+    connect_name: String,
+    override_port: Option<u16>,
+) -> Result<(), String> {
+    use tokio::net::TcpStream;
+
+    let connect = match state.config.connects.iter().find(|c| c.name == connect_name) {
+        Some(c) => c.clone(),
+        None => return Err(format!("no Connect block for {connect_name}")),
+    };
+
+    let port = override_port.unwrap_or(connect.port);
+    let addr = format!("{host}:{port}", host = connect.host);
+    info!("initiating outbound link to {connect_name} at {addr}");
+
+    let stream = TcpStream::connect(&addr)
+        .await
+        .map_err(|e| format!("connect({addr}): {e}"))?;
+
+    // TLS for the outbound side isn't wired yet — Connect blocks
+    // with ssl=yes will need openssl::ssl::connect equivalent. For
+    // now, clear-text outbound only; refuse explicitly rather than
+    // silently connecting plaintext to an expected-TLS peer.
+    if connect.ssl {
+        return Err(format!(
+            "Connect block {connect_name} requires TLS, not yet supported on outbound path"
+        ));
+    }
+
+    do_outbound_handshake(stream, state, connect).await
+}
+
+async fn do_outbound_handshake<S>(
+    stream: S,
+    state: Arc<ServerState>,
+    connect: irc_config::ConnectConfig,
+) -> Result<(), String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use futures::{SinkExt, StreamExt};
+    use tokio_util::codec::{Framed, LinesCodec};
+
+    let mut framed = Framed::new(stream, LinesCodec::new_with_max_length(8192));
+
+    // Send our PASS + SERVER lines first. The remote will validate
+    // PASS against its matching Connect block (keyed on our name)
+    // and respond with its own pair. Any mismatch closes the
+    // socket cleanly from the other end.
+    let our_numeric = state.numeric;
+    let our_capacity = format!(
+        "{}{}",
+        our_numeric,
+        p10_proto::numeric::capacity_to_base64(4096)
+    );
+    let our_start_ts = state.start_timestamp;
+    let link_ts_now = chrono::Utc::now().timestamp() as u64;
+    let pass_line = format!("PASS :{}", connect.password);
+    let server_line = format!(
+        "SERVER {} 1 {} {} J10 {} +6 :{}",
+        state.server_name,
+        our_start_ts,
+        link_ts_now,
+        our_capacity,
+        state.server_description
+    );
+    framed
+        .send(pass_line)
+        .await
+        .map_err(|e| format!("send PASS: {e}"))?;
+    framed
+        .send(server_line)
+        .await
+        .map_err(|e| format!("send SERVER: {e}"))?;
+
+    // Read their PASS + SERVER.
+    let mut their_pass = String::new();
+    let mut their_server_params: Vec<String> = Vec::new();
+    while let Some(result) = framed.next().await {
+        let line = result.map_err(|e| format!("read: {e}"))?;
+        tracing::debug!("outbound recv: {line}");
+        if line.starts_with("PASS ") {
+            their_pass = line
+                .strip_prefix("PASS ")
+                .unwrap_or("")
+                .strip_prefix(':')
+                .unwrap_or(&line[5..])
+                .to_string();
+        } else if line.starts_with("SERVER ") {
+            if let Some(msg) = irc_proto::Message::parse(&line) {
+                their_server_params = msg.params;
+            }
+            break;
+        } else if line.starts_with("ERROR") {
+            return Err(format!("remote rejected link: {line}"));
+        }
+    }
+    if their_server_params.is_empty() {
+        return Err("outbound: no SERVER message received".into());
+    }
+
+    let stream = framed.into_inner();
+    crate::s2s::link::handle_server_link_outbound(
+        stream,
+        state,
+        their_pass,
+        their_server_params,
+    )
+    .await;
+    Ok(())
+}
+
 /// Parse a `NEFARIOUS_ACCOUNTS=alice:secret,bob:pw` spec into an
 /// in-memory account store. Malformed pairs are logged and skipped
 /// so a typo can't break startup.
