@@ -178,6 +178,11 @@ pub struct ServerState {
     /// `None` when the system DNS configuration could not be parsed at
     /// startup (we log a warning and fall back to IP-as-host).
     pub dns_resolver: Option<Arc<TokioResolver>>,
+    /// MaxMindDB reader for GeoIP lookups at connect. Wrapped in
+    /// RwLock so `/REHASH` can swap in a freshly-opened reader
+    /// when the operator points MMDB_FILE at a new file. `None`
+    /// means GeoIP tagging is disabled; clients get "--" tags.
+    pub geoip: std::sync::RwLock<Option<Arc<maxminddb::Reader<Vec<u8>>>>>,
     /// IRCv3 capabilities the server currently advertises. Built once at
     /// startup from `default_advertised_caps`; each Phase 2 sub-phase
     /// flips a new cap on as its behaviour ships. A REQ for a cap not in
@@ -286,6 +291,7 @@ impl ServerState {
             ]),
             motd_path: std::sync::RwLock::new(None),
             dns_resolver,
+            geoip: std::sync::RwLock::new(None),
             advertised_caps: default_advertised_caps(),
             account_store: crate::accounts::empty_in_memory(),
             whowas: tokio::sync::Mutex::new(std::collections::VecDeque::with_capacity(WHOWAS_MAX)),
@@ -330,6 +336,35 @@ impl ServerState {
     /// await point.
     pub fn config(&self) -> Arc<Config> {
         self.config.load_full()
+    }
+
+    /// Snapshot of the current GeoIP reader, if any. Cheap Arc
+    /// clone — cheap enough to call per lookup without caching.
+    pub fn geoip_reader(&self) -> Option<Arc<maxminddb::Reader<Vec<u8>>>> {
+        self.geoip
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(Arc::clone))
+    }
+
+    /// (Re)load the GeoIP MMDB from the MMDB_FILE feature value.
+    /// Called at startup and on /REHASH. Absent MMDB_FILE clears
+    /// any existing reader (disables GeoIP); a bad path logs and
+    /// keeps the prior reader so a typo during REHASH doesn't drop
+    /// coverage.
+    pub fn reload_geoip(&self) -> Result<(), String> {
+        let cfg = self.config();
+        let Some(path) = cfg.mmdb_file() else {
+            *self.geoip.write().expect("geoip lock") = None;
+            return Ok(());
+        };
+        match crate::geoip::open(std::path::Path::new(path)) {
+            Some(r) => {
+                *self.geoip.write().expect("geoip lock") = Some(r);
+                Ok(())
+            }
+            None => Err(format!("could not open MMDB file {path}")),
+        }
     }
 
     /// (Re)load the MOTD from the `MPATH` feature value. Called at
@@ -384,6 +419,12 @@ impl ServerState {
         self.config.store(Arc::new(new_config));
         // MOTD may now point at a different MPATH — re-apply.
         let motd_lines = self.reload_motd().unwrap_or(0);
+        // Same for GeoIP: operator may have updated the MMDB path
+        // or shipped a fresh GeoLite2 update. Failure is logged
+        // but not fatal — the prior reader stays active.
+        if let Err(e) = self.reload_geoip() {
+            tracing::warn!("REHASH: GeoIP reload failed: {e}");
+        }
         Ok(format!(
             "config reloaded: {kills} kills, {opers} opers, {webirc} webirc, \
              {connects} connects, {features} features, {motd_lines} motd lines"

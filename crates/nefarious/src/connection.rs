@@ -330,17 +330,41 @@ pub async fn handle_connection<S>(
         }
     }
 
+    // GeoIP tagging. Cheap synchronous MMDB lookup (memory-mapped
+    // file, typically <1µs). Populates Client.geoip so oper-
+    // visible paths (/CHECK, /WHOIS, +s snotices) can show where
+    // each client is coming from. No-op if MMDB_FILE isn't set.
+    if let Some(reader) = state.geoip_reader() {
+        let ip = client.read().await.addr.ip();
+        let tag = crate::geoip::lookup(&reader, ip);
+        client.write().await.geoip = Some(tag);
+    }
+
     info!("client {nick} ({addr}) registered");
 
     // Server notice to +s opers if the feature flag is on.
     if state.config.load().connexit_notices() {
-        let (user, host, realname) = {
+        let (user, host, realname, geo, mark) = {
             let c = client.read().await;
-            (c.user.clone(), c.host.clone(), c.realname.clone())
+            (
+                c.user.clone(),
+                c.host.clone(),
+                c.realname.clone(),
+                c.geoip.clone(),
+                c.dnsbl_mark.clone(),
+            )
         };
+        let geo_str = geo
+            .as_ref()
+            .map(|g| format!(" [{}/{}]", g.country_code, g.continent_code))
+            .unwrap_or_default();
+        let mark_str = mark
+            .as_ref()
+            .map(|m| format!(" <{m}>"))
+            .unwrap_or_default();
         state
             .snotice(&format!(
-                "Client connecting: {nick} ({user}@{host}) [{addr}] {{{realname}}}"
+                "Client connecting: {nick} ({user}@{host}) [{addr}]{geo_str}{mark_str} {{{realname}}}"
             ))
             .await;
     }

@@ -49,6 +49,15 @@ pub async fn run(
         Err(e) => tracing::warn!("MOTD load failed: {e}"),
     }
 
+    // GeoIP: open the MMDB if MMDB_FILE is configured. Failure is
+    // logged and GeoIP stays disabled; the server runs fine either
+    // way, clients just don't get tagged with country codes.
+    if let Err(e) = state.reload_geoip() {
+        tracing::warn!("GeoIP load failed: {e}");
+    } else if state.geoip_reader().is_some() {
+        info!("GeoIP MMDB loaded");
+    }
+
     // Set up SSL acceptor if we have cert/key
     let ssl_acceptor = match (ssl_cert, ssl_key) {
         (Some(cert), Some(key)) => match build_ssl_acceptor(cert, key) {

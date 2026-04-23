@@ -67,6 +67,8 @@ async fn check_user(ctx: &HandlerContext, nick: &str) {
         let tls = c.tls;
         let real_host = c.real_host.clone();
         let addr = c.addr;
+        let geo = c.geoip.clone();
+        let dnsbl_mark = c.dnsbl_mark.clone();
         drop(c);
 
         notice(ctx, &format!("USER   {prefix}")).await;
@@ -76,6 +78,19 @@ async fn check_user(ctx: &HandlerContext, nick: &str) {
         notice(ctx, &format!("  tls:       {tls}")).await;
         notice(ctx, &format!("  account:   {account}")).await;
         notice(ctx, &format!("  idle:      {idle}s")).await;
+        if let Some(g) = geo {
+            notice(
+                ctx,
+                &format!(
+                    "  geoip:     {} / {} ({})",
+                    g.country_code, g.continent_code, g.country_name
+                ),
+            )
+            .await;
+        }
+        if let Some(m) = dnsbl_mark {
+            notice(ctx, &format!("  dnsbl:     {m}")).await;
+        }
         notice(ctx, &format!("  channels:  {}", channels.join(" "))).await;
         return;
     }

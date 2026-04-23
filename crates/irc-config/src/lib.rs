@@ -280,6 +280,14 @@ impl Config {
         self.feature("MPATH")
     }
 
+    /// `MMDB_FILE` — filesystem path to a MaxMind GeoLite2 / GeoIP2
+    /// Country MMDB database. When set, clients get tagged with
+    /// country_code / country_name / continent_code at connect.
+    /// When unset, GeoIP columns read "--" / "Unknown".
+    pub fn mmdb_file(&self) -> Option<&str> {
+        self.feature("MMDB_FILE")
+    }
+
     /// `HOST_HIDING_STYLE` — which cloak strategy applies on +x.
     /// 0 = no cloak, 1 = account-based only, 2 = crypto cloak
     /// only, 3 = both (account wins when logged in, crypto

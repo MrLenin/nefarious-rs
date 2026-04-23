@@ -62,6 +62,11 @@ pub struct Client {
     /// means unmarked. Opers see this in /WHOIS and /CHECK output;
     /// plain users never see it.
     pub dnsbl_mark: Option<String>,
+    /// GeoIP tags resolved at connect. `None` when GeoIP is
+    /// disabled (no MMDB_FILE) — callers that render a tag can
+    /// fall back to "--" / "Unknown" sentinels. When populated,
+    /// this is the client's authoritative country/continent.
+    pub geoip: Option<crate::geoip::GeoTag>,
     /// IP address.
     pub addr: SocketAddr,
     /// Whether the client is using TLS. Consumed later by SASL EXTERNAL
@@ -198,6 +203,7 @@ impl Client {
             host: addr.ip().to_string(),
             real_host: addr.ip().to_string(),
             dnsbl_mark: None,
+            geoip: None,
             addr,
             tls,
             modes: HashSet::new(),
