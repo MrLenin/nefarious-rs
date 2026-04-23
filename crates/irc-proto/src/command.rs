@@ -39,6 +39,9 @@ pub enum Command {
     // IRCv3 MONITOR — per-client nick-watch notifications.
     Monitor,
 
+    // Dalnet WATCH — legacy counterpart to MONITOR.
+    Watch,
+
     // Channel operations
     Join,
     Part,
@@ -123,6 +126,7 @@ impl Command {
             "ACCOUNT" => Command::Account,
             "AUTHENTICATE" => Command::Authenticate,
             "MONITOR" => Command::Monitor,
+            "WATCH" => Command::Watch,
             "USERIP" => Command::Userip,
             "JOIN" => Command::Join,
             "PART" => Command::Part,
@@ -180,6 +184,7 @@ impl fmt::Display for Command {
             Command::Account => write!(f, "ACCOUNT"),
             Command::Authenticate => write!(f, "AUTHENTICATE"),
             Command::Monitor => write!(f, "MONITOR"),
+            Command::Watch => write!(f, "WATCH"),
             Command::Join => write!(f, "JOIN"),
             Command::Part => write!(f, "PART"),
             Command::Topic => write!(f, "TOPIC"),

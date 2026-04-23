@@ -126,6 +126,7 @@ impl HandlerContext {
             Command::Whois => query::handle_whois(&ctx, msg).await,
             Command::Whowas => query::handle_whowas(&ctx, msg).await,
             Command::Monitor => query::handle_monitor(&ctx, msg).await,
+            Command::Watch => query::handle_watch(&ctx, msg).await,
             Command::Motd => query::handle_motd(&ctx, msg).await,
             Command::Lusers => query::handle_lusers(&ctx, msg).await,
             Command::Version => query::handle_version(&ctx, msg).await,

@@ -1148,6 +1148,265 @@ pub async fn handle_version(ctx: &HandlerContext, _msg: &Message) {
     .await;
 }
 
+/// Handle WATCH — Dalnet-style nick watcher. Shares lifecycle hooks
+/// with MONITOR but uses the 602/603/604/605/606/607 numeric set.
+///
+/// Subcommands (comma and/or whitespace separated):
+///   `+<nick>[, ...]`  — add to watch list, immediately emit 604/605
+///                       for each nick's current presence
+///   `-<nick>[, ...]`  — remove; echoes 602 (stopped watching)
+///   `C` or `c`        — clear the list
+///   `S` or `s`        — 603 status plus a 606 list dump
+///   `L` or `l`        — 604 for each currently-online watched nick,
+///                       then 607 sentinel. Uppercase `L` additionally
+///                       emits 605 for each offline nick.
+///
+/// The implicit default when `WATCH` is bare (no args) is `l` — same
+/// as nefarious2 m_watch.c.
+pub async fn handle_watch(ctx: &HandlerContext, msg: &Message) {
+    let args: Vec<String> = if msg.params.is_empty() {
+        vec!["l".into()]
+    } else {
+        msg.params.clone()
+    };
+
+    let client_id = ctx.client_id().await;
+    let max_watchs = ctx.state.config.max_watchs() as usize;
+
+    for arg in args {
+        // Tokens are either `,` or whitespace separated.
+        for token in arg.split([',', ' ']).filter(|t| !t.is_empty()) {
+            if let Some(rest) = token.strip_prefix('+') {
+                // +nick — add. Truncate at `!` so `+nick!user@host`
+                // just adds the nick part.
+                let nick = rest.split('!').next().unwrap_or("");
+                if nick.is_empty()
+                    || nick.contains('*')
+                    || nick.contains('.')
+                    || nick.contains('@')
+                {
+                    continue;
+                }
+                let current = {
+                    if let Some(arc) = ctx.state.clients.get(&client_id) {
+                        arc.read().await.watched.len()
+                    } else {
+                        0
+                    }
+                };
+                if current >= max_watchs {
+                    ctx.send_numeric(
+                        ERR_TOOMANYWATCH,
+                        vec![
+                            nick.to_string(),
+                            format!("Maximum size for WATCH-list is {max_watchs} entries"),
+                        ],
+                    )
+                    .await;
+                    continue;
+                }
+                ctx.state.watch_add(client_id, nick).await;
+                send_watch_status(ctx, nick).await;
+            } else if let Some(rest) = token.strip_prefix('-') {
+                let nick = rest.split('!').next().unwrap_or("");
+                if nick.is_empty() {
+                    continue;
+                }
+                ctx.state.watch_remove(client_id, nick).await;
+                // Echo 602 RPL_WATCHOFF — "stopped watching".
+                let (user, host, lasttime) = lookup_watched_identity(ctx, nick).await;
+                ctx.send_numeric(
+                    RPL_WATCHOFF,
+                    vec![
+                        nick.to_string(),
+                        user,
+                        host,
+                        lasttime,
+                        "stopped watching".into(),
+                    ],
+                )
+                .await;
+            } else if token.eq_ignore_ascii_case("C") {
+                ctx.state.watch_clear(client_id).await;
+            } else if token.eq_ignore_ascii_case("S") {
+                let my_nick = ctx.client.read().await.nick.clone();
+                // 603 `:You have <watching> and are on <watched_by_count> WATCH entries`
+                let (watching_count, nicks) = {
+                    if let Some(arc) = ctx.state.clients.get(&client_id) {
+                        let c = arc.read().await;
+                        (c.watched.len(), c.watched.iter().cloned().collect::<Vec<_>>())
+                    } else {
+                        (0, Vec::new())
+                    }
+                };
+                let watched_by_count = {
+                    let key = irc_casefold_outer(&my_nick);
+                    ctx.state
+                        .watched_by
+                        .get(&key)
+                        .map(|e| e.len())
+                        .unwrap_or(0)
+                };
+                ctx.send_numeric(
+                    RPL_WATCHSTAT,
+                    vec![format!(
+                        "You have {watching_count} and are on {watched_by_count} WATCH entries"
+                    )],
+                )
+                .await;
+                if !nicks.is_empty() {
+                    // 606 emits the list as a space-joined trailing.
+                    // Break into chunks to respect the 512-byte line
+                    // cap (nefarious2 does the same at line 165).
+                    let mut line = String::new();
+                    for nick in &nicks {
+                        if line.len() + 1 + nick.len() > 400 {
+                            ctx.send_numeric(RPL_WATCHLIST, vec![line.clone()]).await;
+                            line.clear();
+                        }
+                        if !line.is_empty() {
+                            line.push(' ');
+                        }
+                        line.push_str(nick);
+                    }
+                    if !line.is_empty() {
+                        ctx.send_numeric(RPL_WATCHLIST, vec![line]).await;
+                    }
+                }
+                ctx.send_numeric(
+                    RPL_ENDOFWATCHLIST,
+                    vec!["End of WATCH S".into()],
+                )
+                .await;
+            } else if token == "L" || token == "l" {
+                let include_offline = token == "L";
+                let nicks: Vec<String> = {
+                    if let Some(arc) = ctx.state.clients.get(&client_id) {
+                        arc.read().await.watched.iter().cloned().collect()
+                    } else {
+                        Vec::new()
+                    }
+                };
+                for nick in &nicks {
+                    if let Some(arc) = ctx.state.find_client_by_nick(nick) {
+                        let c = arc.read().await;
+                        ctx.send_numeric(
+                            RPL_NOWON,
+                            vec![
+                                c.nick.clone(),
+                                c.user.clone(),
+                                c.host.clone(),
+                                c.nick_ts.to_string(),
+                                "is online".into(),
+                            ],
+                        )
+                        .await;
+                    } else if let Some(remote) = ctx.state.find_remote_by_nick(nick) {
+                        let r = remote.read().await;
+                        ctx.send_numeric(
+                            RPL_NOWON,
+                            vec![
+                                r.nick.clone(),
+                                r.user.clone(),
+                                r.host.clone(),
+                                "0".into(),
+                                "is online".into(),
+                            ],
+                        )
+                        .await;
+                    } else if include_offline {
+                        ctx.send_numeric(
+                            RPL_NOWOFF,
+                            vec![
+                                nick.clone(),
+                                "*".into(),
+                                "*".into(),
+                                "0".into(),
+                                "is offline".into(),
+                            ],
+                        )
+                        .await;
+                    }
+                }
+                ctx.send_numeric(
+                    RPL_ENDOFWATCHLIST,
+                    vec![format!("End of WATCH {token}")],
+                )
+                .await;
+            } else {
+                // Unknown subcommand — silently ignored per m_watch.c.
+            }
+        }
+    }
+}
+
+/// Emit 604/605 for a single watched nick's current presence — used
+/// by `/WATCH +nick` to give immediate feedback.
+async fn send_watch_status(ctx: &HandlerContext, nick: &str) {
+    if let Some(arc) = ctx.state.find_client_by_nick(nick) {
+        let c = arc.read().await;
+        ctx.send_numeric(
+            RPL_NOWON,
+            vec![
+                c.nick.clone(),
+                c.user.clone(),
+                c.host.clone(),
+                c.nick_ts.to_string(),
+                "is online".into(),
+            ],
+        )
+        .await;
+    } else if let Some(remote) = ctx.state.find_remote_by_nick(nick) {
+        let r = remote.read().await;
+        ctx.send_numeric(
+            RPL_NOWON,
+            vec![
+                r.nick.clone(),
+                r.user.clone(),
+                r.host.clone(),
+                "0".into(),
+                "is online".into(),
+            ],
+        )
+        .await;
+    } else {
+        ctx.send_numeric(
+            RPL_NOWOFF,
+            vec![
+                nick.to_string(),
+                "*".into(),
+                "*".into(),
+                "0".into(),
+                "is offline".into(),
+            ],
+        )
+        .await;
+    }
+}
+
+/// Pull user@host + last_ts for a nick if it's currently online.
+/// Returns `("*", "*", "0")` when the nick isn't present — matches
+/// nefarious2's RPL_WATCHOFF format for the "no longer tracked"
+/// sentinel.
+async fn lookup_watched_identity(
+    ctx: &HandlerContext,
+    nick: &str,
+) -> (String, String, String) {
+    if let Some(arc) = ctx.state.find_client_by_nick(nick) {
+        let c = arc.read().await;
+        return (c.user.clone(), c.host.clone(), c.nick_ts.to_string());
+    }
+    if let Some(remote) = ctx.state.find_remote_by_nick(nick) {
+        let r = remote.read().await;
+        return (r.user.clone(), r.host.clone(), "0".into());
+    }
+    ("*".into(), "*".into(), "0".into())
+}
+
+fn irc_casefold_outer(s: &str) -> String {
+    irc_proto::irc_casefold(s)
+}
+
 /// Handle SILENCE — per-client filter list that drops inbound private
 /// PRIVMSG/NOTICE from any sender matching a non-exception entry.
 /// Entries starting with `~` are exceptions (positive matches that

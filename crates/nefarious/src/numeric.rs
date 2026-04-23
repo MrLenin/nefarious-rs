@@ -39,6 +39,23 @@ pub const RPL_WHOISSSL: u16 = 671;
 /// when a user's host is cloaked on +x activation.
 pub const RPL_HOSTHIDDEN: u16 = 396;
 
+// Dalnet/Unreal WATCH — older nick-watch surface; our code path
+// shares lifecycle hooks with MONITOR, but the numerics differ.
+/// 602: `<nick> <user> <host> <lasttime> :stopped watching`
+pub const RPL_WATCHOFF: u16 = 602;
+/// 603: `:You have <n> and are on <m> WATCH entries`
+pub const RPL_WATCHSTAT: u16 = 603;
+/// 604: `<nick> <user> <host> <lastnick> :is online`
+pub const RPL_NOWON: u16 = 604;
+/// 605: `<nick> * * <lasttime> :is offline`
+pub const RPL_NOWOFF: u16 = 605;
+/// 606: `:nick1 nick2 ...` — space-separated watch list dump.
+pub const RPL_WATCHLIST: u16 = 606;
+/// 607: `:End of WATCH <c>` — sentinel keyed by the subcommand char.
+pub const RPL_ENDOFWATCHLIST: u16 = 607;
+/// 512: `<nick> :Maximum size for WATCH-list is <n> entries`
+pub const ERR_TOOMANYWATCH: u16 = 512;
+
 // IRCv3 MONITOR — per-client nick-watch notifications.
 /// 730: trailing comma-joined `nick!user@host` list of nicks that
 /// just came online among the client's monitored set.

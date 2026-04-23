@@ -184,6 +184,11 @@ pub struct ServerState {
     /// the reverse index we'd have to scan every client on every
     /// quit/register.
     pub monitored_by: DashMap<String, std::collections::HashSet<ClientId>>,
+    /// Dalnet WATCH reverse index — symmetric to `monitored_by` but
+    /// keyed for clients using the `/WATCH` command surface. Same
+    /// lifecycle hooks fire to both; which numerics a watcher sees
+    /// depends on which index they're in for the given nick.
+    pub watched_by: DashMap<String, std::collections::HashSet<ClientId>>,
 }
 
 /// One past-user record kept for `/WHOWAS` lookups.
@@ -241,6 +246,7 @@ impl ServerState {
             account_store: crate::accounts::empty_in_memory(),
             whowas: tokio::sync::Mutex::new(std::collections::VecDeque::with_capacity(WHOWAS_MAX)),
             monitored_by: DashMap::new(),
+            watched_by: DashMap::new(),
         }
     }
 
@@ -305,43 +311,141 @@ impl ServerState {
         }
     }
 
-    /// Emit RPL_MONONLINE (730) to every client watching `nick`.
-    /// `prefix` is the `nick!user@host` the client renders; callers
-    /// build it from the just-registered Client or from the remote
-    /// user's known identity.
-    pub async fn notify_monitor_online(&self, nick: &str, prefix: &str) {
+    /// Symmetric with `monitor_add` but keyed into `watched_by` for
+    /// the `/WATCH` surface. Returns whether the nick was newly
+    /// inserted on this client's side.
+    pub async fn watch_add(&self, watcher: ClientId, nick: &str) -> bool {
         let key = irc_casefold(nick);
-        let watchers: Vec<ClientId> = match self.monitored_by.get(&key) {
-            Some(e) => e.iter().copied().collect(),
-            None => return,
+        let inserted_on_client = if let Some(client) = self.clients.get(&watcher) {
+            let mut c = client.write().await;
+            c.watched.insert(key.clone())
+        } else {
+            false
         };
-        for watcher_id in watchers {
-            if let Some(client) = self.clients.get(&watcher_id) {
-                let c = client.read().await;
-                c.send(irc_proto::Message::with_source(
-                    &self.server_name,
-                    irc_proto::Command::Numeric(crate::numeric::RPL_MONONLINE),
-                    vec![c.nick.clone(), prefix.to_string()],
-                ));
+        self.watched_by
+            .entry(key)
+            .or_default()
+            .insert(watcher);
+        inserted_on_client
+    }
+
+    /// Remove a nick from a client's WATCH list. Mirrors
+    /// `monitor_remove` shape.
+    pub async fn watch_remove(&self, watcher: ClientId, nick: &str) {
+        let key = irc_casefold(nick);
+        if let Some(client) = self.clients.get(&watcher) {
+            client.write().await.watched.remove(&key);
+        }
+        if let Some(mut entry) = self.watched_by.get_mut(&key) {
+            entry.remove(&watcher);
+            if entry.is_empty() {
+                drop(entry);
+                self.watched_by.remove(&key);
             }
         }
     }
 
-    /// Emit RPL_MONOFFLINE (731) to every client watching `nick`.
+    /// Clear a client's entire WATCH list. Called on `/WATCH C` and
+    /// on client disconnect alongside `monitor_clear`.
+    pub async fn watch_clear(&self, watcher: ClientId) {
+        let nicks: Vec<String> = if let Some(client) = self.clients.get(&watcher) {
+            let c = client.read().await;
+            c.watched.iter().cloned().collect()
+        } else {
+            return;
+        };
+        for nick in &nicks {
+            self.watch_remove(watcher, nick).await;
+        }
+    }
+
+    /// Emit the online-style notification (730 MONITOR / 604 WATCH)
+    /// to every client watching `nick` under either surface. `nick`
+    /// is the display form (preserved case), `user`/`host` feed the
+    /// WATCH numeric's parameter slots, and `last_ts` is a best-effort
+    /// "last known activity" timestamp used to fill WATCH's last-nick
+    /// / last-time field.
+    pub async fn notify_monitor_online(&self, nick: &str, prefix: &str) {
+        let key = irc_casefold(nick);
+        // MONITOR watchers: 730 RPL_MONONLINE with the full prefix.
+        if let Some(e) = self.monitored_by.get(&key) {
+            let watchers: Vec<ClientId> = e.iter().copied().collect();
+            drop(e);
+            for watcher_id in watchers {
+                if let Some(client) = self.clients.get(&watcher_id) {
+                    let c = client.read().await;
+                    c.send(irc_proto::Message::with_source(
+                        &self.server_name,
+                        irc_proto::Command::Numeric(crate::numeric::RPL_MONONLINE),
+                        vec![c.nick.clone(), prefix.to_string()],
+                    ));
+                }
+            }
+        }
+        // WATCH watchers: 604 RPL_NOWON. Split the prefix into its
+        // nick!user@host components for the numeric's param slots.
+        if let Some(e) = self.watched_by.get(&key) {
+            let watchers: Vec<ClientId> = e.iter().copied().collect();
+            drop(e);
+            let (user, host) = split_user_host(prefix).unwrap_or(("*", "*"));
+            let lasttime = chrono::Utc::now().timestamp().to_string();
+            for watcher_id in watchers {
+                if let Some(client) = self.clients.get(&watcher_id) {
+                    let c = client.read().await;
+                    c.send(irc_proto::Message::with_source(
+                        &self.server_name,
+                        irc_proto::Command::Numeric(crate::numeric::RPL_NOWON),
+                        vec![
+                            c.nick.clone(),
+                            nick.to_string(),
+                            user.to_string(),
+                            host.to_string(),
+                            lasttime.clone(),
+                            "is online".into(),
+                        ],
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Emit the offline-style notification (731 MONITOR / 605 WATCH).
     pub async fn notify_monitor_offline(&self, nick: &str) {
         let key = irc_casefold(nick);
-        let watchers: Vec<ClientId> = match self.monitored_by.get(&key) {
-            Some(e) => e.iter().copied().collect(),
-            None => return,
-        };
-        for watcher_id in watchers {
-            if let Some(client) = self.clients.get(&watcher_id) {
-                let c = client.read().await;
-                c.send(irc_proto::Message::with_source(
-                    &self.server_name,
-                    irc_proto::Command::Numeric(crate::numeric::RPL_MONOFFLINE),
-                    vec![c.nick.clone(), nick.to_string()],
-                ));
+        if let Some(e) = self.monitored_by.get(&key) {
+            let watchers: Vec<ClientId> = e.iter().copied().collect();
+            drop(e);
+            for watcher_id in watchers {
+                if let Some(client) = self.clients.get(&watcher_id) {
+                    let c = client.read().await;
+                    c.send(irc_proto::Message::with_source(
+                        &self.server_name,
+                        irc_proto::Command::Numeric(crate::numeric::RPL_MONOFFLINE),
+                        vec![c.nick.clone(), nick.to_string()],
+                    ));
+                }
+            }
+        }
+        if let Some(e) = self.watched_by.get(&key) {
+            let watchers: Vec<ClientId> = e.iter().copied().collect();
+            drop(e);
+            let lasttime = chrono::Utc::now().timestamp().to_string();
+            for watcher_id in watchers {
+                if let Some(client) = self.clients.get(&watcher_id) {
+                    let c = client.read().await;
+                    c.send(irc_proto::Message::with_source(
+                        &self.server_name,
+                        irc_proto::Command::Numeric(crate::numeric::RPL_NOWOFF),
+                        vec![
+                            c.nick.clone(),
+                            nick.to_string(),
+                            "*".into(),
+                            "*".into(),
+                            lasttime.clone(),
+                            "is offline".into(),
+                        ],
+                    ));
+                }
             }
         }
     }
@@ -462,6 +566,7 @@ impl ServerState {
         // reverse index doesn't carry stale watchers.
         self.notify_monitor_offline(&display_nick).await;
         self.monitor_clear(id).await;
+        self.watch_clear(id).await;
 
         // Remove from all channels
         let mut empty_channels = Vec::new();
@@ -862,4 +967,15 @@ impl ServerState {
             "MODES=6".to_string(),
         ]
     }
+}
+
+/// Split `nick!user@host` into (`user`, `host`) borrowed slices.
+/// Returns `None` when either delimiter is missing. Used by the
+/// WATCH numeric emitters which want the user and host separately.
+fn split_user_host(prefix: &str) -> Option<(&str, &str)> {
+    let bang = prefix.find('!')?;
+    let at = prefix[bang + 1..].find('@')?;
+    let user = &prefix[bang + 1..bang + 1 + at];
+    let host = &prefix[bang + 1 + at + 1..];
+    Some((user, host))
 }

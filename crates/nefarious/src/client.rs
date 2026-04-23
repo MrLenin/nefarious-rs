@@ -73,6 +73,12 @@ pub struct Client {
     /// `monitored_by` so state-change broadcasts can find watchers
     /// without scanning every client.
     pub monitored: HashSet<String>,
+    /// Dalnet/Unreal WATCH list — casefolded nicks this client wants
+    /// 604/605/602 notifications about. Cross-indexed on ServerState
+    /// via `watched_by`. Same lifecycle hooks fire for both — clients
+    /// get MONITOR numerics for nicks in `monitored` and WATCH
+    /// numerics for nicks in `watched`, and can use both at once.
+    pub watched: HashSet<String>,
     /// SILENCE entries — masks whose senders are filtered before
     /// delivery. An entry with `exception = true` is a positive-match
     /// override: messages matching an exception pass through even if
@@ -180,6 +186,7 @@ impl Client {
             account: None,
             privs: HashSet::new(),
             monitored: HashSet::new(),
+            watched: HashSet::new(),
             silence: Vec::new(),
             channels: HashSet::new(),
             connected_at: now,
