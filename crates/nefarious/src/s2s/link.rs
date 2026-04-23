@@ -109,7 +109,7 @@ async fn handle_server_link_inner<S>(
         }
     };
 
-    if connect.password != password_received {
+    if !crate::password::verify(&password_received, &connect.password) {
         error!("password mismatch for server {remote_name}");
         return;
     }

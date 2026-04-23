@@ -40,7 +40,7 @@ fn check_client_block_password(
             None => return None, // match, no password required
             Some(required) => {
                 return match presented {
-                    Some(p) if p == required => None,
+                    Some(p) if crate::password::verify(p, required) => None,
                     Some(_) => Some("Invalid password".into()),
                     None => Some("Password required".into()),
                 };
@@ -491,7 +491,7 @@ async fn registration_phase(
                         }
                         None => true,
                     };
-                    host_ok && w.password == *presented_pass
+                    host_ok && crate::password::verify(presented_pass, &w.password)
                 });
                 if matched.is_none() {
                     let c = client.read().await;

@@ -10,6 +10,7 @@ mod handlers;
 mod ipcheck;
 mod jupe;
 mod numeric;
+mod password;
 mod s2s;
 mod server;
 mod shun;

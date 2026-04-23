@@ -25,9 +25,9 @@ pub struct Config {
 /// Mirrors nefarious2 ircd.conf WebIRC block.
 #[derive(Debug, Clone)]
 pub struct WebIrcConfig {
-    /// Password the gateway must present on the WEBIRC line.
-    /// Stored plaintext for now; real deployments should use the
-    /// `password_hash` field once we wire up a hash compare path.
+    /// Password the gateway must present on the WEBIRC line. May
+    /// be plaintext or a bcrypt `$2a$/$2b$/$2y$` hash — the
+    /// verifier auto-detects via the prefix.
     pub password: String,
     /// Optional host glob the gateway's actual source IP must
     /// match before the password is even consulted, per nefarious2

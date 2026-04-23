@@ -1015,14 +1015,18 @@ impl ServerState {
         self.remote_nicks.insert(irc_casefold(new_nick), numeric);
     }
 
-    /// Get the first active server link (we only support one for now).
+    /// Get an arbitrary active server link. Callers that need to
+    /// route to a specific target server should pick the link
+    /// toward that target instead; this helper is for
+    /// broadcast-like paths (PRIVS, login AC) where any link will
+    /// eventually propagate the message network-wide. Returns
+    /// `None` when we have no upstream peers.
     pub fn get_link(&self) -> Option<Arc<ServerLink>> {
         self.links.iter().next().map(|e| Arc::clone(e.value()))
     }
 
-    /// Send a raw P10 line to all server links. Used by forthcoming
-    /// multi-link propagation paths; today we only have a single link
-    /// and `get_link().send_line` covers the case.
+    /// Send a raw P10 line to every active server link. Used by
+    /// broadcast paths that aren't targeted at a specific peer.
     #[allow(dead_code)]
     pub async fn send_to_links(&self, line: &str) {
         for entry in self.links.iter() {
@@ -1212,7 +1216,10 @@ impl ServerState {
     /// `cap-notify` client. Called when the advertised set mutates
     /// (e.g. after a REHASH). `subcmd` is "NEW" or "DEL". Caps are
     /// sorted by name so the wire ordering is deterministic.
-    /// Not yet called — REHASH is a follow-up; keep ready.
+    /// No current caller — REHASH doesn't change the advertised
+    /// cap set (those are hardcoded at compile time for now), so
+    /// this sits ready until a future config path gates individual
+    /// caps on a feature.
     #[allow(dead_code)]
     pub async fn broadcast_cap_notify(&self, subcmd: &str, caps: &[Capability]) {
         if caps.is_empty() {
