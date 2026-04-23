@@ -10,6 +10,7 @@
 //! Mirrors nefarious2 shun.c + m_shun.c. We ship the same wire and
 //! storage surface as G-lines so a mixed network stays in sync.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -29,8 +30,10 @@ pub struct Shun {
 }
 
 impl Shun {
-    pub fn matches(&self, user_host: &str) -> bool {
-        crate::channel::wildcard_match(&self.mask, user_host)
+    /// Match against a client identity. Shares the gline matcher so
+    /// CIDR/glob semantics are identical between the two surfaces.
+    pub fn matches(&self, user: &str, host: &str, ip: IpAddr) -> bool {
+        crate::gline::user_host_mask_matches(&self.mask, user, host, ip)
     }
 
     pub fn is_enforceable(&self, now: DateTime<Utc>) -> bool {

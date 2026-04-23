@@ -579,11 +579,16 @@ impl ServerState {
     /// snapshot (mask + reason) so callers don't have to hold the
     /// lock across the client disconnect path. Inactive/expired
     /// entries are skipped.
-    pub async fn find_matching_gline(&self, user_host: &str) -> Option<(String, String)> {
+    pub async fn find_matching_gline(
+        &self,
+        user: &str,
+        host: &str,
+        ip: std::net::IpAddr,
+    ) -> Option<(String, String)> {
         let now = chrono::Utc::now();
         for entry in self.glines.iter() {
             let gl = entry.value().read().await;
-            if gl.is_enforceable(now) && gl.matches(user_host) {
+            if gl.is_enforceable(now) && gl.matches(user, host, ip) {
                 return Some((gl.mask.clone(), gl.reason.clone()));
             }
         }
@@ -593,11 +598,16 @@ impl ServerState {
     /// Parallel to `find_matching_gline` for SHUNs. Callers use this
     /// on outbound PRIVMSG/NOTICE paths to decide whether to drop
     /// the message silently (shun is a gag, not a ban).
-    pub async fn is_shunned(&self, user_host: &str) -> bool {
+    pub async fn is_shunned(
+        &self,
+        user: &str,
+        host: &str,
+        ip: std::net::IpAddr,
+    ) -> bool {
         let now = chrono::Utc::now();
         for entry in self.shuns.iter() {
             let sh = entry.value().read().await;
-            if sh.is_enforceable(now) && sh.matches(user_host) {
+            if sh.is_enforceable(now) && sh.matches(user, host, ip) {
                 return true;
             }
         }
@@ -605,10 +615,13 @@ impl ServerState {
     }
 
     /// Search the Z-line store for the first enforceable entry
-    /// matching the given peer IP string. Returns a (mask, reason)
+    /// matching the given peer IP. Returns a (mask, reason)
     /// snapshot so the connect-gate can close the socket without
     /// holding the store lock.
-    pub async fn find_matching_zline(&self, ip: &str) -> Option<(String, String)> {
+    pub async fn find_matching_zline(
+        &self,
+        ip: std::net::IpAddr,
+    ) -> Option<(String, String)> {
         let now = chrono::Utc::now();
         for entry in self.zlines.iter() {
             let zl = entry.value().read().await;

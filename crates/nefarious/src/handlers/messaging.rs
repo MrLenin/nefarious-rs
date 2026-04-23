@@ -239,11 +239,11 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
     // nefarious2 m_message.c handles this at the send path so the
     // sender sees no error but their message never reaches anyone.
     // PRIVMSG to server-services (first-char '$') bypasses shun.
-    let sender_user_host = {
+    let (user, host, ip) = {
         let c = ctx.client.read().await;
-        format!("{}@{}", c.user, c.host)
+        (c.user.clone(), c.host.clone(), c.addr.ip())
     };
-    if !target.starts_with('$') && ctx.state.is_shunned(&sender_user_host).await {
+    if !target.starts_with('$') && ctx.state.is_shunned(&user, &host, ip).await {
         return;
     }
 

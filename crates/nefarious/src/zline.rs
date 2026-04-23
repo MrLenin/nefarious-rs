@@ -7,6 +7,7 @@
 //!
 //! Mirrors nefarious2 zline.c + m_zline.c wire semantics.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -26,12 +27,12 @@ pub struct Zline {
 }
 
 impl Zline {
-    /// Check whether this Z-line's mask matches an IP string. The
-    /// mask is matched as a glob — CIDR (`a.b.c.0/24`) isn't
-    /// expanded yet, which matches our gline_match limitation. A
-    /// bare IP string and a `*.x.y.z`-style glob both work.
-    pub fn matches(&self, ip: &str) -> bool {
-        crate::channel::wildcard_match(&self.mask, ip)
+    /// Check whether this Z-line's mask matches a client IP.
+    /// Delegates to the shared `ip_mask_matches` helper so the
+    /// same CIDR/numeric/glob rules apply here as in GLINE's host
+    /// side.
+    pub fn matches(&self, ip: IpAddr) -> bool {
+        crate::gline::ip_mask_matches(&self.mask, ip)
     }
 
     pub fn is_enforceable(&self, now: DateTime<Utc>) -> bool {

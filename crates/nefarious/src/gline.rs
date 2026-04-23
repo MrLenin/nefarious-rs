@@ -12,6 +12,7 @@
 //! post-add scan. Lifetime/modify/real-name/version GLines come
 //! next once the base path is exercised against a live peer.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -52,11 +53,23 @@ pub struct Gline {
 }
 
 impl Gline {
-    /// Whether this gline applies to the given `user@host` string.
-    /// Simple glob match only (no CIDR) for now — matches the mask
-    /// stored at construction time via the shared channel.rs helper.
-    pub fn matches(&self, user_host: &str) -> bool {
-        crate::channel::wildcard_match(&self.mask, user_host)
+    /// Whether this gline applies to the given client identity.
+    /// Handles three match shapes in priority order:
+    ///
+    /// 1. `user@cidr` — host side parses as an IPv4/IPv6 CIDR
+    ///    (`192.168.0.0/24` or `2001:db8::/32`). User side is
+    ///    glob-matched against `user`.
+    /// 2. `user@host` with the host being a bare IP — numeric
+    ///    equality against `ip`.
+    /// 3. Plain glob fallback — compare the whole mask to the
+    ///    reassembled `user@host` string (covers resolved hosts
+    ///    like `*@*.example.com`).
+    ///
+    /// The combined approach means operators can ban either on
+    /// forward-resolved hostname masks (classic) or on network
+    /// prefixes (`/24`) without needing separate mask syntax.
+    pub fn matches(&self, user: &str, host: &str, ip: IpAddr) -> bool {
+        user_host_mask_matches(&self.mask, user, host, ip)
     }
 
     /// Whether this gline should be enforced right now. Expired or
@@ -114,9 +127,108 @@ pub fn parse_interval(s: &str) -> u64 {
     seconds.saturating_add(partial)
 }
 
+/// Match a `user@host` ban mask against a client identity.
+///
+/// Shared by GLINE, SHUN, and the K-line checker so the same mask
+/// syntax (glob + CIDR) applies network-wide. Splits the mask on
+/// `@` and considers the right-hand side as either a CIDR, a
+/// numeric IP, or a glob; the left-hand side is always a glob on
+/// the user string. When there's no `@` in the mask the whole
+/// thing falls through to a single glob against `user@host` —
+/// preserves backwards compatibility with naive masks.
+pub fn user_host_mask_matches(
+    mask: &str,
+    user: &str,
+    host: &str,
+    ip: IpAddr,
+) -> bool {
+    // Fall-through path: no '@' → glob against full prefix.
+    let Some(at) = mask.rfind('@') else {
+        let combined = format!("{user}@{host}");
+        return crate::channel::wildcard_match(mask, &combined);
+    };
+    let (user_part, host_part) = (&mask[..at], &mask[at + 1..]);
+
+    // User side is always a glob.
+    if !crate::channel::wildcard_match(user_part, user) {
+        return false;
+    }
+
+    // Host side: try CIDR → numeric IP → glob, in that order.
+    if host_part.contains('/') {
+        if let Some(matched) = ip_in_cidr(ip, host_part) {
+            return matched;
+        }
+    }
+    if let Ok(mask_ip) = host_part.parse::<IpAddr>() {
+        return mask_ip == ip;
+    }
+    // Fall back to glob against the textual host. `wildcard_match`
+    // is rfc1459-casefolded, which is right for hostname matches.
+    crate::channel::wildcard_match(host_part, host)
+}
+
+/// Match a bare IP/CIDR mask against a client IP. Used by ZLINE,
+/// which doesn't carry a user part. Glob fallback is still supplied
+/// for peers that emit ZLINE masks as hostname patterns rather than
+/// numeric CIDR.
+pub fn ip_mask_matches(mask: &str, ip: IpAddr) -> bool {
+    if mask.contains('/') {
+        if let Some(matched) = ip_in_cidr(ip, mask) {
+            return matched;
+        }
+    }
+    if let Ok(mask_ip) = mask.parse::<IpAddr>() {
+        return mask_ip == ip;
+    }
+    // Fall back: treat as a glob on the IP's textual form.
+    crate::channel::wildcard_match(mask, &ip.to_string())
+}
+
+/// Parse `cidr` as an IPv4 or IPv6 prefix and test whether `ip`
+/// falls within it. Returns `Some(matched)` on a parseable mask
+/// and `None` if `cidr` is malformed — callers then decide what
+/// to do (we fall back to glob on malformed masks).
+pub fn ip_in_cidr(ip: IpAddr, cidr: &str) -> Option<bool> {
+    let (net_str, bits_str) = cidr.split_once('/')?;
+    let net: IpAddr = net_str.parse().ok()?;
+    let bits: u8 = bits_str.parse().ok()?;
+    match (net, ip) {
+        (IpAddr::V4(net), IpAddr::V4(ip)) => {
+            if bits > 32 {
+                return None;
+            }
+            let net_n = u32::from_be_bytes(net.octets());
+            let ip_n = u32::from_be_bytes(ip.octets());
+            // 0-bit prefix matches everything; u32 shift by 32 is UB.
+            if bits == 0 {
+                return Some(true);
+            }
+            let mask = u32::MAX << (32 - bits);
+            Some((net_n & mask) == (ip_n & mask))
+        }
+        (IpAddr::V6(net), IpAddr::V6(ip)) => {
+            if bits > 128 {
+                return None;
+            }
+            let net_n = u128::from_be_bytes(net.octets());
+            let ip_n = u128::from_be_bytes(ip.octets());
+            if bits == 0 {
+                return Some(true);
+            }
+            let mask = u128::MAX << (128 - bits);
+            Some((net_n & mask) == (ip_n & mask))
+        }
+        // Mixed address families never match. This is what C does
+        // too — a 4-octet mask against a v6 client is simply "no".
+        _ => Some(false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
 
     #[test]
     fn interval_bare_seconds() {
@@ -140,5 +252,73 @@ mod tests {
     fn interval_unknown_unit() {
         // Unknown unit treated as 0 multiplier; digits before it are lost.
         assert_eq!(parse_interval("5q"), 0);
+    }
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    #[test]
+    fn cidr_ipv4_prefix() {
+        assert_eq!(ip_in_cidr(v4(192, 168, 1, 42), "192.168.0.0/16"), Some(true));
+        assert_eq!(ip_in_cidr(v4(10, 0, 0, 1), "192.168.0.0/16"), Some(false));
+        assert_eq!(ip_in_cidr(v4(192, 168, 1, 42), "192.168.1.0/24"), Some(true));
+        assert_eq!(ip_in_cidr(v4(192, 168, 2, 42), "192.168.1.0/24"), Some(false));
+    }
+
+    #[test]
+    fn cidr_edges() {
+        // /0 matches anything
+        assert_eq!(ip_in_cidr(v4(8, 8, 8, 8), "0.0.0.0/0"), Some(true));
+        // /32 matches exact
+        assert_eq!(ip_in_cidr(v4(1, 2, 3, 4), "1.2.3.4/32"), Some(true));
+        assert_eq!(ip_in_cidr(v4(1, 2, 3, 5), "1.2.3.4/32"), Some(false));
+    }
+
+    #[test]
+    fn cidr_malformed_returns_none() {
+        assert_eq!(ip_in_cidr(v4(1, 2, 3, 4), "not-a-cidr"), None);
+        assert_eq!(ip_in_cidr(v4(1, 2, 3, 4), "1.2.3.4/99"), None);
+    }
+
+    #[test]
+    fn user_host_mask_cidr_and_user() {
+        // Classic glob-on-host should still work.
+        assert!(user_host_mask_matches(
+            "*bad*@*.example.com",
+            "verybadnick",
+            "host.example.com",
+            v4(1, 2, 3, 4),
+        ));
+        // CIDR host side: the host glob is ignored in favour of the
+        // numeric compare.
+        assert!(user_host_mask_matches(
+            "*@192.168.0.0/16",
+            "alice",
+            "resolved-to-something-else.example",
+            v4(192, 168, 1, 1),
+        ));
+        assert!(!user_host_mask_matches(
+            "*@192.168.0.0/16",
+            "alice",
+            "whatever",
+            v4(10, 0, 0, 1),
+        ));
+        // User glob still gates when host CIDR passes.
+        assert!(!user_host_mask_matches(
+            "admin@192.168.0.0/16",
+            "alice",
+            "whatever",
+            v4(192, 168, 1, 1),
+        ));
+    }
+
+    #[test]
+    fn ip_mask_bare_ip_and_cidr() {
+        assert!(ip_mask_matches("1.2.3.4", v4(1, 2, 3, 4)));
+        assert!(!ip_mask_matches("1.2.3.4", v4(1, 2, 3, 5)));
+        assert!(ip_mask_matches("192.168.0.0/16", v4(192, 168, 10, 20)));
+        // Glob fallback — host-shaped IP glob.
+        assert!(ip_mask_matches("192.168.*.*", v4(192, 168, 1, 1)));
     }
 }

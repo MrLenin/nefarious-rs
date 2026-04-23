@@ -3618,12 +3618,16 @@ pub async fn handle_zline(
 
                 // Post-add scan by IP — same pattern as GLINE but
                 // matching the socket's peer IP rather than user@host.
+                // Uses the shared ip_mask_matches helper so CIDR
+                // and numeric-IP masks are both honoured.
                 let mut victims = Vec::new();
                 for entry in state.clients.iter() {
                     let c = entry.value().read().await;
                     if c.is_registered() {
-                        let ip = c.addr.ip().to_string();
-                        if crate::channel::wildcard_match(&mask_for_kick, &ip) {
+                        if crate::gline::ip_mask_matches(
+                            &mask_for_kick,
+                            c.addr.ip(),
+                        ) {
                             victims.push(entry.key().clone());
                         }
                     }
@@ -3760,13 +3764,18 @@ pub async fn handle_gline(
                 // matching this mask gets kicked so the new ban
                 // takes effect immediately, not just for future
                 // connects. request_disconnect drives normal QUIT
-                // broadcast so peers stay in sync.
+                // broadcast so peers stay in sync. Uses the shared
+                // user_host_mask_matches helper so CIDR masks work.
                 let mut victims = Vec::new();
                 for entry in state.clients.iter() {
                     let c = entry.value().read().await;
                     if c.is_registered() {
-                        let user_host = format!("{}@{}", c.user, c.host);
-                        if crate::channel::wildcard_match(&mask_for_kick, &user_host) {
+                        if crate::gline::user_host_mask_matches(
+                            &mask_for_kick,
+                            &c.user,
+                            &c.host,
+                            c.addr.ip(),
+                        ) {
                             victims.push(entry.key().clone());
                         }
                     }

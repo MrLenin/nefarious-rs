@@ -436,8 +436,8 @@ async fn kick_matches_gline(ctx: &HandlerContext, mask: &str, reason: &str) {
     for entry in ctx.state.clients.iter() {
         let c = entry.value().read().await;
         if c.is_registered() {
-            let user_host = format!("{}@{}", c.user, c.host);
-            if crate::channel::wildcard_match(mask, &user_host) {
+            let ip = c.addr.ip();
+            if crate::gline::user_host_mask_matches(mask, &c.user, &c.host, ip) {
                 victims.push(entry.key().clone());
             }
         }
@@ -456,8 +456,7 @@ async fn kick_matches_zline(ctx: &HandlerContext, mask: &str, reason: &str) {
     for entry in ctx.state.clients.iter() {
         let c = entry.value().read().await;
         if c.is_registered() {
-            let ip = c.addr.ip().to_string();
-            if crate::channel::wildcard_match(mask, &ip) {
+            if crate::gline::ip_mask_matches(mask, c.addr.ip()) {
                 victims.push(entry.key().clone());
             }
         }

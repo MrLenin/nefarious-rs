@@ -56,17 +56,20 @@ fn check_client_block_password(
 /// Either field being empty counts as a wildcard — a block with only
 /// `host` matches by user@host, only `ip` matches by IP, both
 /// require both to match. Returns the first matching KillConfig so
-/// the caller can log which rule fired.
+/// the caller can log which rule fired. Both `host` and `ip` fields
+/// accept the shared GLINE-style mask syntax: glob, numeric IP, or
+/// CIDR on the host side and glob/IP/CIDR on the ip side.
 fn match_kill_config<'a>(
     kills: &'a [irc_config::KillConfig],
-    user_host: &str,
-    ip: &str,
+    user: &str,
+    host: &str,
+    ip: std::net::IpAddr,
 ) -> Option<&'a irc_config::KillConfig> {
     for kill in kills {
         let host_match = kill.host == "*"
-            || crate::channel::wildcard_match(&kill.host, user_host);
+            || crate::gline::user_host_mask_matches(&kill.host, user, host, ip);
         let ip_match = match &kill.ip {
-            Some(pattern) => crate::channel::wildcard_match(pattern, ip),
+            Some(pattern) => crate::gline::ip_mask_matches(pattern, ip),
             None => true,
         };
         if host_match && ip_match {
@@ -234,13 +237,17 @@ pub async fn handle_connection<S>(
     // into the config.
     let ban_match = {
         let c = client.read().await;
-        let ip = c.addr.ip().to_string();
-        let user_host = format!("{}@{}", c.user, c.host);
-        if let Some((mask, reason)) = state.find_matching_zline(&ip).await {
+        let ip = c.addr.ip();
+        let user = c.user.clone();
+        let host = c.host.clone();
+        drop(c);
+        if let Some((mask, reason)) = state.find_matching_zline(ip).await {
             Some(("Z-lined", mask, reason))
-        } else if let Some(kill) = match_kill_config(&state.config.kills, &user_host, &ip) {
+        } else if let Some(kill) = match_kill_config(&state.config.kills, &user, &host, ip) {
             Some(("K-lined", kill.host.clone(), kill.reason.clone()))
-        } else if let Some((mask, reason)) = state.find_matching_gline(&user_host).await {
+        } else if let Some((mask, reason)) =
+            state.find_matching_gline(&user, &host, ip).await
+        {
             Some(("G-lined", mask, reason))
         } else {
             None
