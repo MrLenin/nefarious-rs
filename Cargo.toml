@@ -25,6 +25,7 @@ dashmap = "6"
 thiserror = "2"
 chrono = "0.4"
 futures = "0.3"
+arc-swap = "1"
 
 # workspace crates
 irc-proto = { path = "crates/irc-proto" }

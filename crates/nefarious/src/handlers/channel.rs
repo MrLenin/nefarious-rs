@@ -32,7 +32,7 @@ pub async fn handle_join(ctx: &HandlerContext, msg: &Message) {
     // Opers bypass so moderators can monitor the whole network.
     // Enforced before the JoinCheck inner loop so the numeric
     // fires once per attempt rather than per already-reached cap.
-    let max_channels = ctx.state.config.max_channels_per_user() as usize;
+    let max_channels = ctx.state.config.load().max_channels_per_user() as usize;
     let (current_count, is_oper) = {
         let c = ctx.client.read().await;
         (c.channels.len(), c.modes.contains(&'o'))

@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use openssl::nid::Nid;
@@ -15,6 +15,7 @@ use crate::state::ServerState;
 /// Start the IRC server with the given configuration.
 pub async fn run(
     config: Config,
+    config_path: Option<PathBuf>,
     ssl_cert: Option<&Path>,
     ssl_key: Option<&Path>,
     sasl_accounts: Option<String>,
@@ -22,6 +23,16 @@ pub async fn run(
     let mut state_inner = ServerState::new(config.clone());
     if let Some(spec) = sasl_accounts {
         state_inner.account_store = build_account_store_from_env(&spec).await;
+    }
+    // Record the path so /REHASH has something to reparse. A None
+    // here means the server was started without a file — /REHASH
+    // will refuse cleanly rather than silently succeeding on an
+    // empty config.
+    if let Some(p) = config_path {
+        *state_inner
+            .config_path
+            .write()
+            .expect("config_path lock poisoned") = Some(p);
     }
     // Seed the HLC and msgid-generator YY prefix. Every SourceInfo
     // will route through this for time + msgid. Must happen before
@@ -425,7 +436,8 @@ pub async fn initiate_server_connection(
 ) -> Result<(), String> {
     use tokio::net::TcpStream;
 
-    let connect = match state.config.connects.iter().find(|c| c.name == connect_name) {
+    let cfg = state.config.load();
+    let connect = match cfg.connects.iter().find(|c| c.name == connect_name) {
         Some(c) => c.clone(),
         None => return Err(format!("no Connect block for {connect_name}")),
     };

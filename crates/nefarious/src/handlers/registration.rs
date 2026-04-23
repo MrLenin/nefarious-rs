@@ -31,7 +31,7 @@ pub async fn handle_nick_change(ctx: &HandlerContext, msg: &Message) {
     // NICKDELAY — throttle rapid nick cycling so a bot can't burn
     // through 100 nicks/second. Case-only renames (same casefold)
     // and opers bypass the throttle; opers need unfettered control.
-    let nick_delay = ctx.state.config.nick_delay();
+    let nick_delay = ctx.state.config.load().nick_delay();
     if nick_delay > 0 && !old_nick.is_empty() && !irc_eq(&old_nick, &new_nick) {
         let (last_ts, is_oper) = {
             let c = ctx.client.read().await;
@@ -101,7 +101,7 @@ pub async fn handle_nick_change(ctx: &HandlerContext, msg: &Message) {
 
     // Server notice to +s opers — nick changes are part of the
     // CONNEXIT audit trail.
-    if ctx.state.config.connexit_notices() && !old_nick.is_empty() {
+    if ctx.state.config.load().connexit_notices() && !old_nick.is_empty() {
         let (user, host) = {
             let c = ctx.client.read().await;
             (c.user.clone(), c.host.clone())

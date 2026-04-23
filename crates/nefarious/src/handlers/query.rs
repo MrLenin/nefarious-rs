@@ -16,9 +16,11 @@ pub async fn handle_who(ctx: &HandlerContext, msg: &Message) {
     };
     // HIS_WHO_SERVERNAME/HOPCOUNT are enforced here — opers always see
     // the unmangled columns, everyone else gets the sanitised form.
-    let hide_server = !is_oper && ctx.state.config.his_who_servername();
-    let hide_hops = !is_oper && ctx.state.config.his_who_hopcount();
-    let his_servername = ctx.state.config.his_servername().map(|s| s.to_string());
+    let cfg = ctx.state.config.load();
+    let hide_server = !is_oper && cfg.his_who_servername();
+    let hide_hops = !is_oper && cfg.his_who_hopcount();
+    let his_servername = cfg.his_servername().map(|s| s.to_string());
+    drop(cfg);
 
     if mask.starts_with('#') || mask.starts_with('&') {
         // WHO for a channel — include both local and remote members.
@@ -212,7 +214,7 @@ pub async fn handle_monitor(ctx: &HandlerContext, msg: &Message) {
             // targets — batch the walk.
             let nicks: Vec<String> =
                 list.split(',').filter(|n| !n.is_empty()).map(|n| n.to_string()).collect();
-            let max = ctx.state.config.max_watchs() as usize;
+            let max = ctx.state.config.load().max_watchs() as usize;
             let mut online_prefixes: Vec<String> = Vec::new();
             let mut offline_nicks: Vec<String> = Vec::new();
             let mut overflow_nick: Option<String> = None;
@@ -441,7 +443,7 @@ pub async fn handle_whois(ctx: &HandlerContext, msg: &Message) {
     // Try local first, then fall back to remote users seen via P10 burst.
     if let Some(target) = ctx.state.find_client_by_nick(nick) {
         let t = target.read().await;
-        let host = if show_real { t.host.clone() } else { t.visible_host(&ctx.state.config) };
+        let host = if show_real { t.host.clone() } else { t.visible_host(&ctx.state.config.load()) };
         ctx.send_numeric(
             RPL_WHOISUSER,
             vec![
@@ -459,9 +461,10 @@ pub async fn handle_whois(ctx: &HandlerContext, msg: &Message) {
         let (srv_name, srv_desc) = if show_real {
             (ctx.state.server_name.clone(), ctx.state.server_description.clone())
         } else {
+            let cfg = ctx.state.config.load();
             (
-                ctx.state.config.his_servername().unwrap_or(&ctx.state.server_name).to_string(),
-                ctx.state.config.his_serverinfo().unwrap_or(&ctx.state.server_description).to_string(),
+                cfg.his_servername().unwrap_or(&ctx.state.server_name).to_string(),
+                cfg.his_serverinfo().unwrap_or(&ctx.state.server_description).to_string(),
             )
         };
         ctx.send_numeric(
@@ -515,7 +518,7 @@ pub async fn handle_whois(ctx: &HandlerContext, msg: &Message) {
         // stranger when FEAT_HIS_WHOIS_IDLETIME is set (default).
         // Self-WHOIS and oper WHOIS always include it. `show_real`
         // already captures the "oper or self" predicate.
-        if show_real || !ctx.state.config.his_whois_idletime() {
+        if show_real || !ctx.state.config.load().his_whois_idletime() {
             let idle_secs = (chrono::Utc::now() - t.last_active).num_seconds().max(0);
             ctx.send_numeric(
                 RPL_WHOISIDLE,
@@ -578,10 +581,13 @@ pub async fn handle_whois(ctx: &HandlerContext, msg: &Message) {
             } else {
                 ctx.state.server_name.clone()
             };
-            (
-                ctx.state.config.his_servername().unwrap_or(&real_name).to_string(),
-                ctx.state.config.his_serverinfo().unwrap_or("").to_string(),
-            )
+            {
+                let cfg = ctx.state.config.load();
+                (
+                    cfg.his_servername().unwrap_or(&real_name).to_string(),
+                    cfg.his_serverinfo().unwrap_or("").to_string(),
+                )
+            }
         };
         ctx.send_numeric(
             RPL_WHOISSERVER,
@@ -1045,7 +1051,7 @@ pub async fn handle_userip(ctx: &HandlerContext, msg: &Message) {
             let host = if requester_is_oper {
                 c.host.clone()
             } else {
-                c.visible_host(&ctx.state.config)
+                c.visible_host(&ctx.state.config.load())
             };
             tokens.push(format!("{}{oper_mark}={away_mark}{}@{host}", c.nick, c.user));
         } else if let Some(remote) = ctx.state.find_remote_by_nick(nick) {
@@ -1228,7 +1234,7 @@ pub async fn handle_watch(ctx: &HandlerContext, msg: &Message) {
     };
 
     let client_id = ctx.client_id().await;
-    let max_watchs = ctx.state.config.max_watchs() as usize;
+    let max_watchs = ctx.state.config.load().max_watchs() as usize;
 
     for arg in args {
         // Tokens are either `,` or whitespace separated.
@@ -1542,7 +1548,7 @@ pub async fn handle_silence(ctx: &HandlerContext, msg: &Message) {
     }
 
     // Update form: comma-separated list of `[+-]?~?<mask>` tokens.
-    let max_siles = ctx.state.config.max_siles() as usize;
+    let max_siles = ctx.state.config.load().max_siles() as usize;
     let mut echo_updates: Vec<String> = Vec::new();
     {
         let mut c = ctx.client.write().await;

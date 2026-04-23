@@ -57,7 +57,8 @@ pub async fn handle_stats(ctx: &HandlerContext, msg: &Message) {
         }
         'p' | 'P' => {
             // Ports we're listening on.
-            for port in &ctx.state.config.ports {
+            let cfg = ctx.state.config.load();
+            for port in &cfg.ports {
                 ctx.send_numeric(
                     RPL_STATSLINKINFO,
                     vec![format!(
@@ -72,7 +73,8 @@ pub async fn handle_stats(ctx: &HandlerContext, msg: &Message) {
             // Show configured oper blocks — hostmask + name + class.
             // Does not reveal passwords. Useful for opers auditing
             // who can /OPER from where.
-            for op in &ctx.state.config.operators {
+            let cfg = ctx.state.config.load();
+            for op in &cfg.operators {
                 ctx.send_numeric(
                     243, // RPL_STATSOLINE
                     vec![
@@ -214,7 +216,8 @@ pub async fn handle_time(ctx: &HandlerContext, _msg: &Message) {
 /// Handle ADMIN — return Admin{} config block. Fields default to the
 /// server name / empty strings when the operator hasn't configured them.
 pub async fn handle_admin(ctx: &HandlerContext, _msg: &Message) {
-    let admin = &ctx.state.config.admin;
+    let cfg = ctx.state.config.load();
+    let admin = &cfg.admin;
     ctx.send_numeric(
         RPL_ADMINME,
         vec![ctx.state.server_name.clone(), "Administrative info".into()],
@@ -259,7 +262,7 @@ pub async fn handle_info(ctx: &HandlerContext, _msg: &Message) {
 /// home server so the network topology isn't exposed to strangers.
 pub async fn handle_links(ctx: &HandlerContext, _msg: &Message) {
     let is_oper = ctx.client.read().await.modes.contains(&'o');
-    let hide = ctx.state.config.his_links() && !is_oper;
+    let hide = ctx.state.config.load().his_links() && !is_oper;
 
     // Ourselves first.
     let server_name = ctx.state.server_name.clone();
@@ -309,7 +312,7 @@ pub async fn handle_links(ctx: &HandlerContext, _msg: &Message) {
 /// to see the network topology.
 pub async fn handle_map(ctx: &HandlerContext, _msg: &Message) {
     let is_oper = ctx.client.read().await.modes.contains(&'o');
-    let hide = ctx.state.config.his_map() && !is_oper;
+    let hide = ctx.state.config.load().his_map() && !is_oper;
     let total = ctx.state.total_user_count();
     let us_users = ctx.state.client_count();
     ctx.send_numeric(

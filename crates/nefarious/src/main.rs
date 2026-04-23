@@ -80,6 +80,7 @@ fn main() {
 
     rt.block_on(server::run(
         config,
+        Some(config_path),
         ssl_cert.as_deref(),
         ssl_key.as_deref(),
         sasl_accounts,

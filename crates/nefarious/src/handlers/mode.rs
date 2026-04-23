@@ -192,7 +192,7 @@ async fn handle_channel_mode(ctx: &HandlerContext, msg: &Message) {
                 if adding {
                     if let Some(mask) = msg.params.get(param_idx) {
                         param_idx += 1;
-                        let max_bans = ctx.state.config.max_bans() as usize;
+                        let max_bans = ctx.state.config.load().max_bans() as usize;
                         let mut chan = channel.write().await;
                         // Per-channel ban cap. 478 ERR_BANLISTFULL
                         // lets the op know the set rolled off the

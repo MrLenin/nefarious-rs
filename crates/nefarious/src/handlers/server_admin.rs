@@ -27,31 +27,31 @@ pub async fn handle_rehash(ctx: &HandlerContext, _msg: &Message) {
         return;
     }
 
-    // Which config file to cite in the reply. C nefarious2 sends
-    // "<path> :Rehashing" but we don't currently track the config
-    // path on state; use a descriptive placeholder.
-    let cfg_label = "ircd.conf";
+    // Cite the config file path on the 382 line if we know it,
+    // else the generic label. C nefarious2 ircd.conf format emits
+    // the path verbatim here.
+    let cfg_label = ctx
+        .state
+        .config_path
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().map(|p| p.display().to_string()))
+        .unwrap_or_else(|| "ircd.conf".into());
     ctx.send_numeric(
         RPL_REHASHING,
-        vec![cfg_label.to_string(), "Rehashing".into()],
+        vec![cfg_label, "Rehashing".into()],
     )
     .await;
 
-    // MOTD is the currently-reloadable piece. Future rehash work
-    // would swap the whole Config Arc and re-read operator blocks,
-    // kill lines, features, etc.
-    match ctx.state.reload_motd() {
-        Ok(n) => {
-            tracing::info!(
-                "/REHASH by {nick}: MOTD reloaded ({n} lines)",
-                nick = ctx.client.read().await.nick,
-            );
-            let notice_text = format!("MOTD reloaded: {n} lines");
-            notice(ctx, &notice_text).await;
+    let nick = ctx.client.read().await.nick.clone();
+    match ctx.state.reload_config() {
+        Ok(summary) => {
+            tracing::info!("/REHASH by {nick}: {summary}");
+            notice(ctx, &summary).await;
         }
         Err(e) => {
-            tracing::warn!("/REHASH by oper: MOTD reload failed: {e}");
-            notice(ctx, &format!("MOTD reload failed: {e}")).await;
+            tracing::warn!("/REHASH by {nick} failed: {e}");
+            notice(ctx, &format!("REHASH failed: {e}")).await;
         }
     }
 }

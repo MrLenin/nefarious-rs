@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use hickory_resolver::TokioResolver;
 use tokio::sync::RwLock;
@@ -153,8 +154,19 @@ pub struct ServerState {
     /// transfer. Keyed case-sensitively since sessids are opaque.
     pub bouncer_sessions: DashMap<(String, String), BouncerSession>,
 
-    /// Server configuration.
-    pub config: Arc<Config>,
+    /// Server configuration, hot-swappable via `/REHASH`. Readers
+    /// take a snapshot via `.load()`; the snapshot is an `Arc<Config>`
+    /// that stays valid for the duration of the borrow even if a
+    /// rehash swaps a new Config in afterwards. That means callers
+    /// never see a half-updated config partway through handling one
+    /// command, which is important for things like ban checks that
+    /// read multiple config fields in sequence.
+    pub config: ArcSwap<Config>,
+    /// Path the initial config was loaded from, for `/REHASH` to
+    /// reparse. Populated at startup by `load_config_path`; `None`
+    /// means we don't know the path (e.g. config built in-process
+    /// for tests) and rehash will fail with a clean error.
+    pub config_path: std::sync::RwLock<Option<std::path::PathBuf>>,
     /// MOTD lines. Mutable so `/REHASH` can re-read the configured
     /// MOTD file without bouncing the server.
     pub motd: std::sync::RwLock<Vec<String>>,
@@ -266,7 +278,8 @@ impl ServerState {
             remote_nicks: DashMap::new(),
             links: DashMap::new(),
             bouncer_sessions: DashMap::new(),
-            config: Arc::new(config),
+            config: ArcSwap::from_pointee(config),
+            config_path: std::sync::RwLock::new(None),
             motd: std::sync::RwLock::new(vec![
                 "Welcome to nefarious-rs".to_string(),
                 "A Rust implementation of Nefarious IRCd".to_string(),
@@ -310,12 +323,22 @@ impl ServerState {
         }
     }
 
+    /// Cheap snapshot of the currently-active config. Returns an
+    /// `Arc<Config>` that stays valid even if another thread swaps
+    /// in a new Config via /REHASH. Prefer this over dereffing the
+    /// ArcSwap directly when you need to hold the view across an
+    /// await point.
+    pub fn config(&self) -> Arc<Config> {
+        self.config.load_full()
+    }
+
     /// (Re)load the MOTD from the `MPATH` feature value. Called at
     /// startup after ServerState::new, and again on /REHASH.
     /// Returns `Ok(line_count)` on success, `Err(reason)` on failure.
     /// Absent MPATH is not an error; the built-in banner stays.
     pub fn reload_motd(&self) -> Result<usize, String> {
-        let path_str = match self.config.motd_path() {
+        let cfg = self.config();
+        let path_str = match cfg.motd_path() {
             Some(p) => p.to_string(),
             None => return Ok(self.motd.read().expect("motd lock").len()),
         };
@@ -333,6 +356,38 @@ impl ServerState {
                 "could not read MOTD file {path_str}: {e}"
             )),
         }
+    }
+
+    /// Reparse the config file we were started with and swap the
+    /// new Config in. Called by /REHASH; returns a short summary
+    /// string that the REHASH handler passes back to the oper.
+    ///
+    /// Only the config file is reread — port bindings, server
+    /// numeric, HLC state, and connected peers stay as they were.
+    /// Kill blocks, Features/HIS_*, Operator blocks, WebIRC
+    /// entries, Connect blocks, and MPATH all pick up changes
+    /// on the next access since callers take a snapshot per call.
+    pub fn reload_config(&self) -> Result<String, String> {
+        let path = self
+            .config_path
+            .read()
+            .expect("config_path lock")
+            .clone()
+            .ok_or_else(|| "no config path recorded (built in-process?)".to_string())?;
+        let new_config = Config::from_file(&path)
+            .map_err(|e| format!("parse {}: {e}", path.display()))?;
+        let kills = new_config.kills.len();
+        let opers = new_config.operators.len();
+        let webirc = new_config.webirc.len();
+        let connects = new_config.connects.len();
+        let features = new_config.features.len();
+        self.config.store(Arc::new(new_config));
+        // MOTD may now point at a different MPATH — re-apply.
+        let motd_lines = self.reload_motd().unwrap_or(0);
+        Ok(format!(
+            "config reloaded: {kills} kills, {opers} opers, {webirc} webirc, \
+             {connects} connects, {features} features, {motd_lines} motd lines"
+        ))
     }
 
     /// Push a WHOWAS entry onto the history ring, evicting the

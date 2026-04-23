@@ -128,7 +128,8 @@ pub async fn handle_nick(state: &ServerState, msg: &P10Message) {
     let real_host = host.to_string();
     let visible_host = if modes.contains(&'x') {
         let wire_cloak = msg.params.get(7).cloned();
-        if let (Some(acct), Some(suffix)) = (&account, &state.config.general.hidden_host_suffix) {
+        let cfg = state.config.load();
+        if let (Some(acct), Some(suffix)) = (&account, &cfg.general.hidden_host_suffix) {
             format!("{acct}.{suffix}")
         } else if let Some(c) = wire_cloak.filter(|s| !s.is_empty() && s != "_") {
             c
@@ -2453,7 +2454,7 @@ pub async fn handle_whois(state: &ServerState, msg: &P10Message) {
             let host = if requester_is_oper {
                 t.host.clone()
             } else {
-                t.visible_host(&state.config)
+                t.visible_host(&state.config.load())
             };
 
             // 311 RPL_WHOISUSER — <nick> <user> <host> * :<realname>
@@ -2472,20 +2473,22 @@ pub async fn handle_whois(state: &ServerState, msg: &P10Message) {
             }
 
             // 312 RPL_WHOISSERVER — <nick> <server> :<server_info>
-            let (srv_name, srv_desc) = if requester_is_oper {
-                (state.server_name.as_str(), state.server_description.as_str())
+            let cfg = state.config.load();
+            let (srv_name, srv_desc): (String, String) = if requester_is_oper {
+                (state.server_name.clone(), state.server_description.clone())
             } else {
                 (
-                    state.config.his_servername().unwrap_or(&state.server_name),
-                    state.config.his_serverinfo().unwrap_or(&state.server_description),
+                    cfg.his_servername().unwrap_or(&state.server_name).to_string(),
+                    cfg.his_serverinfo().unwrap_or(&state.server_description).to_string(),
                 )
             };
+            drop(cfg);
             send_whois_numeric(
                 state,
                 &our,
                 &req_str,
                 312,
-                &[&t.nick, srv_name, srv_desc],
+                &[&t.nick, &srv_name, &srv_desc],
             )
             .await;
 

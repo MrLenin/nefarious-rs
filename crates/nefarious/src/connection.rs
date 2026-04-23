@@ -101,8 +101,8 @@ pub async fn handle_connection<S>(
     // allocated so a determined attacker gets as little resource
     // consumption as we can manage. Loopback is always allowed so
     // local tooling and health checks don't hit the cap.
-    let limit = state.config.ipcheck_clone_limit();
-    let period = std::time::Duration::from_secs(state.config.ipcheck_clone_period());
+    let limit = state.config.load().ipcheck_clone_limit();
+    let period = std::time::Duration::from_secs(state.config.load().ipcheck_clone_period());
     if let Err(count) = state.ipcheck.record(addr.ip(), limit, period) {
         tracing::warn!(
             "refusing connection from {addr}: IPcheck clone limit ({limit}) exceeded \
@@ -194,7 +194,7 @@ pub async fn handle_connection<S>(
         let host = c.host.clone();
         let pass = c.pass.clone();
         drop(c);
-        check_client_block_password(&state.config.clients, &ip, &host, pass.as_deref())
+        check_client_block_password(&state.config.load().clients, &ip, &host, pass.as_deref())
     };
     if let Some(reason) = pass_fail {
         info!("refusing registration of {nick} ({addr}): {reason}");
@@ -243,7 +243,7 @@ pub async fn handle_connection<S>(
         drop(c);
         if let Some((mask, reason)) = state.find_matching_zline(ip).await {
             Some(("Z-lined", mask, reason))
-        } else if let Some(kill) = match_kill_config(&state.config.kills, &user, &host, ip) {
+        } else if let Some(kill) = match_kill_config(&state.config.load().kills, &user, &host, ip) {
             Some(("K-lined", kill.host.clone(), kill.reason.clone()))
         } else if let Some((mask, reason)) =
             state.find_matching_gline(&user, &host, ip).await
@@ -278,7 +278,7 @@ pub async fn handle_connection<S>(
     info!("client {nick} ({addr}) registered");
 
     // Server notice to +s opers if the feature flag is on.
-    if state.config.connexit_notices() {
+    if state.config.load().connexit_notices() {
         let (user, host, realname) = {
             let c = client.read().await;
             (c.user.clone(), c.host.clone(), c.realname.clone())
@@ -349,7 +349,7 @@ pub async fn handle_connection<S>(
     }
 
     // Server notice to +s opers if feature flag is on.
-    if state.config.connexit_notices() {
+    if state.config.load().connexit_notices() {
         state
             .snotice(&format!(
                 "Client exiting: {nick} [{addr}] ({quit_reason})"
@@ -483,7 +483,8 @@ async fn registration_phase(
                 // Match against configured WebIRC blocks. First entry
                 // whose host ACL matches the peer AND whose password
                 // matches wins.
-                let matched = state.config.webirc.iter().find(|w| {
+                let cfg = state.config.load();
+                let matched = cfg.webirc.iter().find(|w| {
                     let host_ok = match &w.host {
                         Some(pat) => {
                             crate::channel::wildcard_match(pat, &peer_ip)
@@ -589,7 +590,7 @@ async fn send_welcome(client: &Arc<RwLock<Client>>, state: &ServerState) {
         RPL_WELCOME,
         vec![format!(
             "Welcome to the {} Internet Relay Chat Network {}",
-            state.config.network(),
+            state.config.load().network(),
             c.prefix()
         )],
     );
@@ -687,8 +688,10 @@ async fn message_loop(
                 return reason;
             }
             _ = ping_tick.tick() => {
-                let ping_freq = ctx.state.config.ping_freq();
-                let timeout = ctx.state.config.connect_timeout();
+                let cfg = ctx.state.config.load();
+                let ping_freq = cfg.ping_freq();
+                let timeout = cfg.connect_timeout();
+                drop(cfg);
                 let (last_active, nick) = {
                     let c = ctx.client.read().await;
                     (c.last_active, c.nick.clone())

@@ -21,3 +21,4 @@ futures = { workspace = true }
 hickory-resolver = { version = "0.26", default-features = false, features = ["system-config", "tokio"] }
 async-trait = "0.1"
 base64 = "0.22"
+arc-swap = { workspace = true }
