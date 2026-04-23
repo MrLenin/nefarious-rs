@@ -445,7 +445,8 @@ async fn send_welcome(client: &Arc<RwLock<Client>>, state: &ServerState) {
     crate::handlers::query::send_lusers(Arc::clone(client), state).await;
     let c = client.read().await;
 
-    if state.motd.is_empty() {
+    let motd = state.motd.read().expect("motd lock poisoned").clone();
+    if motd.is_empty() {
         c.send_numeric(server, ERR_NOMOTD, vec!["MOTD File is missing".into()]);
     } else {
         c.send_numeric(
@@ -453,7 +454,7 @@ async fn send_welcome(client: &Arc<RwLock<Client>>, state: &ServerState) {
             RPL_MOTDSTART,
             vec![format!("- {server} Message of the Day -")],
         );
-        for line in &state.motd {
+        for line in &motd {
             c.send_numeric(server, RPL_MOTD, vec![format!("- {line}")]);
         }
         c.send_numeric(server, RPL_ENDOFMOTD, vec!["End of /MOTD command".into()]);

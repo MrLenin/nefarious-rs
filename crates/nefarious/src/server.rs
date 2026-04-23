@@ -29,6 +29,15 @@ pub async fn run(
     crate::tags::init_hlc(state_inner.numeric);
     let state = Arc::new(state_inner);
 
+    // Load MOTD from disk if MPATH is configured. Failure is a
+    // warning, not fatal — the built-in banner keeps the server
+    // greetable while the operator fixes the path.
+    match state.reload_motd() {
+        Ok(n) if n > 0 => info!("loaded MOTD ({n} lines)"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("MOTD load failed: {e}"),
+    }
+
     // Set up SSL acceptor if we have cert/key
     let ssl_acceptor = match (ssl_cert, ssl_key) {
         (Some(cert), Some(key)) => match build_ssl_acceptor(cert, key) {

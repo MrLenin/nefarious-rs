@@ -218,6 +218,13 @@ impl Config {
             .unwrap_or(40)
     }
 
+    /// `MPATH` — filesystem path to the MOTD file. When unset the
+    /// server's built-in banner is used. /REHASH re-reads this
+    /// file into state.motd without restarting the server.
+    pub fn motd_path(&self) -> Option<&str> {
+        self.feature("MPATH")
+    }
+
     /// `MAXWATCHS` — per-client cap on the WATCH/MONITOR list size.
     /// Defaults to 128, matching nefarious2's F_I(MAXWATCHS, …, 128).
     /// Invalid values in the config silently fall back to the default.

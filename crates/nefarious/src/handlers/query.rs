@@ -667,7 +667,13 @@ pub async fn handle_whois(ctx: &HandlerContext, msg: &Message) {
 
 /// Handle MOTD command.
 pub async fn handle_motd(ctx: &HandlerContext, _msg: &Message) {
-    if ctx.state.motd.is_empty() {
+    let motd = ctx
+        .state
+        .motd
+        .read()
+        .expect("motd lock poisoned")
+        .clone();
+    if motd.is_empty() {
         ctx.send_numeric(ERR_NOMOTD, vec!["MOTD File is missing".into()])
             .await;
         return;
@@ -679,7 +685,7 @@ pub async fn handle_motd(ctx: &HandlerContext, _msg: &Message) {
     )
     .await;
 
-    for line in &ctx.state.motd {
+    for line in &motd {
         ctx.send_numeric(RPL_MOTD, vec![format!("- {line}")]).await;
     }
 

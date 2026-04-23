@@ -4,6 +4,7 @@ pub mod mode;
 pub mod oper_ban;
 pub mod query;
 pub mod registration;
+pub mod server_admin;
 pub mod server_query;
 
 use std::sync::Arc;
@@ -162,6 +163,11 @@ impl HandlerContext {
             Command::Shun => oper_ban::handle_shun(&ctx, msg).await,
             Command::Zline => oper_ban::handle_zline(&ctx, msg).await,
             Command::Jupe => oper_ban::handle_jupe(&ctx, msg).await,
+
+            // Server admin (oper-only)
+            Command::Rehash => server_admin::handle_rehash(&ctx, msg).await,
+            Command::Restart => server_admin::handle_restart(&ctx, msg).await,
+            Command::Die => server_admin::handle_die(&ctx, msg).await,
 
             // Registration (nick change after registration)
             Command::Nick => registration::handle_nick_change(&ctx, msg).await,

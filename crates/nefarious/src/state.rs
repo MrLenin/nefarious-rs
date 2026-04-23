@@ -155,8 +155,13 @@ pub struct ServerState {
 
     /// Server configuration.
     pub config: Arc<Config>,
-    /// MOTD lines.
-    pub motd: Vec<String>,
+    /// MOTD lines. Mutable so `/REHASH` can re-read the configured
+    /// MOTD file without bouncing the server.
+    pub motd: std::sync::RwLock<Vec<String>>,
+    /// Absolute path the MOTD was loaded from, if any. `/REHASH`
+    /// re-reads this file when it fires. `None` for the built-in
+    /// default banner used when no `MPATH` feature is configured.
+    pub motd_path: std::sync::RwLock<Option<std::path::PathBuf>>,
     /// Shared DNS resolver for reverse-lookup of connecting clients.
     /// `None` when the system DNS configuration could not be parsed at
     /// startup (we log a warning and fall back to IP-as-host).
@@ -257,10 +262,11 @@ impl ServerState {
             links: DashMap::new(),
             bouncer_sessions: DashMap::new(),
             config: Arc::new(config),
-            motd: vec![
+            motd: std::sync::RwLock::new(vec![
                 "Welcome to nefarious-rs".to_string(),
                 "A Rust implementation of Nefarious IRCd".to_string(),
-            ],
+            ]),
+            motd_path: std::sync::RwLock::new(None),
             dns_resolver,
             advertised_caps: default_advertised_caps(),
             account_store: crate::accounts::empty_in_memory(),
@@ -272,6 +278,31 @@ impl ServerState {
             zlines: DashMap::new(),
             jupes: DashMap::new(),
             ipcheck: crate::ipcheck::IpCheck::new(),
+        }
+    }
+
+    /// (Re)load the MOTD from the `MPATH` feature value. Called at
+    /// startup after ServerState::new, and again on /REHASH.
+    /// Returns `Ok(line_count)` on success, `Err(reason)` on failure.
+    /// Absent MPATH is not an error; the built-in banner stays.
+    pub fn reload_motd(&self) -> Result<usize, String> {
+        let path_str = match self.config.motd_path() {
+            Some(p) => p.to_string(),
+            None => return Ok(self.motd.read().expect("motd lock").len()),
+        };
+        let path = std::path::PathBuf::from(&path_str);
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => {
+                let lines: Vec<String> =
+                    contents.lines().map(|l| l.to_string()).collect();
+                let count = lines.len();
+                *self.motd.write().expect("motd lock poisoned") = lines;
+                *self.motd_path.write().expect("motd_path lock") = Some(path);
+                Ok(count)
+            }
+            Err(e) => Err(format!(
+                "could not read MOTD file {path_str}: {e}"
+            )),
         }
     }
 

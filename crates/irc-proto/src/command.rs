@@ -79,6 +79,11 @@ pub enum Command {
     Zline,
     Jupe,
 
+    // Server admin (oper-only)
+    Rehash,
+    Restart,
+    Die,
+
     // Away
     Away,
 
@@ -159,6 +164,9 @@ impl Command {
             "SHUN" => Command::Shun,
             "ZLINE" => Command::Zline,
             "JUPE" => Command::Jupe,
+            "REHASH" => Command::Rehash,
+            "RESTART" => Command::Restart,
+            "DIE" => Command::Die,
             "AWAY" => Command::Away,
             "USERHOST" => Command::Userhost,
             "ISON" => Command::Ison,
@@ -220,6 +228,9 @@ impl fmt::Display for Command {
             Command::Shun => write!(f, "SHUN"),
             Command::Zline => write!(f, "ZLINE"),
             Command::Jupe => write!(f, "JUPE"),
+            Command::Rehash => write!(f, "REHASH"),
+            Command::Restart => write!(f, "RESTART"),
+            Command::Die => write!(f, "DIE"),
             Command::Away => write!(f, "AWAY"),
             Command::Userhost => write!(f, "USERHOST"),
             Command::Userip => write!(f, "USERIP"),
