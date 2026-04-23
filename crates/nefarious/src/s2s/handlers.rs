@@ -2014,13 +2014,115 @@ pub async fn handle_topic(state: &ServerState, msg: &P10Message) {
     }
 }
 
+/// Forward a LOC-variant AC message (types C/H/S/A/D) toward the
+/// target. If the target numeric resolves to one of our local
+/// users the message is considered a protocol violation (nefarious2
+/// spec calls it so — LOC flows end at the originating server)
+/// and we drop it. Otherwise we rebuild the wire with the trailing
+/// parameter reprefixed with `:` and fan out to every peer link
+/// except the one we received it on; the target numeric naturally
+/// routes itself to the right server as peers forward along.
+///
+/// We don't track a per-numeric route map, so the fan-out pattern
+/// matches the rest of our relay paths (propagate_end_of_burst,
+/// handle_silence): send to every non-origin link. On a
+/// single-link topology this is a no-op, which is fine.
+async fn route_account_loc(
+    state: &ServerState,
+    msg: &P10Message,
+    skip: ServerNumeric,
+) {
+    let origin = match &msg.origin {
+        Some(o) => o.as_str(),
+        None => return,
+    };
+    let target = &msg.params[0];
+    let subtype = msg.params[1].chars().next().unwrap_or('?');
+
+    // Parameter-count minimums per nefarious2 m_account.c:306 —
+    // reject short forms cleanly rather than forwarding garbage.
+    let required = match subtype {
+        'C' => 6,
+        'H' => 7,
+        'S' => 8,
+        'A' | 'D' => 3,
+        _ => return,
+    };
+    if msg.params.len() < required {
+        tracing::debug!(
+            "AC {subtype} from {origin}: {} params, need {required}; dropping",
+            msg.params.len()
+        );
+        return;
+    }
+
+    // If target is one of our local users we'd have to handle the
+    // LOC request, which we don't. Drop rather than loop the
+    // message back to a peer.
+    if let Some(num) = ClientNumeric::from_str(target) {
+        if num.server == state.numeric {
+            tracing::debug!(
+                "AC {subtype} target {target} is local; not implementing LOC, dropping"
+            );
+            return;
+        }
+    }
+    if let Some(sn) = ServerNumeric::from_str(target) {
+        if sn == state.numeric {
+            tracing::debug!(
+                "AC {subtype} target {target} is this server; not implementing LOC, dropping"
+            );
+            return;
+        }
+    }
+
+    // Rebuild the wire. The trailing parameter carries the auth
+    // cookie / reason / metadata, so it always gets the `:` prefix
+    // to preserve embedded spaces.
+    let wire = if msg.params.len() >= 2 {
+        let head = msg.params[..msg.params.len() - 1].join(" ");
+        let trailing = &msg.params[msg.params.len() - 1];
+        format!("{origin} AC {head} :{trailing}")
+    } else {
+        format!("{origin} AC {}", msg.params.join(" "))
+    };
+
+    // Fan out to every link except the one we received this on.
+    // On single-link topology the only non-origin link set is
+    // empty, and we correctly don't echo back.
+    for entry in state.links.iter() {
+        if *entry.key() != skip {
+            entry.value().send_line(wire.clone()).await;
+        }
+    }
+}
+
 /// Handle AC (ACCOUNT) from remote — track account state.
-pub async fn handle_account(state: &ServerState, msg: &P10Message) {
+pub async fn handle_account(
+    state: &ServerState,
+    msg: &P10Message,
+    skip: ServerNumeric,
+) {
     if msg.params.is_empty() {
         return;
     }
 
     let target_str = &msg.params[0];
+
+    // LOC (Login-On-Connect) subcommand passthrough. Types C/H/S
+    // are requests toward a LOC-capable target; A/D are replies
+    // back to the requesting user. We don't speak LOC locally, but
+    // we do route these through to the next hop so networks that
+    // mix LOC-aware and LOC-unaware servers keep their login path
+    // working when we're a relay in the middle. Matches nefarious2
+    // m_account.c lines 304-395.
+    if msg.params.len() >= 2 {
+        let type_str = msg.params[1].as_str();
+        if matches!(type_str, "C" | "H" | "S" | "A" | "D") {
+            route_account_loc(state, msg, skip).await;
+            return;
+        }
+    }
 
     let numeric = match ClientNumeric::from_str(target_str) {
         Some(n) => n,

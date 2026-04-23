@@ -354,7 +354,7 @@ async fn handle_server_link_inner<S>(
                 super::handlers::handle_topic(&state, &msg).await;
             }
             P10Token::Account => {
-                super::handlers::handle_account(&state, &msg).await;
+                super::handlers::handle_account(&state, &msg, remote_numeric).await;
             }
             P10Token::Away => {
                 super::handlers::handle_away(&state, &msg).await;
