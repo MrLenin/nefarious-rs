@@ -1,4 +1,5 @@
 pub mod channel;
+pub mod check;
 pub mod messaging;
 pub mod mode;
 pub mod oper_ban;
@@ -170,6 +171,7 @@ impl HandlerContext {
             Command::Restart => server_admin::handle_restart(&ctx, msg).await,
             Command::Die => server_admin::handle_die(&ctx, msg).await,
             Command::Connect => server_admin::handle_connect(&ctx, msg).await,
+            Command::Check => check::handle_check(&ctx, msg).await,
 
             // Registration (nick change after registration)
             Command::Nick => registration::handle_nick_change(&ctx, msg).await,
