@@ -132,6 +132,99 @@ fn who_status(flags: &crate::channel::MembershipFlags, multi_prefix: bool) -> St
 }
 
 /// Handle WHOIS command.
+/// Handle WHOWAS — replay historical records for nicks that have
+/// since disconnected. `WHOWAS <nick>[,<nick>...] [<count>]` per
+/// RFC2812 §3.6.3; `count` is an optional cap on how many records
+/// to return per nick (we serve the most recent first). When
+/// `count` is omitted we emit every match.
+///
+/// Responses:
+///   314 RPL_WHOWASUSER    — one per matching record
+///   312 RPL_WHOISSERVER   — pinned to the record's server at quit
+///   406 ERR_WASNOSUCHNICK — when the nick has no history
+///   369 RPL_ENDOFWHOWAS   — sentinel after each nick
+pub async fn handle_whowas(ctx: &HandlerContext, msg: &Message) {
+    if msg.params.is_empty() {
+        ctx.send_numeric(
+            ERR_NONICKNAMEGIVEN,
+            vec!["No nickname given".into()],
+        )
+        .await;
+        return;
+    }
+
+    let nicks: Vec<String> = msg.params[0]
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    let count: Option<usize> = msg
+        .params
+        .get(1)
+        .and_then(|s| s.parse().ok())
+        .filter(|&n: &usize| n > 0);
+
+    // Snapshot the ring so we don't hold the mutex across awaits.
+    let records: Vec<crate::state::WhowasEntry> = {
+        ctx.state.whowas.lock().await.iter().cloned().collect()
+    };
+
+    for nick in &nicks {
+        let folded = irc_proto::irc_casefold(nick);
+        // Walk newest-first so the most recent record comes out on
+        // top — matches the C behaviour where WHOWAS returns the
+        // latest quit for a nick before any older reuses.
+        let matches: Vec<&crate::state::WhowasEntry> = records
+            .iter()
+            .rev()
+            .filter(|e| irc_proto::irc_casefold(&e.nick) == folded)
+            .take(count.unwrap_or(usize::MAX))
+            .collect();
+
+        if matches.is_empty() {
+            ctx.send_numeric(
+                ERR_WASNOSUCHNICK,
+                vec![nick.clone(), "There was no such nickname".into()],
+            )
+            .await;
+        } else {
+            for entry in &matches {
+                ctx.send_numeric(
+                    RPL_WHOWASUSER,
+                    vec![
+                        entry.nick.clone(),
+                        entry.user.clone(),
+                        entry.host.clone(),
+                        "*".to_string(),
+                        entry.realname.clone(),
+                    ],
+                )
+                .await;
+                // 312 shows which server the user was on when they
+                // quit; the trailing field carries the quit time as
+                // an ISO-8601 string so clients can render "…quit at X".
+                ctx.send_numeric(
+                    RPL_WHOISSERVER,
+                    vec![
+                        entry.nick.clone(),
+                        entry.server.clone(),
+                        entry
+                            .quit_at
+                            .format("%a %b %d %Y at %H:%M:%S UTC")
+                            .to_string(),
+                    ],
+                )
+                .await;
+            }
+        }
+        ctx.send_numeric(
+            RPL_ENDOFWHOWAS,
+            vec![nick.clone(), "End of /WHOWAS list".into()],
+        )
+        .await;
+    }
+}
+
 pub async fn handle_whois(ctx: &HandlerContext, msg: &Message) {
     if msg.params.is_empty() {
         ctx.send_numeric(

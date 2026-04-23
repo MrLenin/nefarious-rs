@@ -171,7 +171,29 @@ pub struct ServerState {
     /// in-memory store. Wrapped in an Arc so handlers can clone a
     /// reference without borrowing ServerState for the await duration.
     pub account_store: crate::accounts::SharedAccountStore,
+    /// Ring buffer of recently-departed users, keyed in insertion
+    /// order so /WHOWAS returns the most recent first. Soft-capped
+    /// at `WHOWAS_MAX`; oldest entries evict when full. Matches the
+    /// `whowas_history` in nefarious2/ircd/whowas.c — one bounded
+    /// table per server.
+    pub whowas: tokio::sync::Mutex<std::collections::VecDeque<WhowasEntry>>,
 }
+
+/// One past-user record kept for `/WHOWAS` lookups.
+#[derive(Debug, Clone)]
+pub struct WhowasEntry {
+    pub nick: String,
+    pub user: String,
+    pub host: String,
+    pub realname: String,
+    pub server: String,
+    pub quit_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Soft cap on retained WHOWAS entries — matches a common
+/// nefarious/ircu default. Callers can override if they ever want
+/// runtime-tunable history depth.
+pub const WHOWAS_MAX: usize = 500;
 
 impl ServerState {
     pub fn new(config: Config) -> Self {
@@ -210,7 +232,19 @@ impl ServerState {
             dns_resolver,
             advertised_caps: default_advertised_caps(),
             account_store: crate::accounts::empty_in_memory(),
+            whowas: tokio::sync::Mutex::new(std::collections::VecDeque::with_capacity(WHOWAS_MAX)),
         }
+    }
+
+    /// Push a WHOWAS entry onto the history ring, evicting the
+    /// oldest if the buffer is at capacity. Called from the client
+    /// disconnect path on ServerState::remove_client.
+    pub async fn record_whowas(&self, entry: WhowasEntry) {
+        let mut buf = self.whowas.lock().await;
+        if buf.len() >= WHOWAS_MAX {
+            buf.pop_front();
+        }
+        buf.push_back(entry);
     }
 
     /// Atomically reserve `nick` for `id`. Returns true if reserved (or
@@ -301,15 +335,26 @@ impl ServerState {
         // mapping).
         self.release_numeric(id);
 
-        // Remove from nick map
-        let nick = {
+        // Capture WHOWAS metadata before we drop the Client entry —
+        // /WHOWAS looks up users *after* they've disconnected.
+        let (nick, whowas_entry) = {
             if let Some(client) = self.clients.get(&id) {
                 let c = client.read().await;
-                irc_casefold(&c.nick)
+                let folded = irc_casefold(&c.nick);
+                let entry = WhowasEntry {
+                    nick: c.nick.clone(),
+                    user: c.user.clone(),
+                    host: c.host.clone(),
+                    realname: c.realname.clone(),
+                    server: self.server_name.clone(),
+                    quit_at: chrono::Utc::now(),
+                };
+                (folded, entry)
             } else {
                 return;
             }
         };
+        self.record_whowas(whowas_entry).await;
         self.nicks.remove_if(&nick, |_, v| *v == id);
 
         // Remove from all channels

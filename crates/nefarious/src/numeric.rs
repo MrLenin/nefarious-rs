@@ -74,11 +74,14 @@ pub const RPL_NOWAWAY: u16 = 306;
 pub const RPL_WHOISUSER: u16 = 311;
 pub const RPL_WHOISSERVER: u16 = 312;
 pub const RPL_WHOISOPERATOR: u16 = 313;
+pub const RPL_WHOWASUSER: u16 = 314;
 pub const RPL_ENDOFWHO: u16 = 315;
 pub const RPL_WHOISIDLE: u16 = 317;
 pub const RPL_ENDOFWHOIS: u16 = 318;
 pub const RPL_WHOISCHANNELS: u16 = 319;
 pub const RPL_WHOISACCOUNT: u16 = 330;
+pub const RPL_ENDOFWHOWAS: u16 = 369;
+pub const ERR_WASNOSUCHNICK: u16 = 406;
 
 // LIST
 pub const RPL_LISTSTART: u16 = 321;
