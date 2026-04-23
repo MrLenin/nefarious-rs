@@ -286,6 +286,34 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
         info!("burst: sent {gline_count} GLINE entries");
     }
 
+    // 3b. SHUNs share the same pattern as GLINEs — one SU per
+    // stored entry. Same filter (lastmod > 0) applies.
+    let mut shun_count = 0;
+    for entry in state.shuns.iter() {
+        let sh = entry.value().read().await;
+        if sh.lastmod == 0 {
+            continue;
+        }
+        let sign = if sh.active { '+' } else { '-' };
+        let expire_offset = match sh.expires_at {
+            Some(exp) => (exp.timestamp() - now_secs).max(0),
+            None => 0,
+        };
+        let lifetime = sh.lifetime.unwrap_or(0);
+        link.send_line(format!(
+            "{server} SU * {sign}{mask} {expire_offset} {lastmod} {lifetime} :{reason}",
+            server = state.server_name,
+            mask = sh.mask,
+            lastmod = sh.lastmod,
+            reason = sh.reason,
+        ))
+        .await;
+        shun_count += 1;
+    }
+    if shun_count > 0 {
+        info!("burst: sent {shun_count} SHUN entries");
+    }
+
     // 4. Send END_OF_BURST
     let eb = format!("{} EB", our_numeric);
     link.send_line(eb).await;

@@ -86,6 +86,18 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
     let prefix = ctx.prefix().await;
     let client_id = ctx.client_id().await;
 
+    // SHUN: the sender is silenced network-wide. Drop silently —
+    // nefarious2 m_message.c handles this at the send path so the
+    // sender sees no error but their message never reaches anyone.
+    // PRIVMSG to server-services (first-char '$') bypasses shun.
+    let sender_user_host = {
+        let c = ctx.client.read().await;
+        format!("{}@{}", c.user, c.host)
+    };
+    if !target.starts_with('$') && ctx.state.is_shunned(&sender_user_host).await {
+        return;
+    }
+
     let out_msg = Message::with_source(&prefix, cmd.clone(), vec![target.clone(), text.clone()]);
     let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
 

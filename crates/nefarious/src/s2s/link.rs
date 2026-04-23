@@ -361,6 +361,9 @@ pub async fn handle_server_link<S>(
             P10Token::Gline => {
                 super::handlers::handle_gline(&state, &msg, remote_numeric).await;
             }
+            P10Token::Shun => {
+                super::handlers::handle_shun(&state, &msg, remote_numeric).await;
+            }
             P10Token::Squit => {
                 info!("received SQUIT from {remote_name}");
                 break;

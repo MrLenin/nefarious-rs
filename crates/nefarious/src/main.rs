@@ -9,6 +9,7 @@ mod handlers;
 mod numeric;
 mod s2s;
 mod server;
+mod shun;
 mod state;
 mod tags;
 

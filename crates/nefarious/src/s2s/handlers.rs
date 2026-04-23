@@ -3327,6 +3327,112 @@ pub async fn propagate_end_of_burst_ack(
 /// wire format — the sender computes `expire - TStime()` and the
 /// receiver adds `TStime()` back on to reconstruct the absolute
 /// expiry. That's what we do too.
+/// Handle inbound S2S SHUN (token `SU`). Structurally parallel to
+/// `handle_gline`; enforcement is at outbound messaging rather than
+/// connect, so post-add doesn't kick anyone — we just record the
+/// ban and let the PRIVMSG/NOTICE path drop their traffic.
+pub async fn handle_shun(
+    state: &ServerState,
+    msg: &P10Message,
+    skip: ServerNumeric,
+) {
+    if msg.params.len() < 2 {
+        return;
+    }
+    let origin = match &msg.origin {
+        Some(o) => o.as_str(),
+        None => return,
+    };
+    let target = &msg.params[0];
+    let mask_with_action = &msg.params[1];
+    let mask_with_action = mask_with_action
+        .strip_prefix('!')
+        .unwrap_or(mask_with_action);
+    let (action, mask) = match mask_with_action.chars().next() {
+        Some('+') => ('+', &mask_with_action[1..]),
+        Some('-') => ('-', &mask_with_action[1..]),
+        Some('>') => ('>', &mask_with_action[1..]),
+        Some('<') => ('<', &mask_with_action[1..]),
+        _ => return,
+    };
+    if mask.is_empty() {
+        return;
+    }
+    let is_global = target == "*";
+    let key = crate::shun::mask_key(mask);
+    let now = chrono::Utc::now();
+
+    match action {
+        '+' if is_global => {
+            if msg.params.len() < 4 {
+                tracing::debug!("SU +{mask} from {origin}: too few params, ignoring");
+            } else {
+                let expire_offset: i64 = msg.params[2].parse().unwrap_or(0);
+                let lastmod: u64 = msg.params[3].parse().unwrap_or_else(|_| now.timestamp() as u64);
+                let lifetime: Option<u64> = msg.params.get(4).and_then(|v| v.parse().ok());
+                let reason = msg
+                    .params
+                    .last()
+                    .filter(|s| !s.is_empty() && msg.params.len() >= 5)
+                    .cloned()
+                    .unwrap_or_else(|| "No reason".to_string());
+                let expires_at = if expire_offset > 0 {
+                    Some(now + chrono::Duration::seconds(expire_offset))
+                } else {
+                    None
+                };
+                let sh = crate::shun::Shun {
+                    mask: mask.to_string(),
+                    reason,
+                    expires_at,
+                    set_by: origin.to_string(),
+                    set_at: now,
+                    lastmod,
+                    lifetime,
+                    active: true,
+                };
+                let expires_display = expires_at
+                    .map(|t| t.to_rfc3339())
+                    .unwrap_or_else(|| "never".to_string());
+                state
+                    .shuns
+                    .insert(key.clone(), Arc::new(RwLock::new(sh)));
+                tracing::info!(
+                    "SU +{mask} from {origin}: stored, expires={expires_display}"
+                );
+            }
+        }
+        '-' if is_global => {
+            if let Some(entry) = state.shuns.get(&key) {
+                let mut sh = entry.write().await;
+                sh.active = false;
+                if let Some(lm) = msg.params.get(2).and_then(|v| v.parse::<u64>().ok()) {
+                    sh.lastmod = lm;
+                }
+                tracing::info!("SU -{mask} from {origin}: marked inactive");
+            }
+        }
+        _ => {
+            tracing::debug!(
+                "SU action {action}{mask} target={target} from {origin}: passthrough only"
+            );
+        }
+    }
+
+    let wire = if msg.params.len() >= 5 {
+        let head = msg.params[..msg.params.len() - 1].join(" ");
+        let trailing = &msg.params[msg.params.len() - 1];
+        format!("{origin} SU {head} :{trailing}")
+    } else {
+        format!("{origin} SU {}", msg.params.join(" "))
+    };
+    for entry in state.links.iter() {
+        if *entry.key() != skip {
+            entry.value().send_line(wire.clone()).await;
+        }
+    }
+}
+
 pub async fn handle_gline(
     state: &ServerState,
     msg: &P10Message,

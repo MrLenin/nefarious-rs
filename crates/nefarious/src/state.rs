@@ -193,6 +193,10 @@ pub struct ServerState {
     /// Shared by inbound GL handling, enforcement on connect, and
     /// outbound burst emission.
     pub glines: crate::gline::GlineStore,
+    /// Active + suspended Shun set, keyed by lowercased mask.
+    /// Same shape as `glines` but enforced at outbound messaging
+    /// rather than connect.
+    pub shuns: crate::shun::ShunStore,
 }
 
 /// One past-user record kept for `/WHOWAS` lookups.
@@ -252,6 +256,7 @@ impl ServerState {
             monitored_by: DashMap::new(),
             watched_by: DashMap::new(),
             glines: DashMap::new(),
+            shuns: DashMap::new(),
         }
     }
 
@@ -508,6 +513,20 @@ impl ServerState {
             }
         }
         None
+    }
+
+    /// Parallel to `find_matching_gline` for SHUNs. Callers use this
+    /// on outbound PRIVMSG/NOTICE paths to decide whether to drop
+    /// the message silently (shun is a gag, not a ban).
+    pub async fn is_shunned(&self, user_host: &str) -> bool {
+        let now = chrono::Utc::now();
+        for entry in self.shuns.iter() {
+            let sh = entry.value().read().await;
+            if sh.is_enforceable(now) && sh.matches(user_host) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Allocate a P10 client numeric and record it against `id`. Returns
