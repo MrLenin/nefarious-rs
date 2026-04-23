@@ -1096,9 +1096,32 @@ pub async fn handle_ison(ctx: &HandlerContext, msg: &Message) {
 }
 
 /// Handle OPER — `OPER <name> <password>`. Matches against Operator
-/// config blocks and grants user mode +o on success. Password comparison
-/// is plaintext for now; the C server supports bcrypt/pbkdf2 but that
-/// belongs in the auth phase.
+/// config blocks and grants user mode +o on success. Password
+/// comparison supports bcrypt hashes (detected by the leading
+/// `$2a$` / `$2b$` / `$2y$` magic) and falls back to plaintext for
+/// operator blocks that haven't migrated yet.
+/// Compare an oper's presented password against the stored form.
+///
+/// Stored values starting with one of the bcrypt magic prefixes
+/// (`$2a$`, `$2b$`, `$2y$`) are verified with `bcrypt::verify`;
+/// anything else is compared plaintext. A constant-time string
+/// compare isn't strictly necessary here because the plaintext
+/// path is already the legacy / migration case, but the fallback
+/// uses `eq_ignore_ascii_case`-style equality on bytes to avoid
+/// accidentally stripping a byte via UTF-8 boundary.
+fn verify_oper_password(presented: &str, stored: &str) -> bool {
+    const BCRYPT_PREFIXES: &[&str] = &["$2a$", "$2b$", "$2y$"];
+    if BCRYPT_PREFIXES.iter().any(|p| stored.starts_with(p)) {
+        bcrypt::verify(presented, stored).unwrap_or(false)
+    } else {
+        // Plaintext compare. Byte-wise equality is sufficient; a
+        // timing leak on oper password length is not in our threat
+        // model (operators are trusted principals with out-of-band
+        // provisioning anyway).
+        presented.as_bytes() == stored.as_bytes()
+    }
+}
+
 pub async fn handle_oper(ctx: &HandlerContext, msg: &Message) {
     if msg.params.len() < 2 {
         ctx.send_numeric(
@@ -1112,21 +1135,22 @@ pub async fn handle_oper(ctx: &HandlerContext, msg: &Message) {
     let name = &msg.params[0];
     let password = &msg.params[1];
 
-    let matched = ctx
-        .state
-        .config
+    let cfg = ctx.state.config.load();
+    let matched = cfg
         .operators
         .iter()
-        .find(|op| op.name == *name && op.password == *password);
+        .find(|op| op.name == *name && verify_oper_password(password, &op.password));
 
     let oper_config = match matched {
         Some(op) => op.clone(),
         None => {
+            drop(cfg);
             ctx.send_numeric(ERR_PASSWDMISMATCH, vec!["Password incorrect".into()])
                 .await;
             return;
         }
     };
+    drop(cfg);
 
     // Resolve privileges from the Operator block's `privs` line. If
     // unspecified, fall back to the baseline global-oper set (roughly
