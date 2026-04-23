@@ -432,23 +432,64 @@ pub async fn initiate_server_connection(
 
     let port = override_port.unwrap_or(connect.port);
     let addr = format!("{host}:{port}", host = connect.host);
-    info!("initiating outbound link to {connect_name} at {addr}");
+    info!(
+        "initiating outbound link to {connect_name} at {addr} (ssl={})",
+        connect.ssl
+    );
 
     let stream = TcpStream::connect(&addr)
         .await
         .map_err(|e| format!("connect({addr}): {e}"))?;
 
-    // TLS for the outbound side isn't wired yet — Connect blocks
-    // with ssl=yes will need openssl::ssl::connect equivalent. For
-    // now, clear-text outbound only; refuse explicitly rather than
-    // silently connecting plaintext to an expected-TLS peer.
     if connect.ssl {
-        return Err(format!(
-            "Connect block {connect_name} requires TLS, not yet supported on outbound path"
-        ));
+        let ssl_stream = wrap_outbound_tls(stream, &connect.host).await?;
+        do_outbound_handshake(ssl_stream, state, connect).await
+    } else {
+        do_outbound_handshake(stream, state, connect).await
     }
+}
 
-    do_outbound_handshake(stream, state, connect).await
+/// Build an outbound TLS stream using a permissive verifier.
+///
+/// P10 S2S links authenticate via the Connect block's password, not
+/// via PKI — hitting a TLS-only peer with a self-signed cert is
+/// normal for private networks, and refusing the link when the CA
+/// chain doesn't validate would be unhelpful. We still *request*
+/// the peer's cert (so future work can add optional pinning) and
+/// set SNI to the configured host so virtual-hosted TLS endpoints
+/// route correctly.
+async fn wrap_outbound_tls<S>(
+    stream: S,
+    hostname: &str,
+) -> Result<tokio_openssl::SslStream<S>, String>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
+
+    let mut builder = SslConnector::builder(SslMethod::tls())
+        .map_err(|e| format!("SSL builder: {e}"))?;
+    builder.set_verify_callback(SslVerifyMode::PEER, |_preverify_ok, _ctx| true);
+    let connector = builder.build();
+
+    let config = connector
+        .configure()
+        .map_err(|e| format!("SSL configure: {e}"))?;
+    // SNI: strip any port, keep the host. If hostname is literally
+    // a numeric IP openssl still accepts it via SNI though most
+    // peers will ignore the value in that case.
+    let sni = hostname.trim_end_matches(':');
+    let ssl = config
+        .into_ssl(sni)
+        .map_err(|e| format!("SSL build: {e}"))?;
+
+    let mut ssl_stream = tokio_openssl::SslStream::new(ssl, stream)
+        .map_err(|e| format!("SslStream::new: {e}"))?;
+    std::pin::Pin::new(&mut ssl_stream)
+        .connect()
+        .await
+        .map_err(|e| format!("TLS handshake: {e}"))?;
+    Ok(ssl_stream)
 }
 
 async fn do_outbound_handshake<S>(
