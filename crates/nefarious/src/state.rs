@@ -494,6 +494,22 @@ impl ServerState {
         self.clients.insert(id, client);
     }
 
+    /// Search the G-line store for the first currently-enforceable
+    /// entry whose mask matches the given `user@host`. Returns a
+    /// snapshot (mask + reason) so callers don't have to hold the
+    /// lock across the client disconnect path. Inactive/expired
+    /// entries are skipped.
+    pub async fn find_matching_gline(&self, user_host: &str) -> Option<(String, String)> {
+        let now = chrono::Utc::now();
+        for entry in self.glines.iter() {
+            let gl = entry.value().read().await;
+            if gl.is_enforceable(now) && gl.matches(user_host) {
+                return Some((gl.mask.clone(), gl.reason.clone()));
+            }
+        }
+        None
+    }
+
     /// Allocate a P10 client numeric and record it against `id`. Returns
     /// None when the 18-bit slot space is exhausted (the caller should
     /// then refuse the connection).

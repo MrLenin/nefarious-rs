@@ -98,6 +98,43 @@ pub async fn handle_connection<S>(
 
     let client_id = client.read().await.id;
     let nick = client.read().await.nick.clone();
+
+    // G-line gate: refuse registration if this user@host matches an
+    // active network ban. Happens *after* nick/USER are parsed so
+    // we have `user` filled in, but *before* we tell the network
+    // about the client. That way a G-lined user never gets a
+    // numeric announced on the wire and never touches the channel
+    // graph, matching the "reject at connect" model in nefarious2
+    // register_user() (s_user.c).
+    let gline_match = {
+        let c = client.read().await;
+        let user_host = format!("{}@{}", c.user, c.host);
+        state.find_matching_gline(&user_host).await
+    };
+    if let Some((mask, reason)) = gline_match {
+        info!("refusing registration of {nick} ({addr}): G-lined by {mask}");
+        let (id, nick_for_release) = {
+            let c = client.read().await;
+            (c.id, c.nick.clone())
+        };
+        // Send ERROR so the client sees a clean failure reason
+        // before the socket closes. Bypass the tags pipeline since
+        // the client isn't registered for IRCv3 caps at this point.
+        let c = client.read().await;
+        c.send_raw(irc_proto::Message::with_source(
+            &state.server_name,
+            irc_proto::Command::Error,
+            vec![format!("Closing Link: {nick} [G-lined ({reason})]")],
+        ));
+        drop(c);
+        if !nick_for_release.is_empty() {
+            state.release_nick(&nick_for_release, id);
+        }
+        state.release_numeric(id);
+        writer_handle.abort();
+        return;
+    }
+
     info!("client {nick} ({addr}) registered");
 
     // Register in global state

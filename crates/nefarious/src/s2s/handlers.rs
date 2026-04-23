@@ -3406,12 +3406,37 @@ pub async fn handle_gline(
                 let expires_display = expires_at
                     .map(|t| t.to_rfc3339())
                     .unwrap_or_else(|| "never".to_string());
+                let reason_for_kick = gl.reason.clone();
+                let mask_for_kick = gl.mask.clone();
                 state
                     .glines
                     .insert(key.clone(), Arc::new(RwLock::new(gl)));
                 tracing::info!(
                     "GL +{mask} from {origin}: stored, expires={expires_display}"
                 );
+
+                // Post-add scan: any currently-connected local user
+                // matching this mask gets kicked so the new ban
+                // takes effect immediately, not just for future
+                // connects. request_disconnect drives normal QUIT
+                // broadcast so peers stay in sync.
+                let mut victims = Vec::new();
+                for entry in state.clients.iter() {
+                    let c = entry.value().read().await;
+                    if c.is_registered() {
+                        let user_host = format!("{}@{}", c.user, c.host);
+                        if crate::channel::wildcard_match(&mask_for_kick, &user_host) {
+                            victims.push(entry.key().clone());
+                        }
+                    }
+                }
+                for id in victims {
+                    if let Some(arc) = state.clients.get(&id) {
+                        arc.read().await.request_disconnect(format!(
+                            "G-lined: {reason_for_kick}"
+                        ));
+                    }
+                }
             }
         }
         '-' if is_global => {
