@@ -140,6 +140,28 @@ impl Config {
         self.feature("HIS_SERVERINFO")
     }
 
+    /// Boolean feature helper — parses common truthy/falsy forms
+    /// (`yes`/`no`, `true`/`false`, `on`/`off`, `1`/`0`). Returns the
+    /// supplied default when the key isn't present or isn't parseable.
+    pub fn feature_bool(&self, key: &str, default: bool) -> bool {
+        match self.feature(key) {
+            Some(v) => match v.to_ascii_lowercase().as_str() {
+                "yes" | "true" | "on" | "1" => true,
+                "no" | "false" | "off" | "0" => false,
+                _ => default,
+            },
+            None => default,
+        }
+    }
+
+    /// `HIS_WHOIS_IDLETIME` — when true, suppress the 317
+    /// RPL_WHOISIDLE line for non-opers querying a stranger.
+    /// Self-WHOIS and oper WHOIS still see the idle field.
+    /// Defaults to true in nefarious2 (ircd_features.c).
+    pub fn his_whois_idletime(&self) -> bool {
+        self.feature_bool("HIS_WHOIS_IDLETIME", true)
+    }
+
     /// `MAXWATCHS` — per-client cap on the WATCH/MONITOR list size.
     /// Defaults to 128, matching nefarious2's F_I(MAXWATCHS, …, 128).
     /// Invalid values in the config silently fall back to the default.

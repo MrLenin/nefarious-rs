@@ -466,17 +466,23 @@ pub async fn handle_whois(ctx: &HandlerContext, msg: &Message) {
                 .await;
             }
         }
-        let idle_secs = (chrono::Utc::now() - t.last_active).num_seconds().max(0);
-        ctx.send_numeric(
-            RPL_WHOISIDLE,
-            vec![
-                t.nick.clone(),
-                idle_secs.to_string(),
-                t.connected_at.timestamp().to_string(),
-                "seconds idle, signon time".to_string(),
-            ],
-        )
-        .await;
+        // 317 RPL_WHOISIDLE is suppressed for non-opers querying a
+        // stranger when FEAT_HIS_WHOIS_IDLETIME is set (default).
+        // Self-WHOIS and oper WHOIS always include it. `show_real`
+        // already captures the "oper or self" predicate.
+        if show_real || !ctx.state.config.his_whois_idletime() {
+            let idle_secs = (chrono::Utc::now() - t.last_active).num_seconds().max(0);
+            ctx.send_numeric(
+                RPL_WHOISIDLE,
+                vec![
+                    t.nick.clone(),
+                    idle_secs.to_string(),
+                    t.connected_at.timestamp().to_string(),
+                    "seconds idle, signon time".to_string(),
+                ],
+            )
+            .await;
+        }
         ctx.send_numeric(
             RPL_ENDOFWHOIS,
             vec![t.nick.clone(), "End of /WHOIS list".into()],
