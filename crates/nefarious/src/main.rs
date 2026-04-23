@@ -17,6 +17,7 @@ mod password;
 mod s2s;
 mod server;
 mod shun;
+mod ssl;
 mod state;
 mod tags;
 mod zline;

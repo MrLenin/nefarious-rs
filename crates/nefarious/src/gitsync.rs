@@ -166,13 +166,107 @@ pub async fn sync_once(state: Arc<ServerState>) -> SyncOutcome {
         Err(e) => SyncOutcome::Error { message: e },
         Ok((old, new)) if old == new => SyncOutcome::NoChange { head: new },
         Ok((old, new)) => {
+            // Two potential side effects once HEAD has moved: the
+            // config itself may have changed (→ reload_config),
+            // and a TLS cert file in the repo may have changed
+            // (→ install it and reload the SslAcceptor). Both run
+            // independently; a failure in one doesn't block the
+            // other.
             let reload = match sync_state.reload_config() {
                 Ok(s) => s,
                 Err(e) => format!("reload failed: {e}"),
             };
-            SyncOutcome::Changed { old, new, reload }
+            let cert_note = match install_cert_if_configured(&sync_state) {
+                Ok(Some(msg)) => format!(", {msg}"),
+                Ok(None) => String::new(),
+                Err(e) => format!(", cert install failed: {e}"),
+            };
+            SyncOutcome::Changed {
+                old,
+                new,
+                reload: format!("{reload}{cert_note}"),
+            }
         }
     }
+}
+
+/// If GITSYNC_CERT_PATH is set, look up that file in the synced
+/// working tree, validate it as PEM, and atomically replace the
+/// running certfile. Triggers `state.reload_ssl()` on success so
+/// new connections pick up the rotated cert immediately. Returns
+/// `Ok(None)` when cert sync isn't configured, `Ok(Some(note))`
+/// on a successful install/reload or "unchanged" skip, and
+/// `Err(reason)` on any validation or I/O failure.
+fn install_cert_if_configured(state: &Arc<ServerState>) -> Result<Option<String>, String> {
+    let cfg = state.config.load();
+    let repo_root = match cfg.git_config_path() {
+        Some(p) => PathBuf::from(p),
+        None => return Ok(None),
+    };
+    let repo_cert_rel = match cfg.gitsync_cert_path() {
+        Some(p) => p.to_string(),
+        None => return Ok(None),
+    };
+    let dest = match cfg.gitsync_cert_file() {
+        Some(p) => PathBuf::from(p),
+        None => {
+            return Err(
+                "GITSYNC_CERT_PATH set but GITSYNC_CERT_FILE / SSL_CERTFILE missing".into(),
+            );
+        }
+    };
+    drop(cfg);
+
+    let src = repo_root.join(&repo_cert_rel);
+    let content = std::fs::read(&src)
+        .map_err(|e| format!("read {}: {e}", src.display()))?;
+
+    if !looks_like_pem(&content) {
+        return Err(format!(
+            "rejected: {} doesn't look like a PEM certificate",
+            src.display()
+        ));
+    }
+
+    // Skip the disk churn if on-disk content already matches.
+    if let Ok(existing) = std::fs::read(&dest) {
+        if existing == content {
+            return Ok(Some(format!("cert unchanged ({})", dest.display())));
+        }
+    }
+
+    // Write atomically: temp file next to the target, then rename.
+    // The rename is the point at which any running TLS handshake
+    // that reads the file would see the new content — which it
+    // doesn't, since openssl snapshots on acceptor build, so the
+    // window is safe.
+    let tmp = dest.with_extension("new");
+    let bak = dest.with_extension("backup");
+    std::fs::write(&tmp, &content).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    // Best-effort backup of the existing cert so an operator can
+    // roll back by hand if the new one misbehaves.
+    if dest.exists() {
+        let _ = std::fs::remove_file(&bak);
+        let _ = std::fs::rename(&dest, &bak);
+    }
+    std::fs::rename(&tmp, &dest)
+        .map_err(|e| format!("rename {} → {}: {e}", tmp.display(), dest.display()))?;
+
+    // Hot-swap the acceptor so new handshakes use the new cert.
+    state
+        .reload_ssl()
+        .map_err(|e| format!("cert installed but SSL reload failed: {e}"))?;
+
+    Ok(Some(format!("cert rotated ({})", dest.display())))
+}
+
+/// Cheap PEM sanity check — content starts with a BEGIN
+/// CERTIFICATE banner. We don't fully parse x509 here; openssl
+/// will reject anything bogus on the next acceptor build, and the
+/// reload returns an error at that point.
+fn looks_like_pem(content: &[u8]) -> bool {
+    let haystack = std::str::from_utf8(content).unwrap_or("");
+    haystack.contains("-----BEGIN CERTIFICATE-----")
 }
 
 /// Synchronous git2 entry point — open the repo, fetch origin for

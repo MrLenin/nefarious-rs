@@ -326,6 +326,42 @@ impl Config {
         self.feature("GITSYNC_HOST_FINGERPRINT")
     }
 
+    /// `GITSYNC_CERT_PATH` — filename within the synced repo's
+    /// working tree that carries the server's TLS certificate
+    /// (PEM, may include the key). When set, a successful pull
+    /// that touches this file triggers an atomic install to
+    /// `GITSYNC_CERT_FILE` (or the server's running certfile)
+    /// and a live SSL acceptor reload. Lets an operator rotate
+    /// certs across the whole network with one `git push`.
+    pub fn gitsync_cert_path(&self) -> Option<&str> {
+        self.feature("GITSYNC_CERT_PATH")
+    }
+
+    /// `GITSYNC_CERT_FILE` — filesystem destination where the
+    /// synced cert gets written. Defaults to `SSL_CERTFILE`
+    /// (since that's the path the TLS acceptor is already
+    /// reading) but can be overridden for setups where the
+    /// live cert is a symlink or owned by a different process.
+    pub fn gitsync_cert_file(&self) -> Option<&str> {
+        self.feature("GITSYNC_CERT_FILE")
+            .or_else(|| self.feature("SSL_CERTFILE"))
+    }
+
+    /// `SSL_CERTFILE` — path to the live TLS certificate. Used by
+    /// the acceptor and as the default destination for
+    /// `GITSYNC_CERT_PATH`-driven installs. When absent we fall
+    /// back to the process' `SSL_CERT` environment variable
+    /// (which is how main.rs wires things up today).
+    pub fn ssl_certfile(&self) -> Option<&str> {
+        self.feature("SSL_CERTFILE")
+    }
+
+    /// `SSL_KEYFILE` — path to the live TLS key. Used by the
+    /// acceptor alongside `SSL_CERTFILE`.
+    pub fn ssl_keyfile(&self) -> Option<&str> {
+        self.feature("SSL_KEYFILE")
+    }
+
     /// `HOST_HIDING_STYLE` — which cloak strategy applies on +x.
     /// 0 = no cloak, 1 = account-based only, 2 = crypto cloak
     /// only, 3 = both (account wins when logged in, crypto

@@ -190,6 +190,16 @@ pub struct ServerState {
     /// Pinned operator-provided fingerprints live in config
     /// (`GITSYNC_HOST_FINGERPRINT`) and take precedence over this.
     pub gitsync_tofu: std::sync::RwLock<Option<GitsyncTofu>>,
+    /// Live TLS acceptor. Wrapped in ArcSwap so gitsync / SIGUSR1
+    /// can rebuild and swap it in atomically without tearing down
+    /// listeners. `None` means TLS is disabled and SSL ports are
+    /// skipped at listen time.
+    pub ssl_acceptor: ArcSwap<Option<openssl::ssl::SslAcceptor>>,
+    /// Remembered cert/key paths so `reload_ssl()` can rebuild the
+    /// acceptor without taking fresh CLI args. Seeded at startup
+    /// from either the config file (SSL_CERTFILE/SSL_KEYFILE) or
+    /// the SSL_CERT/SSL_KEY env vars, whichever wins.
+    pub ssl_paths: std::sync::RwLock<Option<SslPaths>>,
     /// IRCv3 capabilities the server currently advertises. Built once at
     /// startup from `default_advertised_caps`; each Phase 2 sub-phase
     /// flips a new cap on as its behaviour ships. A REQ for a cap not in
@@ -243,6 +253,16 @@ pub struct ServerState {
     /// accepting new connections promptly while existing sessions
     /// drain naturally.
     pub shutdown: Arc<tokio::sync::Notify>,
+}
+
+/// Paths to the running TLS cert and key. Remembered on state so
+/// `reload_ssl()` can rebuild the SslAcceptor after the certfile
+/// changes — gitsync writes a new PEM to disk and then asks state
+/// to pick it up.
+#[derive(Debug, Clone)]
+pub struct SslPaths {
+    pub cert: std::path::PathBuf,
+    pub key: std::path::PathBuf,
 }
 
 /// Pinned SSH host fingerprint captured on first successful pull.
@@ -311,6 +331,8 @@ impl ServerState {
             dns_resolver,
             geoip: std::sync::RwLock::new(None),
             gitsync_tofu: std::sync::RwLock::new(None),
+            ssl_acceptor: ArcSwap::from_pointee(None),
+            ssl_paths: std::sync::RwLock::new(None),
             advertised_caps: default_advertised_caps(),
             account_store: crate::accounts::empty_in_memory(),
             whowas: tokio::sync::Mutex::new(std::collections::VecDeque::with_capacity(WHOWAS_MAX)),
@@ -355,6 +377,30 @@ impl ServerState {
     /// await point.
     pub fn config(&self) -> Arc<Config> {
         self.config.load_full()
+    }
+
+    /// Rebuild the TLS acceptor from the cert/key paths remembered
+    /// at startup and swap it into `ssl_acceptor`. Used by gitsync
+    /// after a repo-driven cert install and by SIGUSR1-style
+    /// manual reload. On parse failure the existing acceptor stays
+    /// in place; the error goes back to the caller for logging.
+    pub fn reload_ssl(&self) -> Result<(), String> {
+        let paths = self
+            .ssl_paths
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .ok_or_else(|| "no SSL paths recorded".to_string())?;
+        let acceptor = crate::ssl::build_acceptor(&paths.cert, &paths.key)
+            .map_err(|e| format!("SSL reload: {e}"))?;
+        self.ssl_acceptor.store(Arc::new(Some(acceptor)));
+        Ok(())
+    }
+
+    /// Cheap snapshot of the active SSL acceptor (cloned Arc).
+    /// `None` when TLS is disabled or the initial build failed.
+    pub fn ssl_acceptor_snapshot(&self) -> Arc<Option<openssl::ssl::SslAcceptor>> {
+        self.ssl_acceptor.load_full()
     }
 
     /// Snapshot of the current GeoIP reader, if any. Cheap Arc

@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use openssl::nid::Nid;
-use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod, SslVerifyMode};
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
@@ -58,33 +57,43 @@ pub async fn run(
         info!("GeoIP MMDB loaded");
     }
 
-    // Set up SSL acceptor if we have cert/key
-    let ssl_acceptor = match (ssl_cert, ssl_key) {
-        (Some(cert), Some(key)) => match build_ssl_acceptor(cert, key) {
+    // Set up SSL acceptor if we have cert/key. Store the paths on
+    // state so reload_ssl() can rebuild later (gitsync cert
+    // install, SIGUSR1-style reload, future admin commands).
+    // Prefer config-driven paths over the CLI/env-driven ones
+    // since they can be changed via /REHASH without restart.
+    let cfg = state.config.load();
+    let cert_path = cfg
+        .ssl_certfile()
+        .map(std::path::PathBuf::from)
+        .or_else(|| ssl_cert.map(std::path::PathBuf::from));
+    let key_path = cfg
+        .ssl_keyfile()
+        .map(std::path::PathBuf::from)
+        .or_else(|| ssl_key.map(std::path::PathBuf::from));
+    drop(cfg);
+
+    if let (Some(cert), Some(key)) = (cert_path.clone(), key_path.clone()) {
+        match crate::ssl::build_acceptor(&cert, &key) {
             Ok(a) => {
-                info!(
-                    "TLS enabled with cert={} key={}",
-                    cert.display(),
-                    key.display()
-                );
-                Some(Arc::new(a))
+                info!("TLS enabled with cert={} key={}", cert.display(), key.display());
+                state.ssl_acceptor.store(Arc::new(Some(a)));
+                *state.ssl_paths.write().expect("ssl_paths lock") =
+                    Some(crate::state::SslPaths { cert, key });
             }
             Err(e) => {
                 error!("failed to set up TLS: {e}");
-                None
             }
-        },
-        _ => {
-            info!("no TLS certificate configured — SSL ports will be skipped");
-            None
         }
-    };
+    } else {
+        info!("no TLS certificate configured — SSL ports will be skipped");
+    }
 
     // Bind listeners for all ports (client and server)
     let mut handles = Vec::new();
 
     for port_config in &config.ports {
-        if port_config.ssl && ssl_acceptor.is_none() {
+        if port_config.ssl && state.ssl_acceptor_snapshot().is_none() {
             info!("skipping SSL port {} (no certificate)", port_config.port);
             continue;
         }
@@ -103,14 +112,13 @@ pub async fn run(
             port_config.port, port_config.ssl, port_config.websocket
         );
 
-        let state = Arc::clone(&state);
-        let ssl = ssl_acceptor.clone();
+        let state_clone = Arc::clone(&state);
         let is_ssl = port_config.ssl;
         let is_server = port_config.server;
         let port = port_config.port;
 
         let handle = tokio::spawn(async move {
-            accept_loop(listener, state, ssl, is_ssl, is_server, port).await;
+            accept_loop(listener, state_clone, is_ssl, is_server, port).await;
         });
         handles.push(handle);
     }
@@ -306,7 +314,6 @@ async fn shutdown_drain(state: &Arc<ServerState>) {
 async fn accept_loop(
     listener: TcpListener,
     state: Arc<ServerState>,
-    ssl_acceptor: Option<Arc<SslAcceptor>>,
     is_ssl: bool,
     is_server: bool,
     port: u16,
@@ -332,11 +339,19 @@ async fn accept_loop(
         let state = Arc::clone(&state);
 
         if is_ssl {
-            if let Some(ref acceptor) = ssl_acceptor {
-                let acceptor = Arc::clone(acceptor);
+            // Pick up whichever acceptor is live at accept time.
+            // Hot reloads via state.reload_ssl() take effect on the
+            // next connection; in-flight handshakes keep the
+            // acceptor they started with.
+            let acceptor_snapshot = state.ssl_acceptor_snapshot();
+            if acceptor_snapshot.is_some() {
                 let is_server = is_server;
                 tokio::spawn(async move {
-                    let ssl = match openssl::ssl::Ssl::new(acceptor.context()) {
+                    let acceptor_ref = acceptor_snapshot
+                        .as_ref()
+                        .as_ref()
+                        .expect("checked non-None");
+                    let ssl = match openssl::ssl::Ssl::new(acceptor_ref.context()) {
                         Ok(s) => s,
                         Err(e) => {
                             tracing::debug!("SSL context error on port {port}: {e}");
@@ -629,19 +644,5 @@ async fn build_account_store_from_env(spec: &str) -> crate::accounts::SharedAcco
     std::sync::Arc::new(store)
 }
 
-fn build_ssl_acceptor(
-    cert_path: &Path,
-    key_path: &Path,
-) -> Result<SslAcceptor, openssl::error::ErrorStack> {
-    let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
-    builder.set_certificate_chain_file(cert_path)?;
-    builder.set_private_key_file(key_path, SslFiletype::PEM)?;
-    builder.check_private_key()?;
-    // Request — but do not require — the peer's client certificate so
-    // SASL EXTERNAL has something to bind to. The verify callback
-    // always returns true: we're not pinning a CA chain, the account
-    // store is the authority that decides whether the cert CN maps
-    // to an account.
-    builder.set_verify_callback(SslVerifyMode::PEER, |_preverify_ok, _ctx| true);
-    Ok(builder.build())
-}
+// SSL acceptor construction lives in crate::ssl so state.rs can
+// call it from reload_ssl(). Server startup uses the same helper.
