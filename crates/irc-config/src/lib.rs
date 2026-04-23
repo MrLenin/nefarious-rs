@@ -17,7 +17,44 @@ pub struct Config {
     pub connects: Vec<ConnectConfig>,
     pub kills: Vec<KillConfig>,
     pub webirc: Vec<WebIrcConfig>,
+    pub dnsbl: Vec<DnsBlConfig>,
     pub features: Vec<(String, String)>,
+}
+
+/// A DNSBL (DNS-based blackhole list) zone to query at connect
+/// time. Mirrors nefarious2's DnsBL{} config block and the
+/// DNSBL_ACT_* enum from include/dnsbl.h.
+#[derive(Debug, Clone)]
+pub struct DnsBlConfig {
+    /// Zone to query, e.g. `zen.spamhaus.org`. The client IP is
+    /// reversed and prepended per RFC 5782 — `1.2.3.4` becomes a
+    /// query for `4.3.2.1.zen.spamhaus.org`.
+    pub domain: String,
+    /// Optional reply-octet match: if set, only trigger when the
+    /// returned A-record's last octet has any bit of this mask
+    /// set. Lets one zone carry multiple list types (spamhaus
+    /// uses 127.0.0.2 for SBL, .3 for CSS, .4-.7 for XBL, .10 for
+    /// PBL, .11 for PBL2). `None` accepts any resolution.
+    pub reply_mask: Option<u8>,
+    /// What to do when the client's IP is listed.
+    pub action: DnsBlAction,
+    /// Reason text shown to the client on block, or stored as the
+    /// mark value on `action = Mark`. Free-form.
+    pub reason: String,
+}
+
+/// Action to take when a DNSBL reports a match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsBlAction {
+    /// Refuse the connection outright.
+    Block,
+    /// Refuse only non-authenticated clients; authed users bypass.
+    BlockAnon,
+    /// Tag the client (stored on Client state) but let them in.
+    /// Opers can see the mark via /WHOIS / /CHECK.
+    Mark,
+    /// Exempt the IP from other DNSBL checks in this list.
+    Whitelist,
 }
 
 /// Trusted WEBIRC gateway entry — lets a known webchat gateway
@@ -403,6 +440,7 @@ impl Config {
         let mut connects = Vec::new();
         let mut kills = Vec::new();
         let mut webirc = Vec::new();
+        let mut dnsbl = Vec::new();
         let mut features = Vec::new();
 
         for block in blocks {
@@ -536,6 +574,42 @@ impl Config {
                     });
                 }
 
+                "DnsBL" => {
+                    let domain = match block.get_str("domain") {
+                        Some(d) => d.to_string(),
+                        None => {
+                            tracing::warn!("DnsBL block missing domain; ignoring");
+                            continue;
+                        }
+                    };
+                    let action_str = block.get_str("action").unwrap_or("block");
+                    let action = match action_str.to_ascii_lowercase().as_str() {
+                        "block" => DnsBlAction::Block,
+                        "block_anon" | "blockanon" => DnsBlAction::BlockAnon,
+                        "mark" => DnsBlAction::Mark,
+                        "whitelist" => DnsBlAction::Whitelist,
+                        other => {
+                            tracing::warn!(
+                                "DnsBL {domain}: unknown action '{other}'; using block"
+                            );
+                            DnsBlAction::Block
+                        }
+                    };
+                    let reply_mask = block
+                        .get_str("reply")
+                        .and_then(|v| u8::from_str_radix(v.trim_start_matches("0x"), 16).ok()
+                            .or_else(|| v.parse::<u8>().ok()));
+                    dnsbl.push(DnsBlConfig {
+                        domain,
+                        reply_mask,
+                        action,
+                        reason: block
+                            .get_str("reason")
+                            .unwrap_or("Your IP is listed on a DNSBL")
+                            .to_string(),
+                    });
+                }
+
                 "WebIRC" => {
                     let password = match block.get_str("password") {
                         Some(p) => p.to_string(),
@@ -612,6 +686,7 @@ impl Config {
             connects,
             kills,
             webirc,
+            dnsbl,
             features,
         })
     }

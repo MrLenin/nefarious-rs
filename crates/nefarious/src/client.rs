@@ -57,6 +57,11 @@ pub struct Client {
     /// client actually came from. Stays constant across the
     /// connection's lifetime.
     pub real_host: String,
+    /// DNSBL mark — set to the listing reason when a DnsBL zone
+    /// with action=Mark matched this client's IP at connect. Empty
+    /// means unmarked. Opers see this in /WHOIS and /CHECK output;
+    /// plain users never see it.
+    pub dnsbl_mark: Option<String>,
     /// IP address.
     pub addr: SocketAddr,
     /// Whether the client is using TLS. Consumed later by SASL EXTERNAL
@@ -192,6 +197,7 @@ impl Client {
             realname: String::new(),
             host: addr.ip().to_string(),
             real_host: addr.ip().to_string(),
+            dnsbl_mark: None,
             addr,
             tls,
             modes: HashSet::new(),

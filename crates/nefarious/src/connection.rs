@@ -275,6 +275,61 @@ pub async fn handle_connection<S>(
         return;
     }
 
+    // DNSBL check. Happens after all the ban gates so we don't burn
+    // DNS queries on clients we'd refuse anyway. Fails open: if
+    // every zone times out or resolves nothing, the client goes
+    // through unmarked. A Block / BlockAnon hit refuses the
+    // connection; Mark hits tag the Client for oper visibility.
+    let dnsbl_blocks = state.config.load().dnsbl.clone();
+    if !dnsbl_blocks.is_empty() {
+        if let Some(resolver) = state.dns_resolver.as_ref() {
+            let ip = client.read().await.addr.ip();
+            let is_account = client.read().await.account.is_some();
+            let outcome = crate::dnsbl::check_all(
+                Arc::clone(resolver),
+                ip,
+                dnsbl_blocks,
+                is_account,
+            )
+            .await;
+            if let Some(crate::dnsbl::DnsBlOutcome::Hit { action, reason, zone }) = outcome {
+                use irc_config::DnsBlAction;
+                match action {
+                    DnsBlAction::Block | DnsBlAction::BlockAnon => {
+                        info!(
+                            "refusing registration of {nick} ({addr}): DNSBL {zone} ({reason})"
+                        );
+                        let (id, nick_for_release) = {
+                            let c = client.read().await;
+                            (c.id, c.nick.clone())
+                        };
+                        let c = client.read().await;
+                        c.send_raw(irc_proto::Message::with_source(
+                            &state.server_name,
+                            irc_proto::Command::Error,
+                            vec![format!("Closing Link: {nick} [DNSBL: {reason}]")],
+                        ));
+                        drop(c);
+                        if !nick_for_release.is_empty() {
+                            state.release_nick(&nick_for_release, id);
+                        }
+                        state.release_numeric(id);
+                        state.ipcheck.release(addr.ip());
+                        writer_handle.abort();
+                        return;
+                    }
+                    DnsBlAction::Mark => {
+                        client.write().await.dnsbl_mark = Some(format!("{zone}: {reason}"));
+                    }
+                    DnsBlAction::Whitelist => {
+                        // Unreachable: check_all collapses
+                        // whitelists into a no-op return.
+                    }
+                }
+            }
+        }
+    }
+
     info!("client {nick} ({addr}) registered");
 
     // Server notice to +s opers if the feature flag is on.

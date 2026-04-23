@@ -5,6 +5,7 @@ mod client;
 mod cloaking;
 mod connection;
 mod dns;
+mod dnsbl;
 mod gline;
 mod handlers;
 mod ipcheck;
