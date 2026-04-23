@@ -16,7 +16,25 @@ pub struct Config {
     pub operators: Vec<OperatorConfig>,
     pub connects: Vec<ConnectConfig>,
     pub kills: Vec<KillConfig>,
+    pub webirc: Vec<WebIrcConfig>,
     pub features: Vec<(String, String)>,
+}
+
+/// Trusted WEBIRC gateway entry — lets a known webchat gateway
+/// pass through the real client's IP/host via the WEBIRC command.
+/// Mirrors nefarious2 ircd.conf WebIRC block.
+#[derive(Debug, Clone)]
+pub struct WebIrcConfig {
+    /// Password the gateway must present on the WEBIRC line.
+    /// Stored plaintext for now; real deployments should use the
+    /// `password_hash` field once we wire up a hash compare path.
+    pub password: String,
+    /// Optional host glob the gateway's actual source IP must
+    /// match before the password is even consulted, per nefarious2
+    /// m_webirc.c's client.host check. `None` means any host.
+    pub host: Option<String>,
+    /// Optional description shown in oper notices.
+    pub description: Option<String>,
 }
 
 /// A local connection ban sourced from a `Kill { ... }` config
@@ -325,6 +343,7 @@ impl Config {
         let mut operators = Vec::new();
         let mut connects = Vec::new();
         let mut kills = Vec::new();
+        let mut webirc = Vec::new();
         let mut features = Vec::new();
 
         for block in blocks {
@@ -458,6 +477,23 @@ impl Config {
                     });
                 }
 
+                "WebIRC" => {
+                    let password = match block.get_str("password") {
+                        Some(p) => p.to_string(),
+                        None => {
+                            tracing::warn!("WebIRC block missing password; ignoring");
+                            continue;
+                        }
+                    };
+                    webirc.push(WebIrcConfig {
+                        password,
+                        host: block.get_str("host").map(|s| s.to_string()),
+                        description: block
+                            .get_str("description")
+                            .map(|s| s.to_string()),
+                    });
+                }
+
                 "Kill" => {
                     // Kill blocks match on host (user@host glob),
                     // optionally ip (CIDR or glob). At least one
@@ -516,6 +552,7 @@ impl Config {
             operators,
             connects,
             kills,
+            webirc,
             features,
         })
     }

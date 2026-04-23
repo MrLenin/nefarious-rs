@@ -342,6 +342,81 @@ async fn registration_phase(
                 // Accept and ignore for now (no password auth in Phase 0)
             }
 
+            Command::Webirc => {
+                // WEBIRC <password> <gateway_name> <real_host> <real_ip> [<options>]
+                // Only accepted during registration, before USER completes —
+                // matches nefarious2 m_webirc.c's mr_webirc. A successful
+                // WEBIRC rewrites the client's IP and host so the rest of
+                // the register path (ban checks, reverse DNS) sees the
+                // actual user rather than the gateway.
+                if msg.params.len() < 4 {
+                    let c = client.read().await;
+                    c.send_numeric(
+                        &state.server_name,
+                        ERR_NEEDMOREPARAMS,
+                        vec!["WEBIRC".into(), "Not enough parameters".into()],
+                    );
+                    continue;
+                }
+                let presented_pass = &msg.params[0];
+                let _gateway = &msg.params[1];
+                let real_host = &msg.params[2];
+                let real_ip = &msg.params[3];
+                let peer_ip = client.read().await.addr.ip().to_string();
+
+                // Match against configured WebIRC blocks. First entry
+                // whose host ACL matches the peer AND whose password
+                // matches wins.
+                let matched = state.config.webirc.iter().find(|w| {
+                    let host_ok = match &w.host {
+                        Some(pat) => {
+                            crate::channel::wildcard_match(pat, &peer_ip)
+                        }
+                        None => true,
+                    };
+                    host_ok && w.password == *presented_pass
+                });
+                if matched.is_none() {
+                    let c = client.read().await;
+                    c.send_raw(Message::with_source(
+                        &state.server_name,
+                        Command::Error,
+                        vec![format!(
+                            "Closing Link: [{peer_ip}] (WEBIRC authentication failed)"
+                        )],
+                    ));
+                    return false;
+                }
+
+                // Rewrite: parse the real IP, overwrite addr and host.
+                match real_ip.parse::<std::net::IpAddr>() {
+                    Ok(ip) => {
+                        let mut c = client.write().await;
+                        // Port is preserved — only the IP changes. The
+                        // host gets replaced with whatever the gateway
+                        // passed; we don't kick off a fresh reverse DNS
+                        // because the gateway is authoritative.
+                        c.addr =
+                            std::net::SocketAddr::new(ip, c.addr.port());
+                        c.host = real_host.clone();
+                        info!(
+                            "WEBIRC: {peer_ip} → {ip} (host {real_host})"
+                        );
+                    }
+                    Err(_) => {
+                        let c = client.read().await;
+                        c.send_raw(Message::with_source(
+                            &state.server_name,
+                            Command::Error,
+                            vec![format!(
+                                "Closing Link: [{peer_ip}] (WEBIRC malformed IP)"
+                            )],
+                        ));
+                        return false;
+                    }
+                }
+            }
+
             Command::Authenticate => {
                 // SASL exchange happens during CAP negotiation, before
                 // NICK+USER are allowed to complete registration. Route
