@@ -932,6 +932,54 @@ pub async fn handle_userhost(ctx: &HandlerContext, msg: &Message) {
     ctx.send_numeric(RPL_USERHOST, vec![tokens.join(" ")]).await;
 }
 
+/// Handle USERIP — `USERIP <nick> [<nick>...]`. Similar shape to
+/// USERHOST but reports the user's IP (not hostname) per token.
+/// Only opers should see real IPs for cloaked users; non-opers see
+/// the same cloaked host they'd see elsewhere. Matches nefarious2
+/// m_userip.c's non-oper behaviour.
+///
+/// Wire: `302 :nick[*]=+|-user@ip-or-host[ nick[*]=...]`
+pub async fn handle_userip(ctx: &HandlerContext, msg: &Message) {
+    if msg.params.is_empty() {
+        ctx.send_numeric(
+            ERR_NEEDMOREPARAMS,
+            vec!["USERIP".into(), "Not enough parameters".into()],
+        )
+        .await;
+        return;
+    }
+
+    let requester_is_oper = ctx.client.read().await.modes.contains(&'o');
+
+    let mut tokens = Vec::new();
+    for nick in msg.params.iter().take(5) {
+        if let Some(client) = ctx.state.find_client_by_nick(nick) {
+            let c = client.read().await;
+            let oper_mark = if c.modes.contains(&'o') { "*" } else { "" };
+            let away_mark = if c.away_message.is_some() { "-" } else { "+" };
+            // Oper sees real host (which is the IP for us unless
+            // rev-DNS resolved); non-oper sees the cloaked form.
+            let host = if requester_is_oper {
+                c.host.clone()
+            } else {
+                c.visible_host(&ctx.state.config)
+            };
+            tokens.push(format!("{}{oper_mark}={away_mark}{}@{host}", c.nick, c.user));
+        } else if let Some(remote) = ctx.state.find_remote_by_nick(nick) {
+            let r = remote.read().await;
+            let oper_mark = if r.modes.contains(&'o') { "*" } else { "" };
+            let away_mark = if r.away_message.is_some() { "-" } else { "+" };
+            // Remote user's `host` is already the visible (cloaked)
+            // form thanks to the NICK-burst ingestion path. The real
+            // IP (as base64) lives on `ip_base64` but we don't expose
+            // it from here without S2S WHOIS resolution.
+            tokens.push(format!("{}{oper_mark}={away_mark}{}@{}", r.nick, r.user, r.host));
+        }
+    }
+
+    ctx.send_numeric(RPL_USERHOST, vec![tokens.join(" ")]).await;
+}
+
 /// Handle ISON — `ISON <nick> [<nick>...]`. Returns a single 303 reply
 /// with the space-separated subset of the queried nicks that are online.
 pub async fn handle_ison(ctx: &HandlerContext, msg: &Message) {

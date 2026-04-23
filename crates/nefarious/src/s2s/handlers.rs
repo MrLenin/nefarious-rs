@@ -1510,6 +1510,32 @@ pub async fn handle_mode(state: &ServerState, msg: &P10Message) {
     let source_prefix = get_source_prefix(state, msg).await;
     let src = source_info_from_origin(state, msg).await;
 
+    // Trailing channel TS guard. Nefarious2 m_mode.c carries the
+    // sender's view of `chptr->creationtime` as an optional trailing
+    // param. If that TS is newer than ours, *their* side is coming
+    // from a channel that was recreated after ours — their view
+    // loses the TS race, drop the mode to avoid a stale overwrite.
+    // Equal or older TS = accept. The check only fires when the
+    // last param is a pure-digit number; avoids false positives on
+    // mask params like `b *!*@evil.example`.
+    if msg.params.len() >= 3 {
+        let last = &msg.params[msg.params.len() - 1];
+        if last.chars().all(|c| c.is_ascii_digit()) && !last.is_empty() {
+            if let Ok(sender_ts) = last.parse::<u64>() {
+                if let Some(channel) = state.get_channel(target) {
+                    let our_ts = channel.read().await.created_ts;
+                    if sender_ts > our_ts && our_ts > 0 {
+                        debug!(
+                            "handle_mode: dropping stale MODE for {target} \
+                             (sender ts={sender_ts} > our ts={our_ts})"
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     // Apply the mode change to our own channel state BEFORE relaying. Without
     // this, local op/voice/ban/flag state drifts out of sync with peers and
     // every subsequent permission check gives the wrong answer.

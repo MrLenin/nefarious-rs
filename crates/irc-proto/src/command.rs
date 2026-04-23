@@ -75,6 +75,7 @@ pub enum Command {
 
     // User queries
     Userhost,
+    Userip,
     Ison,
 
     // Server queries (Admin and Info already exist above under Queries)
@@ -119,6 +120,7 @@ impl Command {
             "ACCOUNT" => Command::Account,
             "AUTHENTICATE" => Command::Authenticate,
             "MONITOR" => Command::Monitor,
+            "USERIP" => Command::Userip,
             "JOIN" => Command::Join,
             "PART" => Command::Part,
             "TOPIC" => Command::Topic,
@@ -197,6 +199,7 @@ impl fmt::Display for Command {
             Command::Wallops => write!(f, "WALLOPS"),
             Command::Away => write!(f, "AWAY"),
             Command::Userhost => write!(f, "USERHOST"),
+            Command::Userip => write!(f, "USERIP"),
             Command::Ison => write!(f, "ISON"),
             Command::Stats => write!(f, "STATS"),
             Command::Time => write!(f, "TIME"),

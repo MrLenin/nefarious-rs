@@ -232,9 +232,15 @@ impl Channel {
 
     /// Check if a client can send to this channel.
     pub fn can_send(&self, id: &ClientId, is_account: bool) -> bool {
-        // +R — registered users only. Applies to both members and
-        // non-member senders, so check first.
+        // +R / +M — registered-only speech gates. +R blocks all
+        // speech (internal and external) from non-authenticated
+        // users; +M is the less-strict variant that only blocks the
+        // external-message path. Check both early so the existing
+        // +n / +m logic doesn't override them.
         if self.modes.extended_flags.contains(&'R') && !is_account {
+            return false;
+        }
+        if self.modes.extended_flags.contains(&'M') && !is_account && !self.is_member(id) {
             return false;
         }
         if !self.modes.no_external && !self.is_member(id) {

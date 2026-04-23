@@ -131,6 +131,7 @@ impl HandlerContext {
             Command::Version => query::handle_version(&ctx, msg).await,
             Command::Away => query::handle_away(&ctx, msg).await,
             Command::Userhost => query::handle_userhost(&ctx, msg).await,
+            Command::Userip => query::handle_userip(&ctx, msg).await,
             Command::Ison => query::handle_ison(&ctx, msg).await,
             Command::Oper => query::handle_oper(&ctx, msg).await,
 
