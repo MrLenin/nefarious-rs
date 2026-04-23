@@ -189,11 +189,36 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
             line.push_str(&members.join(","));
         }
 
-        // Add bans
-        if !chan.bans.is_empty() {
-            let ban_masks: Vec<&str> = chan.bans.iter().map(|b| b.mask.as_str()).collect();
+        // Bans and ban-excepts share one `:%` trailing, with a bare `~`
+        // token separating the two lists. Matches nefarious2
+        // channel.c ms_burst_channel byte-for-byte:
+        //   bans only   : ":%ban1 ban2"          (no space after %)
+        //   both        : ":%ban1 ban2 ~ except1 except2"
+        //   excepts only: ":% ~ except1 except2" (space after %, nothing
+        //                                         between % and ~)
+        // Peers that don't understand `~` keep consuming bans, so the
+        // `~` token effectively hides excepts from them. Emit excepts
+        // even when there are no bans, so the trailing always starts
+        // with `:%` if either list has entries.
+        if !chan.bans.is_empty() || !chan.excepts.is_empty() {
             line.push_str(" :%");
-            line.push_str(&ban_masks.join(" "));
+            let mut first = true;
+            for ban in &chan.bans {
+                if first {
+                    line.push_str(&ban.mask);
+                    first = false;
+                } else {
+                    line.push(' ');
+                    line.push_str(&ban.mask);
+                }
+            }
+            if !chan.excepts.is_empty() {
+                line.push_str(" ~");
+                for exc in &chan.excepts {
+                    line.push(' ');
+                    line.push_str(&exc.mask);
+                }
+            }
         }
 
         link.send_line(line).await;
