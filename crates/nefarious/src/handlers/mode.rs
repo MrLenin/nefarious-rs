@@ -192,7 +192,30 @@ async fn handle_channel_mode(ctx: &HandlerContext, msg: &Message) {
                 if adding {
                     if let Some(mask) = msg.params.get(param_idx) {
                         param_idx += 1;
+                        let max_bans = ctx.state.config.max_bans() as usize;
                         let mut chan = channel.write().await;
+                        // Per-channel ban cap. 478 ERR_BANLISTFULL
+                        // lets the op know the set rolled off the
+                        // end; mirrors nefarious2 channel.c cap
+                        // check at set_ban_list.
+                        if chan.bans.len() >= max_bans {
+                            drop(chan);
+                            ctx.send_numeric(
+                                478, // ERR_BANLISTFULL
+                                vec![
+                                    chan_name.clone(),
+                                    mask.clone(),
+                                    "Channel ban list is full".into(),
+                                ],
+                            )
+                            .await;
+                            continue;
+                        }
+                        // Skip duplicates — no point adding a ban
+                        // that already matches the exact mask.
+                        if chan.bans.iter().any(|b| b.mask == *mask) {
+                            continue;
+                        }
                         chan.bans.push(BanEntry {
                             mask: mask.clone(),
                             set_by: prefix.clone(),
