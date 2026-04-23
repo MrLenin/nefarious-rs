@@ -84,10 +84,13 @@ pub fn open(path: &Path) -> Option<Arc<Reader<Vec<u8>>>> {
 /// refuse to produce a value, so callers can unconditionally
 /// render the columns.
 pub fn lookup(reader: &Reader<Vec<u8>>, ip: IpAddr) -> GeoTag {
-    let record: Result<CountryRecord, _> = reader.lookup(ip);
-    let r = match record {
-        Ok(r) => r,
-        Err(_) => return GeoTag::unknown(),
+    // maxminddb ≥ 0.25 returns `Result<Option<T>, _>`; `Ok(None)` is
+    // "IP not in the database" (what the older API signalled as
+    // AddressNotFoundError). Either flavour of miss collapses to an
+    // "unknown" tag so callers can render the columns unconditionally.
+    let r = match reader.lookup::<CountryRecord>(ip) {
+        Ok(Some(r)) => r,
+        Ok(None) | Err(_) => return GeoTag::unknown(),
     };
     let country_code = r
         .country
