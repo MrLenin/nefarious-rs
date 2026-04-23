@@ -50,6 +50,13 @@ impl MembershipFlags {
 }
 
 /// Channel modes as a struct.
+///
+/// The RFC1459 set (`+nt i m s p k l`) lives in dedicated fields with
+/// enforcement logic. The nefarious2 extended set lives in
+/// `extended_flags` as a set of chars — we track them for wire parity
+/// so BURST / MODE / `to_mode_string` round-trip correctly across
+/// peers, but most aren't enforced locally yet. Enforcement lands
+/// per-feature as handlers need it.
 #[derive(Debug, Clone, Default)]
 pub struct ChannelModes {
     /// +n: no external messages
@@ -68,6 +75,14 @@ pub struct ChannelModes {
     pub key: Option<String>,
     /// +l: user limit
     pub limit: Option<u32>,
+    /// +L: redirect target on +i / +l overflow (channel name param)
+    pub redirect: Option<String>,
+    /// Extended nefarious2 channel modes that round-trip across S2S
+    /// without local enforcement yet. Includes C/c/D/M/N/Q/R/r/S/T/
+    /// u/z and any future parameterless flag we parse off the wire.
+    /// Stored as chars so `to_mode_string` can emit in alphabetic
+    /// order without hard-coding every known flag.
+    pub extended_flags: std::collections::BTreeSet<char>,
 }
 
 impl ChannelModes {
@@ -94,6 +109,11 @@ impl ChannelModes {
         if self.private {
             modes.push('p');
         }
+        // Extended parameterless flags (C/c/D/M/N/Q/R/r/S/T/u/z)
+        // emitted in BTreeSet order so the wire is deterministic.
+        for c in &self.extended_flags {
+            modes.push(*c);
+        }
         if let Some(ref key) = self.key {
             modes.push('k');
             params.push(key.clone());
@@ -101,6 +121,10 @@ impl ChannelModes {
         if let Some(limit) = self.limit {
             modes.push('l');
             params.push(limit.to_string());
+        }
+        if let Some(ref redir) = self.redirect {
+            modes.push('L');
+            params.push(redir.clone());
         }
 
         if modes.len() == 1 {

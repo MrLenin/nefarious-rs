@@ -740,6 +740,7 @@ fn apply_burst_modes(chan: &mut Channel, mode_str: &str) {
     for c in mode_str.chars() {
         match c {
             '+' => {}
+            // RFC modes
             'n' => chan.modes.no_external = true,
             't' => chan.modes.topic_ops_only = true,
             'm' => chan.modes.moderated = true,
@@ -747,7 +748,16 @@ fn apply_burst_modes(chan: &mut Channel, mode_str: &str) {
             's' => chan.modes.secret = true,
             'p' => chan.modes.private = true,
             'k' => chan.modes.key = Some(String::new()), // placeholder, filled from params
-            'l' => chan.modes.limit = Some(0), // placeholder, filled from params
+            'l' => chan.modes.limit = Some(0),           // placeholder, filled from params
+            'L' => chan.modes.redirect = Some(String::new()), // placeholder, filled from params
+            // Extended nefarious2 parameterless flags. We store the
+            // char verbatim so to_mode_string round-trips and any
+            // future enforcement can read the flag straight out of
+            // the set. Mirrors `infochanmodes` in channel.h without
+            // hard-coding semantics we haven't implemented.
+            'C' | 'c' | 'D' | 'M' | 'N' | 'Q' | 'R' | 'r' | 'S' | 'T' | 'u' | 'z' => {
+                chan.modes.extended_flags.insert(c);
+            }
             _ => {}
         }
     }
@@ -1639,7 +1649,8 @@ async fn apply_remote_channel_mode(
                     pi += 1;
                 }
             }
-            'l' => {
+            'l' | 'L' => {
+                // +l / +L take a param; -l / -L do not.
                 if scan_adding && params.get(pi).is_some() {
                     pi += 1;
                 }
@@ -1687,6 +1698,26 @@ async fn apply_remote_channel_mode(
                     }
                 } else {
                     chan.modes.limit = None;
+                }
+            }
+            'L' => {
+                // +L <target-channel> / -L
+                if adding {
+                    if let Some(target) = params.get(pi) {
+                        chan.modes.redirect = Some(target.clone());
+                        pi += 1;
+                    }
+                } else {
+                    chan.modes.redirect = None;
+                }
+            }
+            // Extended nefarious2 parameterless flags — round-trip
+            // state only, no enforcement yet.
+            'C' | 'c' | 'D' | 'M' | 'N' | 'Q' | 'R' | 'r' | 'S' | 'T' | 'u' | 'z' => {
+                if adding {
+                    chan.modes.extended_flags.insert(c);
+                } else {
+                    chan.modes.extended_flags.remove(&c);
                 }
             }
             'o' | 'v' | 'h' => {
