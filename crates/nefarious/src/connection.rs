@@ -617,14 +617,24 @@ async fn send_welcome(client: &Arc<RwLock<Client>>, state: &ServerState) {
         )],
     );
 
+    // RPL_MYINFO shape matches nefarious2 s_err.c: five params —
+    // server, version, user modes, channel modes, channel modes
+    // that take params. Clients (older ones especially) read this
+    // to figure out what MODE chars need arguments when parsing
+    // mode strings; missing or short fields here cascade into
+    // parse bugs client-side.
+    //
+    // Sources: client.h infousermodes / channel.h infochanmodes /
+    // channel.h infochanmodeswithparams.
     c.send_numeric(
         server,
         RPL_MYINFO,
         vec![
             server.clone(),
             state.version.clone(),
-            "iow".to_string(),
-            "biklmnopstv".to_string(),
+            "abdgiknoqswxyzBDHLMNORWXY".to_string(),
+            "abCcDdhHikLlMmNnOopPQRrSsTtvZz".to_string(),
+            "bhkLlov".to_string(),
         ],
     );
 
