@@ -250,6 +250,15 @@ impl Config {
         self.feature_bool("CONNEXIT_NOTICES", false)
     }
 
+    /// `NICKDELAY` — minimum seconds between local nick changes
+    /// from a single client. Defaults to 30 (matches ircd_features.c
+    /// F_I(NICKDELAY, 0, 30, 0)). Set to 0 to disable.
+    pub fn nick_delay(&self) -> u64 {
+        self.feature("NICKDELAY")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(30)
+    }
+
     /// `MAXWATCHS` — per-client cap on the WATCH/MONITOR list size.
     /// Defaults to 128, matching nefarious2's F_I(MAXWATCHS, …, 128).
     /// Invalid values in the config silently fall back to the default.

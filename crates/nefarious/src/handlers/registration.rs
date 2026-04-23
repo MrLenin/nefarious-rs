@@ -28,6 +28,31 @@ pub async fn handle_nick_change(ctx: &HandlerContext, msg: &Message) {
     let old_prefix = ctx.prefix().await;
     let old_nick = ctx.nick().await;
 
+    // NICKDELAY — throttle rapid nick cycling so a bot can't burn
+    // through 100 nicks/second. Case-only renames (same casefold)
+    // and opers bypass the throttle; opers need unfettered control.
+    let nick_delay = ctx.state.config.nick_delay();
+    if nick_delay > 0 && !old_nick.is_empty() && !irc_eq(&old_nick, &new_nick) {
+        let (last_ts, is_oper) = {
+            let c = ctx.client.read().await;
+            (c.nick_ts, c.modes.contains(&'o'))
+        };
+        let now = chrono::Utc::now().timestamp() as u64;
+        let elapsed = now.saturating_sub(last_ts);
+        if !is_oper && elapsed < nick_delay {
+            let remaining = nick_delay - elapsed;
+            ctx.send_numeric(
+                ERR_NICKTOOFAST,
+                vec![
+                    new_nick,
+                    format!("Nick change too fast. Please wait {remaining} seconds."),
+                ],
+            )
+            .await;
+            return;
+        }
+    }
+
     // Atomic reserve — closes the TOCTOU between "nick free?" and "take it".
     // try_reserve_nick is idempotent for the same id, so a case-only change
     // (e.g. Alice → alice) still succeeds.

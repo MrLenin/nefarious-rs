@@ -188,6 +188,8 @@ pub const ERR_NOTONCHANNEL: u16 = 442;
 pub const ERR_USERONCHANNEL: u16 = 443;
 pub const ERR_NOTREGISTERED: u16 = 451;
 pub const ERR_NEEDMOREPARAMS: u16 = 461;
+/// 438: `<nick> :Nick change too fast. Please wait <N> seconds.`
+pub const ERR_NICKTOOFAST: u16 = 438;
 pub const ERR_ALREADYREGISTERED: u16 = 462;
 pub const ERR_PASSWDMISMATCH: u16 = 464;
 pub const ERR_CHANNELISFULL: u16 = 471;
