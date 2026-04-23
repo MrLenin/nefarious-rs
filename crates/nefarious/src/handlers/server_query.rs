@@ -137,7 +137,12 @@ pub async fn handle_info(ctx: &HandlerContext, _msg: &Message) {
 }
 
 /// Handle LINKS — list this server plus every remote server we know.
+/// When `FEAT_HIS_LINKS` is true (default), non-opers only see the
+/// home server so the network topology isn't exposed to strangers.
 pub async fn handle_links(ctx: &HandlerContext, _msg: &Message) {
+    let is_oper = ctx.client.read().await.modes.contains(&'o');
+    let hide = ctx.state.config.his_links() && !is_oper;
+
     // Ourselves first.
     let server_name = ctx.state.server_name.clone();
     ctx.send_numeric(
@@ -152,25 +157,27 @@ pub async fn handle_links(ctx: &HandlerContext, _msg: &Message) {
 
     // Then each remote server with its uplink hop count derived from the
     // server map. We don't fully propagate hop counts yet, so use the
-    // recorded value.
-    let keys: Vec<_> = ctx
-        .state
-        .remote_servers
-        .iter()
-        .map(|e| *e.key())
-        .collect();
-    for key in keys {
-        if let Some(server_arc) = ctx.state.remote_servers.get(&key) {
-            let s = server_arc.read().await;
-            ctx.send_numeric(
-                RPL_LINKS,
-                vec![
-                    s.name.clone(),
-                    server_name.clone(),
-                    format!("{} {}", s.hop_count, s.description),
-                ],
-            )
-            .await;
+    // recorded value. Suppressed for non-opers when HIS_LINKS is set.
+    if !hide {
+        let keys: Vec<_> = ctx
+            .state
+            .remote_servers
+            .iter()
+            .map(|e| *e.key())
+            .collect();
+        for key in keys {
+            if let Some(server_arc) = ctx.state.remote_servers.get(&key) {
+                let s = server_arc.read().await;
+                ctx.send_numeric(
+                    RPL_LINKS,
+                    vec![
+                        s.name.clone(),
+                        server_name.clone(),
+                        format!("{} {}", s.hop_count, s.description),
+                    ],
+                )
+                .await;
+            }
         }
     }
 
@@ -183,6 +190,8 @@ pub async fn handle_links(ctx: &HandlerContext, _msg: &Message) {
 /// would walk the uplink graph; the flat rendering is enough for clients
 /// to see the network topology.
 pub async fn handle_map(ctx: &HandlerContext, _msg: &Message) {
+    let is_oper = ctx.client.read().await.modes.contains(&'o');
+    let hide = ctx.state.config.his_map() && !is_oper;
     let total = ctx.state.total_user_count();
     let us_users = ctx.state.client_count();
     ctx.send_numeric(
@@ -191,26 +200,28 @@ pub async fn handle_map(ctx: &HandlerContext, _msg: &Message) {
     )
     .await;
 
-    let keys: Vec<_> = ctx
-        .state
-        .remote_servers
-        .iter()
-        .map(|e| *e.key())
-        .collect();
-    for key in keys {
-        if let Some(server_arc) = ctx.state.remote_servers.get(&key) {
-            let s = server_arc.read().await;
-            let users = ctx
-                .state
-                .remote_clients
-                .iter()
-                .filter(|e| e.key().server == s.numeric)
-                .count();
-            ctx.send_numeric(
-                RPL_MAP,
-                vec![format!("  |- {} [{} clients]", s.name, users)],
-            )
-            .await;
+    if !hide {
+        let keys: Vec<_> = ctx
+            .state
+            .remote_servers
+            .iter()
+            .map(|e| *e.key())
+            .collect();
+        for key in keys {
+            if let Some(server_arc) = ctx.state.remote_servers.get(&key) {
+                let s = server_arc.read().await;
+                let users = ctx
+                    .state
+                    .remote_clients
+                    .iter()
+                    .filter(|e| e.key().server == s.numeric)
+                    .count();
+                ctx.send_numeric(
+                    RPL_MAP,
+                    vec![format!("  |- {} [{} clients]", s.name, users)],
+                )
+                .await;
+            }
         }
     }
 

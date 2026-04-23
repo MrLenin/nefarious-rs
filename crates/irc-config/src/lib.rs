@@ -162,6 +162,18 @@ impl Config {
         self.feature_bool("HIS_WHOIS_IDLETIME", true)
     }
 
+    /// `HIS_MAP` — hide `/MAP` output (other than the home server)
+    /// from non-opers. Defaults to true.
+    pub fn his_map(&self) -> bool {
+        self.feature_bool("HIS_MAP", true)
+    }
+
+    /// `HIS_LINKS` — same idea as HIS_MAP but for the `/LINKS`
+    /// surface. Defaults to true.
+    pub fn his_links(&self) -> bool {
+        self.feature_bool("HIS_LINKS", true)
+    }
+
     /// `MAXWATCHS` — per-client cap on the WATCH/MONITOR list size.
     /// Defaults to 128, matching nefarious2's F_I(MAXWATCHS, …, 128).
     /// Invalid values in the config silently fall back to the default.
