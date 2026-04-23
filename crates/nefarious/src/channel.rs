@@ -256,6 +256,47 @@ impl Channel {
         true
     }
 
+    /// Content-aware send check. Layered on top of `can_send` and
+    /// applied per-message to filter things like CTCP, NOTICEs, or
+    /// colour codes based on the extended-flag mode set. Returns
+    /// `Err(reason)` when the message should be refused with an
+    /// explanatory 404, `Ok(())` otherwise. Ops bypass all
+    /// content-level filters, matching nefarious2 channel.c's
+    /// chanop-exempt policy so moderators can always speak.
+    pub fn check_content(&self, id: &ClientId, is_notice: bool, text: &str) -> Result<(), &'static str> {
+        if self.is_op(id) {
+            return Ok(());
+        }
+        // +N — no channel NOTICEs.
+        if is_notice && self.modes.extended_flags.contains(&'N') {
+            return Err("Notices are not permitted on this channel (+N)");
+        }
+        // +C — no CTCP. CTCP frames start with \x01; ACTION
+        // (/me …) is allowed through since channels-without-actions
+        // are unusable on modern networks.
+        if self.modes.extended_flags.contains(&'C') {
+            let bytes = text.as_bytes();
+            if bytes.first() == Some(&0x01) {
+                // ACTION check: body starts with "\x01ACTION"
+                let is_action = text.as_bytes().len() >= 8
+                    && text.as_bytes()[..7].eq_ignore_ascii_case(b"\x01ACTION");
+                if !is_action {
+                    return Err("CTCPs are not permitted on this channel (+C)");
+                }
+            }
+        }
+        // +c — no colour/formatting escape codes. mIRC-style \x03
+        // (colour), \x02 (bold), \x1f (underline), \x1d (italic),
+        // \x16 (reverse), \x0f (reset) are all stripped. We reject
+        // rather than strip so the sender knows.
+        if self.modes.extended_flags.contains(&'c') {
+            if text.bytes().any(|b| matches!(b, 0x02 | 0x03 | 0x04 | 0x0f | 0x16 | 0x1d | 0x1f)) {
+                return Err("Colour/formatting codes are not permitted on this channel (+c)");
+            }
+        }
+        Ok(())
+    }
+
     /// Check if a user matches any ban mask.
     pub fn is_banned(&self, prefix: &str) -> bool {
         self.bans

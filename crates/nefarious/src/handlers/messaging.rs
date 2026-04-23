@@ -281,6 +281,20 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
             return;
         }
 
+        // Content-aware gates (+C no-CTCP, +N no-notice, +c no-colour).
+        // Ops bypass per channel.rs::check_content. Refusal emits 404
+        // for PRIVMSG; NOTICE drops silently per RFC.
+        if let Err(reason) = chan.check_content(&client_id, cmd == Command::Notice, text) {
+            if cmd == Command::Privmsg {
+                ctx.send_numeric(
+                    ERR_CANNOTSENDTOCHAN,
+                    vec![target.clone(), reason.into()],
+                )
+                .await;
+            }
+            return;
+        }
+
         // Send to every other local channel member first.
         for (&member_id, _) in &chan.members {
             if member_id == client_id {
