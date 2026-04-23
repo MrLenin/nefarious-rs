@@ -289,6 +289,14 @@ impl Config {
         self.feature_bool("CONNEXIT_NOTICES", false)
     }
 
+    /// `SILENCE_CHANMSGS` — when true, SILENCE also filters channel
+    /// messages (not just private ones) and the server bursts each
+    /// user's silence list to peers so remote filtering can happen.
+    /// Defaults to false.
+    pub fn silence_chanmsgs(&self) -> bool {
+        self.feature_bool("SILENCE_CHANMSGS", false)
+    }
+
     /// `NICKDELAY` — minimum seconds between local nick changes
     /// from a single client. Defaults to 30 (matches ircd_features.c
     /// F_I(NICKDELAY, 0, 30, 0)). Set to 0 to disable.

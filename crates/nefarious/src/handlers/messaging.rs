@@ -296,12 +296,20 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
         }
 
         // Send to every other local channel member first.
+        // If SILENCE_CHANMSGS is enabled, each recipient's silence
+        // list filters our sender out — same rule as private
+        // messages, just applied per-recipient here since channel
+        // fan-out hits many users with different filter lists.
+        let silence_on_chanmsgs = ctx.state.config.load().silence_chanmsgs();
         for (&member_id, _) in &chan.members {
             if member_id == client_id {
                 continue;
             }
             if let Some(member) = ctx.state.clients.get(&member_id) {
                 let m = member.read().await;
+                if silence_on_chanmsgs && m.is_silenced(&prefix) {
+                    continue;
+                }
                 m.send_from(out_msg.clone(), &src);
             }
         }

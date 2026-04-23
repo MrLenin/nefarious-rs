@@ -132,6 +132,33 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
         if let Some(ref away) = client.away_message {
             link.send_line(format!("{client_numeric} A :{away}")).await;
         }
+
+        // 1e. If SILENCE_CHANMSGS is enabled, burst each local
+        // user's silence list so remote peers can drop matching
+        // channel messages at their end (otherwise we'd receive
+        // the message and filter it locally, wasting link
+        // bandwidth). Matches nefarious2 s_serv.c:331-360.
+        // Each line carries up to ~400 bytes of comma-joined
+        // entries (same chunking C uses) to stay under the 512
+        // wire limit with room for the prefix and tags.
+        if state.config.load().silence_chanmsgs() && !client.silence.is_empty() {
+            let mut buf = String::new();
+            for entry in &client.silence {
+                let sigil = if entry.exception { "~" } else { "" };
+                let piece = format!("+{sigil}{mask}", mask = entry.mask);
+                if !buf.is_empty() && buf.len() + 1 + piece.len() > 400 {
+                    link.send_line(format!("{client_numeric} U * {buf}")).await;
+                    buf.clear();
+                }
+                if !buf.is_empty() {
+                    buf.push(',');
+                }
+                buf.push_str(&piece);
+            }
+            if !buf.is_empty() {
+                link.send_line(format!("{client_numeric} U * {buf}")).await;
+            }
+        }
     }
 
     info!(
