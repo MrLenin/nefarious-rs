@@ -688,11 +688,12 @@ impl ServerState {
     }
 
     /// Sweep the four ban stores for expired entries and drop them.
-    /// An entry is purge-eligible when its `expires_at` is in the
-    /// past AND any deactivation grace has elapsed. Meant to run
-    /// from a periodic background task — safe to call any time;
-    /// holds the store's shard locks only as long as it takes to
-    /// snapshot keys and inspect each value.
+    /// An entry is purge-eligible when its `expires_at + lifetime`
+    /// is in the past — the lifetime grace keeps a deactivated row
+    /// around long enough that a lagging peer's stale rebroadcast
+    /// can be recognised and rejected rather than silently
+    /// resurrecting the ban. Meant to run from a periodic
+    /// background task; safe to call any time.
     pub async fn sweep_expired_bans(&self) -> (usize, usize, usize, usize) {
         let now = chrono::Utc::now();
         let mut g = 0usize;
@@ -708,7 +709,7 @@ impl ServerState {
             let drop_it = match self.glines.get(&key) {
                 Some(e) => {
                     let gl = e.read().await;
-                    gl.expires_at.map(|t| t <= now).unwrap_or(false)
+                    purge_after(gl.expires_at, gl.lifetime, now)
                 }
                 None => false,
             };
@@ -723,7 +724,7 @@ impl ServerState {
             let drop_it = match self.shuns.get(&key) {
                 Some(e) => {
                     let sh = e.read().await;
-                    sh.expires_at.map(|t| t <= now).unwrap_or(false)
+                    purge_after(sh.expires_at, sh.lifetime, now)
                 }
                 None => false,
             };
@@ -738,7 +739,7 @@ impl ServerState {
             let drop_it = match self.zlines.get(&key) {
                 Some(e) => {
                     let zl = e.read().await;
-                    zl.expires_at.map(|t| t <= now).unwrap_or(false)
+                    purge_after(zl.expires_at, zl.lifetime, now)
                 }
                 None => false,
             };
@@ -753,6 +754,9 @@ impl ServerState {
             let drop_it = match self.jupes.get(&key) {
                 Some(e) => {
                     let ju = e.read().await;
+                    // JUPE doesn't carry a lifetime field — the
+                    // simpler nefarious2 shape — so we purge the
+                    // moment expires_at is past.
                     ju.expires_at.map(|t| t <= now).unwrap_or(false)
                 }
                 None => false,
@@ -1283,6 +1287,23 @@ impl ServerState {
 /// Split `nick!user@host` into (`user`, `host`) borrowed slices.
 /// Returns `None` when either delimiter is missing. Used by the
 /// WATCH numeric emitters which want the user and host separately.
+/// Ban-sweep eligibility check: is an entry past its keep-around
+/// grace? `expires_at = None` means no expiry — keep forever.
+/// `lifetime` adds seconds after expiry during which the entry
+/// stays in the store so late peer rebroadcasts can be recognised
+/// and dropped; `None` treats that as zero extra grace.
+fn purge_after(
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    lifetime: Option<u64>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let Some(exp) = expires_at else {
+        return false;
+    };
+    let grace = chrono::Duration::seconds(lifetime.unwrap_or(0) as i64);
+    (exp + grace) <= now
+}
+
 fn split_user_host(prefix: &str) -> Option<(&str, &str)> {
     let bang = prefix.find('!')?;
     let at = prefix[bang + 1..].find('@')?;

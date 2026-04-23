@@ -41,9 +41,13 @@ pub struct Gline {
     /// as a Lamport clock to decide which of two conflicting updates
     /// wins; we preserve it across relays without modification.
     pub lastmod: u64,
-    /// Optional expiry grace period after the mask technically
-    /// expires but should still be propagated for sync purposes.
-    /// Preserved but unused in enforcement yet.
+    /// Extra seconds beyond `expires_at` during which the deactivated
+    /// entry stays in the store. Prevents a stale broadcast from a
+    /// lagging peer from resurrecting an expired gline: we keep the
+    /// entry around (marked inactive) until lifetime elapses, which
+    /// means any incoming re-activation with the same or older
+    /// lastmod can be recognised and dropped. Consulted by the
+    /// background sweeper at purge time.
     pub lifetime: Option<u64>,
     /// Whether the gline is currently enforcing (active). Peers can
     /// deactivate without removing so later reactivation preserves
