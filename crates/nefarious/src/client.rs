@@ -213,26 +213,77 @@ impl Client {
 
     /// Return the host string to render for this client when the
     /// audience isn't themselves or an oper. Mirrors the C hiding
-    /// chain in nefarious2 s_user.c `hide_hostmask`:
+    /// chain in nefarious2 s_user.c `hide_hostmask`. The style knob
+    /// is FEAT_HOST_HIDING_STYLE:
     ///
-    /// - `+x` + account + configured `hidden_host_suffix`
-    ///   → `<account>.<suffix>`
-    /// - `+x` without the above (e.g. no account or no config)
-    ///   → real host as-is (proper IP-hex cloak is a follow-up)
-    /// - no `+x` → real host
+    /// - Style 0  → never cloak (host as-is)
+    /// - Style 1  → `<account>.<suffix>` when logged in with a
+    ///              `hidden_host_suffix`; otherwise real host.
+    /// - Style 2  → crypto cloak (hidehost_ipv4 / _ipv6 for IP
+    ///              hosts; hidehost_normalhost for resolved names).
+    /// - Style 3  → style 1 when logged in, style 2 otherwise.
     ///
     /// Callers that want the real host unconditionally (self-WHOIS,
     /// oper-vision, IAuth logs) should read `self.host` directly.
     pub fn visible_host(&self, config: &irc_config::Config) -> String {
-        if self.modes.contains(&'x') {
+        if !self.modes.contains(&'x') {
+            return self.host.clone();
+        }
+
+        let style = config.host_hiding_style();
+        let is_account = self.account.is_some();
+
+        // Account-based cloak path.
+        let account_cloak = || -> Option<String> {
             if let (Some(account), Some(suffix)) = (
                 self.account.as_ref(),
                 config.general.hidden_host_suffix.as_ref(),
             ) {
-                return format!("{account}.{suffix}");
+                Some(format!("{account}.{suffix}"))
+            } else {
+                None
             }
+        };
+
+        // Crypto cloak path.
+        let crypto_cloak = || -> Option<String> {
+            let keys = config.host_hiding_keys();
+            let prefix = config.host_hiding_prefix();
+            let components = config.host_hiding_components() as usize;
+
+            // If the host looks like a numeric IP, cloak by IP.
+            // Otherwise cloak the hostname.
+            match self.host.parse::<std::net::IpAddr>() {
+                Ok(std::net::IpAddr::V4(v4)) => {
+                    Some(crate::cloaking::hidehost_ipv4(v4.octets(), keys))
+                }
+                Ok(std::net::IpAddr::V6(v6)) => {
+                    Some(crate::cloaking::hidehost_ipv6(v6.segments(), keys))
+                }
+                Err(_) => Some(crate::cloaking::hidehost_normalhost(
+                    &self.host,
+                    components.max(1),
+                    keys,
+                    prefix,
+                )),
+            }
+        };
+
+        match style {
+            0 => self.host.clone(),
+            1 => account_cloak().unwrap_or_else(|| self.host.clone()),
+            2 => crypto_cloak().unwrap_or_else(|| self.host.clone()),
+            3 => {
+                if is_account {
+                    account_cloak()
+                        .or_else(crypto_cloak)
+                        .unwrap_or_else(|| self.host.clone())
+                } else {
+                    crypto_cloak().unwrap_or_else(|| self.host.clone())
+                }
+            }
+            _ => self.host.clone(),
         }
-        self.host.clone()
     }
 
     /// Send a message to this client, bypassing the labeled-response

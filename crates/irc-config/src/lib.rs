@@ -243,6 +243,45 @@ impl Config {
         self.feature("MPATH")
     }
 
+    /// `HOST_HIDING_STYLE` — which cloak strategy applies on +x.
+    /// 0 = no cloak, 1 = account-based only, 2 = crypto cloak
+    /// only, 3 = both (account wins when logged in, crypto
+    /// otherwise). Default 1 (matches ircd_features.c).
+    pub fn host_hiding_style(&self) -> u8 {
+        self.feature("HOST_HIDING_STYLE")
+            .and_then(|v| v.parse::<u8>().ok())
+            .unwrap_or(1)
+    }
+
+    /// `HOST_HIDING_KEY1/2/3` — the three salts used by the
+    /// crypto cloak. All three must match across every server on
+    /// the network, otherwise cloaked hosts desync and bans miss.
+    /// Returns `("","","")` when unset; with empty keys the cloak
+    /// still produces a deterministic output, just a less-salted
+    /// one — operators are expected to set these.
+    pub fn host_hiding_keys(&self) -> [&str; 3] {
+        [
+            self.feature("HOST_HIDING_KEY1").unwrap_or(""),
+            self.feature("HOST_HIDING_KEY2").unwrap_or(""),
+            self.feature("HOST_HIDING_KEY3").unwrap_or(""),
+        ]
+    }
+
+    /// `HOST_HIDING_PREFIX` — leading token on a cloaked resolved
+    /// host (`<prefix>-<alpha>.<rem>`). Defaults to "nefarious".
+    pub fn host_hiding_prefix(&self) -> &str {
+        self.feature("HOST_HIDING_PREFIX").unwrap_or("nefarious")
+    }
+
+    /// `HOST_HIDING_COMPONENTS` — how many leading labels to drop
+    /// when cloaking a resolved host. 1 keeps the TLD, 2 keeps
+    /// TLD+second-level, etc. Default 1.
+    pub fn host_hiding_components(&self) -> u8 {
+        self.feature("HOST_HIDING_COMPONENTS")
+            .and_then(|v| v.parse::<u8>().ok())
+            .unwrap_or(1)
+    }
+
     /// `CONNEXIT_NOTICES` — when true, send server notices for each
     /// connect/exit/nickchg to opers with the `+s` umode. Defaults
     /// to false in nefarious2 (operators opt in explicitly).

@@ -2,6 +2,7 @@ mod accounts;
 mod capabilities;
 mod channel;
 mod client;
+mod cloaking;
 mod connection;
 mod dns;
 mod gline;
