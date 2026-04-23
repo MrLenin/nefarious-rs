@@ -28,12 +28,38 @@ pub async fn handle_join(ctx: &HandlerContext, msg: &Message) {
     let client_id = ctx.client_id().await;
     let prefix = ctx.prefix().await;
 
+    // MAXCHANNELS cap — per-user ceiling on joined channels.
+    // Opers bypass so moderators can monitor the whole network.
+    // Enforced before the JoinCheck inner loop so the numeric
+    // fires once per attempt rather than per already-reached cap.
+    let max_channels = ctx.state.config.max_channels_per_user() as usize;
+    let (current_count, is_oper) = {
+        let c = ctx.client.read().await;
+        (c.channels.len(), c.modes.contains(&'o'))
+    };
+
+    let mut joined_this_call = 0usize;
     for (i, chan_name) in channels.iter().enumerate() {
         let chan_name = chan_name.trim();
         if !chan_name.starts_with('#') && !chan_name.starts_with('&') {
             ctx.send_numeric(
                 ERR_NOSUCHCHANNEL,
                 vec![chan_name.to_string(), "No such channel".into()],
+            )
+            .await;
+            continue;
+        }
+
+        // Cap check: current membership + any joins we've accepted
+        // earlier in this same JOIN call. Re-computing from Client
+        // state mid-loop would miss joins that haven't committed yet.
+        if !is_oper && current_count + joined_this_call >= max_channels {
+            ctx.send_numeric(
+                ERR_TOOMANYCHANNELS,
+                vec![
+                    chan_name.to_string(),
+                    "You have joined too many channels".into(),
+                ],
             )
             .await;
             continue;
@@ -140,6 +166,7 @@ pub async fn handle_join(ctx: &HandlerContext, msg: &Message) {
             let mut client = ctx.client.write().await;
             client.channels.insert(chan_name.to_string());
         }
+        joined_this_call += 1;
 
         // Notify all channel members (including the joiner).
         //
