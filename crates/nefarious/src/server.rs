@@ -161,11 +161,59 @@ pub async fn run(
         shutdown.notify_waiters();
     });
 
-    // Wait for all listeners
+    // Wait for all listeners to close (signal handler above flips
+    // state.shutdown, accept_loop exits on next iteration).
     for handle in handles {
         let _ = handle.await;
     }
-    info!("all listeners closed — exiting");
+    info!("all listeners closed — starting active drain");
+
+    // Active drain. Broadcast ERROR to every local client so they
+    // see a clean reason instead of an abrupt RST, and send SQUIT
+    // to each S2S peer so the rest of the network learns we're
+    // going away rather than timing us out on PING. We don't wait
+    // for the writer tasks to fully flush — a small grace sleep
+    // gives them a chance while honouring the operator's 'stop'
+    // intent, and anything still in flight dies with the process.
+    shutdown_drain(&state).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    info!("drain complete — exiting");
+}
+
+/// Notify every local session that we're going down. Best-effort —
+/// sends are non-blocking and any that don't fit the client's
+/// outbound queue are dropped. Intended to run once, from `run()`
+/// after listeners close.
+async fn shutdown_drain(state: &Arc<ServerState>) {
+    let reason = "Server shutting down";
+
+    // ERROR per client — they render it as "*** ERROR: <reason>".
+    // We also tag with QUIT so channel-mates on other servers see
+    // the expected departure sequence once S2S routing forwards it.
+    for entry in state.clients.iter() {
+        let c = entry.value().read().await;
+        c.send_raw(irc_proto::Message::with_source(
+            &state.server_name,
+            irc_proto::Command::Error,
+            vec![format!("Closing Link: {} [{reason}]", c.nick)],
+        ));
+        // Drive a QUIT broadcast through the existing disconnect
+        // signal so handle_connection's teardown path fires QUIT
+        // fan-out and releases state cleanly.
+        c.request_disconnect(reason);
+    }
+
+    // SQUIT to each peer. Wire: `<our_numeric> SQ <our_name> 0 :<reason>`.
+    // Mirrors m_squit.c's self-originated form used on /RESTART or
+    // fatal error in C nefarious2.
+    let our_numeric = state.numeric.to_string();
+    let line = format!(
+        "{our_numeric} SQ {name} 0 :{reason}",
+        name = state.server_name
+    );
+    for entry in state.links.iter() {
+        entry.value().send_line(line.clone()).await;
+    }
 }
 
 /// Accept loop for a single listener.
