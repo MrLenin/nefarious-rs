@@ -178,6 +178,12 @@ pub struct ServerState {
     /// `None` when the system DNS configuration could not be parsed at
     /// startup (we log a warning and fall back to IP-as-host).
     pub dns_resolver: Option<Arc<TokioResolver>>,
+    /// DNSBL per-IP result cache + global/per-zone counters. Always
+    /// present; cheap when no DNSBL blocks are configured. The cache
+    /// sweeper task gets spawned on first use of the resolver in
+    /// `connection.rs` rather than at construction so unit tests
+    /// (which never run a tokio runtime) don't need to plumb one.
+    pub dnsbl_cache: Arc<crate::dnsbl::DnsblCache>,
     /// MaxMindDB reader for GeoIP lookups at connect. Wrapped in
     /// RwLock so `/REHASH` can swap in a freshly-opened reader
     /// when the operator points MMDB_FILE at a new file. `None`
@@ -329,6 +335,7 @@ impl ServerState {
             ]),
             motd_path: std::sync::RwLock::new(None),
             dns_resolver,
+            dnsbl_cache: Arc::new(crate::dnsbl::DnsblCache::new()),
             geoip: std::sync::RwLock::new(None),
             gitsync_tofu: std::sync::RwLock::new(None),
             ssl_acceptor: ArcSwap::from_pointee(None),

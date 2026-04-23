@@ -188,6 +188,108 @@ pub async fn handle_stats(ctx: &HandlerContext, msg: &Message) {
                 .await;
             }
         }
+        'd' | 'D' => {
+            // DNSBL stats: configured zones, cache size, hit/miss
+            // counters, then a per-zone breakdown of queries/hits/
+            // blocks. Mirrors nefarious2 dnsbl.c::dnsbl_report_stats.
+            // Free-form lines via RPL_STATSDEBUG (249) to keep the
+            // wire shape simple and oper-readable.
+            use std::sync::atomic::Ordering;
+            let cache = &ctx.state.dnsbl_cache;
+            let cfg = ctx.state.config();
+            ctx.send_numeric(
+                RPL_STATSDEBUG,
+                vec!["D".into(), "DNSBL Statistics".into()],
+            )
+            .await;
+            ctx.send_numeric(
+                RPL_STATSDEBUG,
+                vec![
+                    "D".into(),
+                    format!("Configured zones: {}", cfg.dnsbl.len()),
+                ],
+            )
+            .await;
+            ctx.send_numeric(
+                RPL_STATSDEBUG,
+                vec![
+                    "D".into(),
+                    format!("Cache: {} entries", cache.cache_size()),
+                ],
+            )
+            .await;
+            ctx.send_numeric(
+                RPL_STATSDEBUG,
+                vec![
+                    "D".into(),
+                    format!(
+                        "Cache hits: {}, misses: {}",
+                        cache.cache_hits.load(Ordering::Relaxed),
+                        cache.cache_misses.load(Ordering::Relaxed),
+                    ),
+                ],
+            )
+            .await;
+            ctx.send_numeric(
+                RPL_STATSDEBUG,
+                vec![
+                    "D".into(),
+                    format!(
+                        "Total lookups: {}",
+                        cache.total_lookups.load(Ordering::Relaxed)
+                    ),
+                ],
+            )
+            .await;
+            ctx.send_numeric(
+                RPL_STATSDEBUG,
+                vec![
+                    "D".into(),
+                    format!(
+                        "Blocks: {}, marks: {}, whitelists: {}",
+                        cache.total_blocks.load(Ordering::Relaxed),
+                        cache.total_marks.load(Ordering::Relaxed),
+                        cache.total_whitelists.load(Ordering::Relaxed),
+                    ),
+                ],
+            )
+            .await;
+            // Per-zone: snapshot the zone-stats map so we don't hold
+            // the lock across awaits. We list every configured zone
+            // (so a zone with zero queries still appears) plus its
+            // host filter for context.
+            let snapshot = cache
+                .zones
+                .read()
+                .ok()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            for block in &cfg.dnsbl {
+                let stats = snapshot.get(&block.name);
+                let (q, h, b) = stats
+                    .map(|s| {
+                        (
+                            s.queries.load(Ordering::Relaxed),
+                            s.hits.load(Ordering::Relaxed),
+                            s.blocks.load(Ordering::Relaxed),
+                        )
+                    })
+                    .unwrap_or((0, 0, 0));
+                let host = block.host.as_deref().unwrap_or("*");
+                ctx.send_numeric(
+                    RPL_STATSDEBUG,
+                    vec![
+                        "D".into(),
+                        format!(
+                            "{name} host={host} action={action:?}: {q} queries, {h} hits, {b} blocks",
+                            name = block.name,
+                            action = block.action,
+                        ),
+                    ],
+                )
+                .await;
+            }
+        }
         _ => {} // unknown letters silently produce just RPL_ENDOFSTATS
     }
 

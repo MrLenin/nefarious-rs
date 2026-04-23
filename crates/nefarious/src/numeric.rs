@@ -24,6 +24,10 @@ pub const RPL_ENDOFSTATS: u16 = 219;
 pub const RPL_STATSSHUN: u16 = 542;
 /// 546: one line per ZLINE entry; mask-only rather than user@host.
 pub const RPL_STATSZLINE: u16 = 546;
+/// 249: free-form `STATS X` debug output. Used for /STATS D
+/// (DNSBL counters + per-zone breakdown), matching nefarious2's
+/// dnsbl_report_stats which emits via SND_EXPLICIT|RPL_STATSDEBUG.
+pub const RPL_STATSDEBUG: u16 = 249;
 
 // Admin
 pub const RPL_ADMINME: u16 = 256;

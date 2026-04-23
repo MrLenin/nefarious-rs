@@ -22,33 +22,55 @@ pub struct Config {
 }
 
 /// A DNSBL (DNS-based blackhole list) zone to query at connect
-/// time. Mirrors nefarious2's DnsBL{} config block and the
+/// time. Mirrors nefarious2's `DNSBL {}` config block and the
 /// DNSBL_ACT_* enum from include/dnsbl.h.
+///
+/// In the C grammar the canonical keys are `name`, `host`,
+/// `bitmask`, `action`, `mark`, `score`. The parser accepts
+/// `domain`/`reply`/`reason` as legacy aliases for backwards
+/// compatibility with our older single-zone schema.
 #[derive(Debug, Clone)]
 pub struct DnsBlConfig {
     /// Zone to query, e.g. `zen.spamhaus.org`. The client IP is
     /// reversed and prepended per RFC 5782 — `1.2.3.4` becomes a
-    /// query for `4.3.2.1.zen.spamhaus.org`.
-    pub domain: String,
-    /// Optional reply-octet match: if set, only trigger when the
-    /// returned A-record's last octet has any bit of this mask
-    /// set. Lets one zone carry multiple list types (spamhaus
-    /// uses 127.0.0.2 for SBL, .3 for CSS, .4-.7 for XBL, .10 for
-    /// PBL, .11 for PBL2). `None` accepts any resolution.
-    pub reply_mask: Option<u8>,
+    /// query for `4.3.2.1.zen.spamhaus.org`. Sourced from the
+    /// `name` (or legacy `domain`) key.
+    pub name: String,
+    /// Raw `host` index string as written in the conf, retained for
+    /// `/STATS D` display. The compiled match value is in `bitmask`.
+    pub host: Option<String>,
+    /// Bitmask-of-indexes match for the returned A-record's last
+    /// octet. The C parser interprets `host = "2,3,4,5,6,7,9"` as
+    /// `(1<<2)|(1<<3)|...|(1<<9)`; a reply of `127.0.0.4` matches
+    /// when `(1u32 << 4) & bitmask != 0`. `0xFFFFFFFF` means "any
+    /// reply matches" — used when neither `host` nor `bitmask` was
+    /// specified, mirroring dnsbl.c's default.
+    pub bitmask: u32,
     /// What to do when the client's IP is listed.
     pub action: DnsBlAction,
-    /// Reason text shown to the client on block, or stored as the
-    /// mark value on `action = Mark`. Free-form.
-    pub reason: String,
+    /// Oper-visible mark / refusal reason. Sourced from `mark` (or
+    /// legacy `reason`). Shown to the client on `Block`/`BlockAll`
+    /// and to opers via `/CHECK` / `/WHOIS` on `Mark`/`BlockAnon`.
+    pub mark: String,
+    /// Reputation score the C version aggregates per client when
+    /// multiple zones list the same IP. Stored verbatim; the
+    /// scoring policy is not yet wired in nefarious-rs.
+    pub score: i32,
 }
 
 /// Action to take when a DNSBL reports a match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DnsBlAction {
-    /// Refuse the connection outright.
+    /// Refuse the connection outright (anon and authed alike).
+    /// Maps to nefarious2 DNSBL_ACT_BLOCK.
     Block,
-    /// Refuse only non-authenticated clients; authed users bypass.
+    /// Refuse every client unconditionally — even SASL-authed
+    /// users are kicked. Stronger than `Block` only insofar as
+    /// future per-block exemptions wouldn't apply. Maps to
+    /// DNSBL_ACT_BLOCK_ALL.
+    BlockAll,
+    /// Refuse only non-authenticated clients; authed users bypass
+    /// the block but still get tagged with the mark for opers.
     BlockAnon,
     /// Tag the client (stored on Client state) but let them in.
     /// Opers can see the mark via /WHOIS / /CHECK.
@@ -286,6 +308,25 @@ impl Config {
     /// When unset, GeoIP columns read "--" / "Unknown".
     pub fn mmdb_file(&self) -> Option<&str> {
         self.feature("MMDB_FILE")
+    }
+
+    /// `DNSBL_TIMEOUT` — per-zone DNS query timeout in seconds. The
+    /// hard cap on connect-path DNSBL latency is roughly this value,
+    /// since all configured zones run concurrently. Defaults to 5s
+    /// matching nefarious2 ircd_features.c.
+    pub fn dnsbl_timeout(&self) -> u64 {
+        self.feature("DNSBL_TIMEOUT")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(5)
+    }
+
+    /// `DNSBL_CACHETIME` — how long (seconds) a per-IP DNSBL result
+    /// is cached so subsequent connects from the same address skip
+    /// the DNS round trip. Defaults to 6h, matching nefarious2.
+    pub fn dnsbl_cachetime(&self) -> u64 {
+        self.feature("DNSBL_CACHETIME")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(21600)
     }
 
     /// `GIT_CONFIG_PATH` — working-tree path of a git checkout
@@ -656,39 +697,72 @@ impl Config {
                     });
                 }
 
-                "DnsBL" => {
-                    let domain = match block.get_str("domain") {
+                "DnsBL" | "DNSBL" => {
+                    // Accept the canonical nefarious2 keys (`name`,
+                    // `host`, `bitmask`, `mark`) and our older
+                    // (`domain`, `reply`, `reason`) aliases. The
+                    // testnet ircd.conf uses the canonical form;
+                    // existing nefarious-rs configs use the aliases.
+                    let name = match block.get_str("name").or_else(|| block.get_str("domain")) {
                         Some(d) => d.to_string(),
                         None => {
-                            tracing::warn!("DnsBL block missing domain; ignoring");
+                            tracing::warn!("DNSBL block missing name; ignoring");
                             continue;
                         }
                     };
-                    let action_str = block.get_str("action").unwrap_or("block");
+                    let action_str = block.get_str("action").unwrap_or("mark");
                     let action = match action_str.to_ascii_lowercase().as_str() {
                         "block" => DnsBlAction::Block,
+                        "block_all" | "blockall" => DnsBlAction::BlockAll,
                         "block_anon" | "blockanon" => DnsBlAction::BlockAnon,
                         "mark" => DnsBlAction::Mark,
                         "whitelist" => DnsBlAction::Whitelist,
                         other => {
                             tracing::warn!(
-                                "DnsBL {domain}: unknown action '{other}'; using block"
+                                "DNSBL {name}: unknown action '{other}'; defaulting to mark"
                             );
-                            DnsBlAction::Block
+                            DnsBlAction::Mark
                         }
                     };
-                    let reply_mask = block
-                        .get_str("reply")
-                        .and_then(|v| u8::from_str_radix(v.trim_start_matches("0x"), 16).ok()
-                            .or_else(|| v.parse::<u8>().ok()));
+                    // `host` is a comma-separated list of accepted
+                    // last-octet values (`"2,3,4,5,6,7,9"`); each
+                    // becomes a set bit in the index bitmask.
+                    // `bitmask` is the explicit form (a single
+                    // integer literal). When neither is present we
+                    // match any reply, matching dnsbl.c's
+                    // `0xFFFFFFFF` default.
+                    let host_str = block.get_str("host").map(|s| s.to_string());
+                    let host_mask = host_str.as_deref().map(parse_dnsbl_index);
+                    let explicit_bitmask = block
+                        .get_str("bitmask")
+                        .or_else(|| block.get_str("reply"))
+                        .and_then(|v| {
+                            let s = v.trim();
+                            if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                                u32::from_str_radix(hex, 16).ok()
+                            } else {
+                                s.parse::<u32>().ok()
+                            }
+                        });
+                    let bitmask = host_mask
+                        .or(explicit_bitmask)
+                        .unwrap_or(0xFFFF_FFFF);
+                    let mark = block
+                        .get_str("mark")
+                        .or_else(|| block.get_str("reason"))
+                        .unwrap_or("Your IP is listed on a DNSBL")
+                        .to_string();
+                    let score = block
+                        .get_i64("score")
+                        .and_then(|n| i32::try_from(n).ok())
+                        .unwrap_or(0);
                     dnsbl.push(DnsBlConfig {
-                        domain,
-                        reply_mask,
+                        name,
+                        host: host_str,
+                        bitmask,
                         action,
-                        reason: block
-                            .get_str("reason")
-                            .unwrap_or("Your IP is listed on a DNSBL")
-                            .to_string(),
+                        mark,
+                        score,
                     });
                 }
 
@@ -777,6 +851,27 @@ impl Config {
     pub fn client_ports(&self) -> impl Iterator<Item = &PortConfig> {
         self.ports.iter().filter(|p| !p.server)
     }
+}
+
+/// Parse a comma-separated DNSBL index list (e.g. `"2,3,5,6"`)
+/// into a u32 bitmask. Each numeric token sets the bit at that
+/// index; tokens > 31 are silently dropped. An empty / all-junk
+/// input yields `0xFFFFFFFF` ("match any reply") to mirror the C
+/// behaviour in dnsbl.c::dnsbl_parse_index.
+fn parse_dnsbl_index(s: &str) -> u32 {
+    let mut mask: u32 = 0;
+    for tok in s.split([',', ' ', '\t']) {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        if let Ok(v) = tok.parse::<u32>()
+            && v < 32
+        {
+            mask |= 1u32 << v;
+        }
+    }
+    if mask == 0 { 0xFFFF_FFFF } else { mask }
 }
 
 /// Depth-first walk over top-level items, flattening Block entries

@@ -278,26 +278,37 @@ pub async fn handle_connection<S>(
     // DNSBL check. Happens after all the ban gates so we don't burn
     // DNS queries on clients we'd refuse anyway. Fails open: if
     // every zone times out or resolves nothing, the client goes
-    // through unmarked. A Block / BlockAnon hit refuses the
-    // connection; Mark hits tag the Client for oper visibility.
-    let dnsbl_blocks = state.config.load().dnsbl.clone();
+    // through unmarked. Block / BlockAll / BlockAnon (anon only)
+    // refuse the connection; Mark and BlockAnon-when-authed tag
+    // the Client for oper visibility. Whitelist hits suppress all
+    // blocks/marks for this IP.
+    let cfg = state.config();
+    let dnsbl_blocks = cfg.dnsbl.clone();
     if !dnsbl_blocks.is_empty() {
         if let Some(resolver) = state.dns_resolver.as_ref() {
             let ip = client.read().await.addr.ip();
             let is_account = client.read().await.account.is_some();
+            let params = crate::dnsbl::CheckParams {
+                timeout: std::time::Duration::from_secs(cfg.dnsbl_timeout()),
+                cache_ttl: std::time::Duration::from_secs(cfg.dnsbl_cachetime()),
+            };
             let outcome = crate::dnsbl::check_all(
                 Arc::clone(resolver),
+                Arc::clone(&state.dnsbl_cache),
                 ip,
                 dnsbl_blocks,
                 is_account,
+                params,
             )
             .await;
-            if let Some(crate::dnsbl::DnsBlOutcome::Hit { action, reason, zone }) = outcome {
+            if let Some(crate::dnsbl::DnsBlOutcome::Hit { action, mark, zone }) = outcome {
                 use irc_config::DnsBlAction;
                 match action {
-                    DnsBlAction::Block | DnsBlAction::BlockAnon => {
+                    DnsBlAction::Block
+                    | DnsBlAction::BlockAll
+                    | DnsBlAction::BlockAnon => {
                         info!(
-                            "refusing registration of {nick} ({addr}): DNSBL {zone} ({reason})"
+                            "refusing registration of {nick} ({addr}): DNSBL {zone} ({mark})"
                         );
                         let (id, nick_for_release) = {
                             let c = client.read().await;
@@ -307,7 +318,7 @@ pub async fn handle_connection<S>(
                         c.send_raw(irc_proto::Message::with_source(
                             &state.server_name,
                             irc_proto::Command::Error,
-                            vec![format!("Closing Link: {nick} [DNSBL: {reason}]")],
+                            vec![format!("Closing Link: {nick} [DNSBL: {mark}]")],
                         ));
                         drop(c);
                         if !nick_for_release.is_empty() {
@@ -319,7 +330,7 @@ pub async fn handle_connection<S>(
                         return;
                     }
                     DnsBlAction::Mark => {
-                        client.write().await.dnsbl_mark = Some(format!("{zone}: {reason}"));
+                        client.write().await.dnsbl_mark = Some(format!("{zone}: {mark}"));
                     }
                     DnsBlAction::Whitelist => {
                         // Unreachable: check_all collapses

@@ -214,7 +214,7 @@ Supported block types:
 | `Connect` | S2S link blocks (name, host, password, port, class, ssl, autoconnect, hub) |
 | `Kill` | Local K-lines — host glob or IP CIDR connect bans |
 | `WebIRC` | Trusted gateway passthrough (password, host) |
-| `DnsBL` | DNSBL zones (domain, reply\_mask, action: block/block\_anon/mark/whitelist, reason) |
+| `DNSBL` | DNSBL zones (`name`, `host` index list, `bitmask`, `action`: block/block\_all/block\_anon/mark/whitelist, `mark`, `score`). Legacy aliases `domain`/`reply`/`reason` accepted. |
 | `Features` | Key-value network settings (see table below) |
 
 Key `Features` entries:
@@ -232,6 +232,8 @@ Key `Features` entries:
 | `GITSYNC_CERT_FILE` | Install destination for cert from repo |
 | `IPCHECK_CLONE_LIMIT` | Max connections per IP per window (default 4) |
 | `IPCHECK_CLONE_PERIOD` | Rolling window in seconds (default 40) |
+| `DNSBL_TIMEOUT` | Per-zone DNS query timeout in seconds (default 5) |
+| `DNSBL_CACHETIME` | Per-IP DNSBL result cache TTL in seconds (default 21600) |
 | `NICK_DELAY` | Seconds between nick changes (default 30) |
 | `MAXCHANNELSPERUSER` | Per-user channel join cap |
 | `MAXBANS` | Per-channel ban list cap |

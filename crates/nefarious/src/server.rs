@@ -153,6 +153,15 @@ pub async fn run(
         }
     });
 
+    // DNSBL cache sweeper: drop expired per-IP results every 5
+    // minutes so a long-running server doesn't accumulate stale
+    // entries forever. Cheap no-op when no DNSBL blocks are
+    // configured (the cache simply never gets populated).
+    crate::dnsbl::spawn_cache_sweeper(
+        Arc::clone(&state.dnsbl_cache),
+        Arc::clone(&state.shutdown),
+    );
+
     // Git config sync: if GIT_CONFIG_PATH is set, spawn a
     // background loop that runs `git pull --ff-only` on the
     // configured interval and, when HEAD moves, triggers a
