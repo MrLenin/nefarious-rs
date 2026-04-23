@@ -11,11 +11,11 @@ Rust rewrite of [Nefarious IRCd](https://github.com/MrLenin/nefarious2/tree/ircv
 | Phase | Description | Status |
 |-------|-------------|--------|
 | Phase 0 | Foundation — single-server IRC daemon | ✅ Complete |
-| Phase 1 | P10 server linking | ✅ Complete (baseline) |
+| Phase 1 | P10 server linking | ✅ Complete |
 | Phase 2 | IRCv3 capabilities | ✅ Complete |
 | Phase 3 | Authentication (SASL + Keycloak) | 🟡 In Progress |
 | Phase 4 | Persistence (bouncer, chat history, metadata) | ⬜ Planned |
-| Phase 5 | Operational features | ⬜ Planned |
+| Phase 5 | Operational features | 🟡 In Progress |
 | Phase 6 | Hardening and migration tooling | ⬜ Planned |
 
 See [docs/roadmap.md](docs/roadmap.md) for the full phased plan.
@@ -60,10 +60,16 @@ nefarious-rs/
 The `s2s/` module handles P10 federation with other Nefarious servers:
 
 - **Handshake**: `PASS` + `SERVER` exchange
-- **Burst**: sends all local users (`N`), channels (`B`), then `END_OF_BURST`
+- **Burst**: sends all local users (`N`), channels (`B`), G-lines, ban-except lists, then `END_OF_BURST`
 - **Steady state**: routes `PRIVMSG`/`NOTICE`/`JOIN`/`PART`/`MODE`/`KICK`/`TOPIC`/`QUIT`/`NICK` across the link
 - **Numerics**: 18-bit per-server slot pool with recycling (YYXXX format)
-- **Account propagation**: `AC` token for logged-in users
+- **Account propagation**: `AC` token with C/H/S/A/D LOC passthrough
+- **OPMODE / CLEARMODE**: oper-invoked channel mode override tokens
+- **SILENCE propagation**: `U` token broadcasts per-client silence lists
+- **HLC msgids**: hybrid logical clock seeded msgids with compact `@A` S2S tags
+- **BS/BX**: baseline bouncer session and transfer token handling
+- **Autoconnect**: Connect blocks with `autoconnect=yes` retry on disconnect
+- **Outbound TLS**: S2S links support `ssl=yes` for encrypted peering
 
 ---
 
@@ -78,16 +84,31 @@ The `s2s/` module handles P10 federation with other Nefarious servers:
 | JOIN/PART/TOPIC/KICK/INVITE | ✅ |
 | PRIVMSG/NOTICE (channel + private) | ✅ |
 | Channel modes (+n +t +m +i +s +p +k +l) | ✅ |
+| Extended channel modes (+C +N +c +D +M +Q +R +r +S +T +u +z +L) | ✅ |
 | Membership modes (+o +v +h) | ✅ |
-| User modes (+w +o +i +s) | ✅ |
-| WHO/WHOIS/USERHOST/ISON | ✅ |
+| User modes (+w +o +i +s +x +R) | ✅ |
+| WHO/WHOIS/USERHOST/USERIP/ISON | ✅ |
 | AWAY + away-notify | ✅ |
 | WALLOPS | ✅ |
-| OPER | ✅ |
+| OPER + privilege propagation | ✅ |
 | NAMES/LIST | ✅ |
-| STATS/TIME/ADMIN/INFO/LINKS/MAP | ✅ (framework) |
-| WHOWAS | 🟡 Stub |
-| Ban lists (+b) | 🟡 Partial |
+| STATS (l/o/G/S/Z/J/u) | ✅ |
+| TIME/ADMIN/INFO/LINKS/MAP | ✅ |
+| WHOWAS | ✅ |
+| Ban lists (+b / +e) | ✅ |
+| KILL — oper-forced disconnect | ✅ |
+| SETHOST — oper host change | ✅ |
+| WEBIRC — trusted-gateway IP passthrough | ✅ |
+| SILENCE — per-client sender filter | ✅ |
+| WATCH / MONITOR — nick-presence notifications | ✅ |
+| NICKDELAY — nick-change rate throttle | ✅ |
+| IP crypto cloaking (+x, nefarious2-compatible) | ✅ |
+| K-lines — local connect bans | ✅ |
+| G-line / Z-line / Shun / Jupe — network bans | ✅ |
+| Per-IP clone throttle (IPcheck) | ✅ |
+| REHASH — live config reload | ✅ |
+| bcrypt oper passwords | ✅ |
+| PASS verification against Client blocks | ✅ |
 
 ### IRCv3 Capabilities
 
@@ -125,6 +146,23 @@ The `s2s/` module handles P10 federation with other Nefarious servers:
 | IAuth protocol | ⬜ Planned |
 | Connection class SASL requirements | ⬜ Planned |
 
+### Operational Features (Phase 5)
+
+| Feature | Status |
+|---------|--------|
+| GeoIP tagging at connect (MaxMind MMDB) | ✅ |
+| DNSBL connect-time check | ✅ |
+| Git config sync — in-process libgit2 pull + `/GITSYNC` | ✅ |
+| TLS cert hot-swap from git repo (atomic `SslAcceptor` reload) | ✅ |
+| SSH TOFU host-key pinning for git remote | ✅ |
+| `/CHECK` — oper audit for users, channels, servers | ✅ |
+| `/REHASH` — full live config reload | ✅ |
+| Graceful shutdown with client notice + peer SQUIT (SIGINT/SIGTERM) | ✅ |
+| Per-IP clone throttle (IPcheck, rolling window) | ✅ |
+| Autoconnect + outbound TLS for S2S links | ✅ |
+| Background ban-expiry sweeper | ✅ |
+| Paste service (TLS listener) | ⬜ Planned |
+
 ---
 
 ## Build
@@ -161,47 +199,53 @@ The Docker image uses a multi-stage build (rust:1.88-bookworm → debian:bookwor
 
 ## Configuration
 
-Uses the same `ircd.conf` block format as C Nefarious:
+Uses the same `ircd.conf` block format as C Nefarious. Nested `include "path";` directives are supported with cycle detection.
 
-```
-General {
-    name        = "rs.example.net";
-    numeric     = 2;
-    description = "nefarious-rs test server";
-};
+Supported block types:
 
-Port { port = 6667; };
-Port { port = 6697; ssl = yes; };
+| Block | Purpose |
+|-------|---------|
+| `General` | Server identity (name, numeric, description, vhost, hidden_host_suffix) |
+| `Admin` | Location and contact info |
+| `Port` | Listening ports (`port`, `ssl`, `websocket`, `vhost`) |
+| `Class` | Connection class limits (pingfreq, connectfreq, maxlinks, sendq) |
+| `Client` | Client allow-rules (class, ip, host, password, maxlinks) |
+| `Operator` | IRC operator definitions (name, password, host, class, local, privs) |
+| `Connect` | S2S link blocks (name, host, password, port, class, ssl, autoconnect, hub) |
+| `Kill` | Local K-lines — host glob or IP CIDR connect bans |
+| `WebIRC` | Trusted gateway passthrough (password, host) |
+| `DnsBL` | DNSBL zones (domain, reply\_mask, action: block/block\_anon/mark/whitelist, reason) |
+| `Features` | Key-value network settings (see table below) |
 
-Class {
-    name    = "users";
-    pingfreq = 90 seconds;
-    sendq   = 512 kilobytes;
-    maxlinks = 100;
-};
+Key `Features` entries:
 
-Client {
-    class = "users";
-    ip    = "*@*";
-};
+| Key | Purpose |
+|-----|---------|
+| `NETWORK` | Network name (ISUPPORT, welcome message) |
+| `SSL_CERTFILE` / `SSL_KEYFILE` | TLS cert and key paths |
+| `MMDB_FILE` | Path to MaxMind GeoLite2 MMDB database |
+| `GIT_CONFIG_PATH` | Repo path for git config sync |
+| `GIT_SYNC_INTERVAL` | Pull interval in seconds (default 300) |
+| `GITSYNC_SSH_KEY` | SSH private key for git remote |
+| `GITSYNC_HOST_FINGERPRINT` | TOFU-pinned SSH host fingerprint |
+| `GITSYNC_CERT_PATH` | Repo-relative cert file to install |
+| `GITSYNC_CERT_FILE` | Install destination for cert from repo |
+| `IPCHECK_CLONE_LIMIT` | Max connections per IP per window (default 4) |
+| `IPCHECK_CLONE_PERIOD` | Rolling window in seconds (default 40) |
+| `NICK_DELAY` | Seconds between nick changes (default 30) |
+| `MAXCHANNELSPERUSER` | Per-user channel join cap |
+| `MAXBANS` | Per-channel ban list cap |
 
-Connect {
-    name     = "hub.example.net";
-    host     = "hub.example.net";
-    password = "link-secret";
-    port     = 4400;
-    class    = "servers";
-};
-```
-
-See [config/ircd.conf](config/ircd.conf) for a complete example.
+See [config/ircd.conf](config/ircd.conf) for a complete annotated example.
 
 ### Environment Variables
 
 | Variable | Purpose |
 |----------|---------|
 | `RUST_LOG` | Tracing filter (default: `info`) |
-| `NEFARIOUS_ACCOUNTS` | Bootstrap SASL accounts: `alice:secret,bob:pw` |
+| `NEFARIOUS_ACCOUNTS` | Bootstrap SASL accounts: `alice:secret,bob:pw` (dev only) |
+| `SSL_CERT` | TLS certificate path (overrides `Features { SSL_CERTFILE }`) |
+| `SSL_KEY` | TLS key path (overrides `Features { SSL_KEYFILE }`) |
 
 ---
 
