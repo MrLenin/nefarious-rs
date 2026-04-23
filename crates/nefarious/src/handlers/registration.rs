@@ -62,6 +62,18 @@ pub async fn handle_nick_change(ctx: &HandlerContext, msg: &Message) {
     };
     crate::s2s::routing::route_nick_change(&ctx.state, client_id, &new_nick, nick_ts, &src).await;
 
+    // IRCv3 MONITOR: old nick just went offline from the perspective
+    // of any watchers, and new nick is now online. Skip the case-
+    // only rename (same casefolded key) — watchers see no change.
+    if !old_nick.is_empty() && !irc_eq(&old_nick, &new_nick) {
+        ctx.state.notify_monitor_offline(&old_nick).await;
+        let new_prefix = {
+            let c = ctx.client.read().await;
+            c.prefix()
+        };
+        ctx.state.notify_monitor_online(&new_nick, &new_prefix).await;
+    }
+
     // Notify the client
     let nick_msg = Message::with_source(&old_prefix, Command::Nick, vec![new_nick.clone()]);
 

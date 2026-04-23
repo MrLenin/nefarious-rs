@@ -257,7 +257,7 @@ pub async fn handle_nick(state: &ServerState, msg: &P10Message) {
         numeric,
         server: numeric.server,
         user: user.to_string(),
-        host: visible_host,
+        host: visible_host.clone(),
         realname,
         ip_base64: ip_base64.to_string(),
         modes,
@@ -271,6 +271,13 @@ pub async fn handle_nick(state: &ServerState, msg: &P10Message) {
     }));
 
     state.register_remote_client(client, nick, numeric);
+
+    // IRCv3 MONITOR: notify local watchers that this remote nick
+    // just came online. Prefix matches what WHOIS / NAMES would
+    // render for them (uses the visible/cloaked host, not the real
+    // IP).
+    let prefix = format!("{nick}!{user}@{visible_host}");
+    state.notify_monitor_online(nick, &prefix).await;
 }
 
 /// Who currently owns a nick, for TS-based collision resolution.
@@ -441,17 +448,26 @@ async fn handle_nick_change(state: &ServerState, msg: &P10Message) {
     }
 
     if let Some(remote) = state.remote_clients.get(&numeric) {
-        let old_nick = {
+        let (old_nick, is_alias) = {
             let mut rc = remote.write().await;
             let old = rc.nick.clone();
             rc.nick = new_nick.clone();
             if new_nick_ts > 0 {
                 rc.nick_ts = new_nick_ts;
             }
-            old
+            (old, rc.is_alias)
         };
 
         state.rename_remote_nick(&old_nick, new_nick, numeric);
+
+        // IRCv3 MONITOR: same shape as local nick-change — old nick
+        // "goes offline" from watchers' point of view, new nick
+        // "comes online". Skip for aliases and case-only renames.
+        let new_prefix = { remote.read().await.prefix() };
+        if !is_alias && !irc_casefold(&old_nick).eq(&irc_casefold(new_nick)) {
+            state.notify_monitor_offline(&old_nick).await;
+            state.notify_monitor_online(new_nick, &new_prefix).await;
+        }
 
         // Notify local channel members
         let rc = remote.read().await;

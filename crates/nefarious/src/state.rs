@@ -535,15 +535,24 @@ impl ServerState {
 
     /// Remove a remote client (QUIT, KILL, SQUIT).
     pub async fn remove_remote_client(&self, numeric: ClientNumeric) {
-        let nick = {
+        let (nick_folded, display_nick, is_alias) = {
             if let Some(client) = self.remote_clients.get(&numeric) {
                 let c = client.read().await;
-                irc_casefold(&c.nick)
+                (irc_casefold(&c.nick), c.nick.clone(), c.is_alias)
             } else {
                 return;
             }
         };
-        self.remote_nicks.remove(&nick);
+        self.remote_nicks.remove(&nick_folded);
+
+        // IRCv3 MONITOR: notify local watchers that this remote nick
+        // went offline. Aliases are network-invisible so their
+        // departure doesn't fire a notification — the primary is the
+        // visible entity that watchers track.
+        if !is_alias {
+            self.notify_monitor_offline(&display_nick).await;
+        }
+        let _ = nick_folded; // keep alive for the remainder of the fn
 
         // Remove from all channels
         let mut empty_channels = Vec::new();
