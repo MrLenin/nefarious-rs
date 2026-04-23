@@ -38,6 +38,20 @@ pub const RPL_WHOISSSL: u16 = 671;
 /// RPL_HOSTHIDDEN: `<host> :is now your displayed host` — emitted
 /// when a user's host is cloaked on +x activation.
 pub const RPL_HOSTHIDDEN: u16 = 396;
+
+// IRCv3 MONITOR — per-client nick-watch notifications.
+/// 730: trailing comma-joined `nick!user@host` list of nicks that
+/// just came online among the client's monitored set.
+pub const RPL_MONONLINE: u16 = 730;
+/// 731: trailing comma-joined nicks that just went offline.
+pub const RPL_MONOFFLINE: u16 = 731;
+/// 732: one line per `MONITOR L` (list) — trailing is the target
+/// nicks currently on this client's watch list.
+pub const RPL_MONLIST: u16 = 732;
+/// 733: sentinel after a `MONITOR L` response.
+pub const RPL_ENDOFMONLIST: u16 = 733;
+/// 734: requested add exceeds `MONITOR` list cap.
+pub const ERR_MONLISTFULL: u16 = 734;
 pub const RPL_LUSERCHANNELS: u16 = 254;
 pub const RPL_LUSERME: u16 = 255;
 

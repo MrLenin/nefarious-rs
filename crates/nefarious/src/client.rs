@@ -55,6 +55,11 @@ pub struct Client {
     /// Propagated over S2S via the `PRIVS` token so peers know what
     /// remote opers are allowed to do.
     pub privs: HashSet<String>,
+    /// IRCv3 MONITOR watch list — casefolded nicks this client wants
+    /// 730/731 notifications about. Cross-indexed on ServerState via
+    /// `monitored_by` so state-change broadcasts can find watchers
+    /// without scanning every client.
+    pub monitored: HashSet<String>,
     /// Channels this client is in.
     pub channels: HashSet<String>,
     /// Connection timestamp.
@@ -155,6 +160,7 @@ impl Client {
             away_message: None,
             account: None,
             privs: HashSet::new(),
+            monitored: HashSet::new(),
             channels: HashSet::new(),
             connected_at: now,
             last_active: now,

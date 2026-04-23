@@ -177,6 +177,13 @@ pub struct ServerState {
     /// `whowas_history` in nefarious2/ircd/whowas.c — one bounded
     /// table per server.
     pub whowas: tokio::sync::Mutex<std::collections::VecDeque<WhowasEntry>>,
+    /// IRCv3 MONITOR reverse index: casefolded nick → clients that
+    /// asked to be notified when that nick comes online or goes
+    /// offline. Every `Client.monitored` add/remove keeps this in
+    /// sync. Lookup in the client-lifecycle paths is O(1); without
+    /// the reverse index we'd have to scan every client on every
+    /// quit/register.
+    pub monitored_by: DashMap<String, std::collections::HashSet<ClientId>>,
 }
 
 /// One past-user record kept for `/WHOWAS` lookups.
@@ -233,6 +240,7 @@ impl ServerState {
             advertised_caps: default_advertised_caps(),
             account_store: crate::accounts::empty_in_memory(),
             whowas: tokio::sync::Mutex::new(std::collections::VecDeque::with_capacity(WHOWAS_MAX)),
+            monitored_by: DashMap::new(),
         }
     }
 
@@ -245,6 +253,97 @@ impl ServerState {
             buf.pop_front();
         }
         buf.push_back(entry);
+    }
+
+    /// Add a nick to a client's MONITOR watch list. Updates both
+    /// sides of the index so the per-nick reverse lookup stays in
+    /// sync. Returns `true` if the nick was newly added.
+    pub async fn monitor_add(&self, watcher: ClientId, nick: &str) -> bool {
+        let key = irc_casefold(nick);
+        // Side A: the client's own list.
+        let inserted_on_client = if let Some(client) = self.clients.get(&watcher) {
+            let mut c = client.write().await;
+            c.monitored.insert(key.clone())
+        } else {
+            false
+        };
+        // Side B: the reverse index.
+        self.monitored_by
+            .entry(key)
+            .or_default()
+            .insert(watcher);
+        inserted_on_client
+    }
+
+    /// Remove a nick from a client's MONITOR watch list; symmetric
+    /// with `monitor_add`. Prunes empty reverse-index entries.
+    pub async fn monitor_remove(&self, watcher: ClientId, nick: &str) {
+        let key = irc_casefold(nick);
+        if let Some(client) = self.clients.get(&watcher) {
+            client.write().await.monitored.remove(&key);
+        }
+        if let Some(mut entry) = self.monitored_by.get_mut(&key) {
+            entry.remove(&watcher);
+            if entry.is_empty() {
+                drop(entry);
+                self.monitored_by.remove(&key);
+            }
+        }
+    }
+
+    /// Clear a client's entire MONITOR list. Used on `MONITOR C` and
+    /// on client disconnect.
+    pub async fn monitor_clear(&self, watcher: ClientId) {
+        let nicks: Vec<String> = if let Some(client) = self.clients.get(&watcher) {
+            let c = client.read().await;
+            c.monitored.iter().cloned().collect()
+        } else {
+            return;
+        };
+        for nick in &nicks {
+            self.monitor_remove(watcher, nick).await;
+        }
+    }
+
+    /// Emit RPL_MONONLINE (730) to every client watching `nick`.
+    /// `prefix` is the `nick!user@host` the client renders; callers
+    /// build it from the just-registered Client or from the remote
+    /// user's known identity.
+    pub async fn notify_monitor_online(&self, nick: &str, prefix: &str) {
+        let key = irc_casefold(nick);
+        let watchers: Vec<ClientId> = match self.monitored_by.get(&key) {
+            Some(e) => e.iter().copied().collect(),
+            None => return,
+        };
+        for watcher_id in watchers {
+            if let Some(client) = self.clients.get(&watcher_id) {
+                let c = client.read().await;
+                c.send(irc_proto::Message::with_source(
+                    &self.server_name,
+                    irc_proto::Command::Numeric(crate::numeric::RPL_MONONLINE),
+                    vec![c.nick.clone(), prefix.to_string()],
+                ));
+            }
+        }
+    }
+
+    /// Emit RPL_MONOFFLINE (731) to every client watching `nick`.
+    pub async fn notify_monitor_offline(&self, nick: &str) {
+        let key = irc_casefold(nick);
+        let watchers: Vec<ClientId> = match self.monitored_by.get(&key) {
+            Some(e) => e.iter().copied().collect(),
+            None => return,
+        };
+        for watcher_id in watchers {
+            if let Some(client) = self.clients.get(&watcher_id) {
+                let c = client.read().await;
+                c.send(irc_proto::Message::with_source(
+                    &self.server_name,
+                    irc_proto::Command::Numeric(crate::numeric::RPL_MONOFFLINE),
+                    vec![c.nick.clone(), nick.to_string()],
+                ));
+            }
+        }
     }
 
     /// Atomically reserve `nick` for `id`. Returns true if reserved (or
@@ -337,10 +436,11 @@ impl ServerState {
 
         // Capture WHOWAS metadata before we drop the Client entry —
         // /WHOWAS looks up users *after* they've disconnected.
-        let (nick, whowas_entry) = {
+        let (nick, display_nick, whowas_entry) = {
             if let Some(client) = self.clients.get(&id) {
                 let c = client.read().await;
                 let folded = irc_casefold(&c.nick);
+                let display = c.nick.clone();
                 let entry = WhowasEntry {
                     nick: c.nick.clone(),
                     user: c.user.clone(),
@@ -349,13 +449,19 @@ impl ServerState {
                     server: self.server_name.clone(),
                     quit_at: chrono::Utc::now(),
                 };
-                (folded, entry)
+                (folded, display, entry)
             } else {
                 return;
             }
         };
         self.record_whowas(whowas_entry).await;
         self.nicks.remove_if(&nick, |_, v| *v == id);
+
+        // IRCv3 MONITOR: notify watchers this nick is now offline.
+        // Also drop this client's own MONITOR subscriptions so the
+        // reverse index doesn't carry stale watchers.
+        self.notify_monitor_offline(&display_nick).await;
+        self.monitor_clear(id).await;
 
         // Remove from all channels
         let mut empty_channels = Vec::new();

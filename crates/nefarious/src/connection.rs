@@ -110,6 +110,15 @@ pub async fn handle_connection<S>(
     // emit nick-collision KILLs if the same nick appears elsewhere.
     crate::s2s::routing::route_nick_intro(&state, &client).await;
 
+    // IRCv3 MONITOR: notify watchers that this nick just came
+    // online. Prefix is built from the just-registered client.
+    {
+        let c = client.read().await;
+        let prefix = c.prefix();
+        drop(c);
+        state.notify_monitor_online(&nick, &prefix).await;
+    }
+
     // Send welcome burst
     send_welcome(&client, &state).await;
 

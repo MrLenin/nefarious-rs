@@ -36,6 +36,9 @@ pub enum Command {
     // IRCv3 SASL authentication exchange
     Authenticate,
 
+    // IRCv3 MONITOR — per-client nick-watch notifications.
+    Monitor,
+
     // Channel operations
     Join,
     Part,
@@ -115,6 +118,7 @@ impl Command {
             "NOTE" => Command::Note,
             "ACCOUNT" => Command::Account,
             "AUTHENTICATE" => Command::Authenticate,
+            "MONITOR" => Command::Monitor,
             "JOIN" => Command::Join,
             "PART" => Command::Part,
             "TOPIC" => Command::Topic,
@@ -169,6 +173,7 @@ impl fmt::Display for Command {
             Command::Note => write!(f, "NOTE"),
             Command::Account => write!(f, "ACCOUNT"),
             Command::Authenticate => write!(f, "AUTHENTICATE"),
+            Command::Monitor => write!(f, "MONITOR"),
             Command::Join => write!(f, "JOIN"),
             Command::Part => write!(f, "PART"),
             Command::Topic => write!(f, "TOPIC"),

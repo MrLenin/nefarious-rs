@@ -132,6 +132,123 @@ fn who_status(flags: &crate::channel::MembershipFlags, multi_prefix: bool) -> St
 }
 
 /// Handle WHOIS command.
+/// Handle MONITOR per IRCv3 spec.
+///
+/// Subcommands:
+///   `+ <nick>[,<nick>...]` — add to watch list; immediately emit
+///       730 for any that are online and 731 for any offline so the
+///       client gets a synchronous snapshot.
+///   `- <nick>[,<nick>...]` — remove.
+///   `C` — clear entire list.
+///   `L` — emit 732 with the current list, then 733.
+///   `S` — emit 730/731 summary of current list (status).
+///
+/// No list-cap enforcement yet — the 734 ERR_MONLISTFULL constant
+/// is defined but we let clients subscribe to as many nicks as they
+/// like. A cap ties to FEAT_MAXMONITOR which we haven't wired.
+pub async fn handle_monitor(ctx: &HandlerContext, msg: &Message) {
+    if msg.params.is_empty() {
+        ctx.send_numeric(
+            ERR_NEEDMOREPARAMS,
+            vec!["MONITOR".into(), "Not enough parameters".into()],
+        )
+        .await;
+        return;
+    }
+
+    let sub = msg.params[0].to_ascii_uppercase();
+    let client_id = ctx.client_id().await;
+
+    match sub.as_str() {
+        "+" => {
+            let Some(list) = msg.params.get(1) else { return };
+            // Split nicks, report online/offline status, update
+            // state. Both the numerics we emit back use comma-joined
+            // targets — batch the walk.
+            let nicks: Vec<String> =
+                list.split(',').filter(|n| !n.is_empty()).map(|n| n.to_string()).collect();
+            let mut online_prefixes: Vec<String> = Vec::new();
+            let mut offline_nicks: Vec<String> = Vec::new();
+            for nick in &nicks {
+                ctx.state.monitor_add(client_id, nick).await;
+                // Online check — local first, then remote.
+                if let Some(arc) = ctx.state.find_client_by_nick(nick) {
+                    let c = arc.read().await;
+                    online_prefixes.push(c.prefix());
+                } else if let Some(remote) = ctx.state.find_remote_by_nick(nick) {
+                    let r = remote.read().await;
+                    online_prefixes.push(r.prefix());
+                } else {
+                    offline_nicks.push(nick.clone());
+                }
+            }
+            if !online_prefixes.is_empty() {
+                ctx.send_numeric(RPL_MONONLINE, vec![online_prefixes.join(",")]).await;
+            }
+            if !offline_nicks.is_empty() {
+                ctx.send_numeric(RPL_MONOFFLINE, vec![offline_nicks.join(",")]).await;
+            }
+        }
+        "-" => {
+            let Some(list) = msg.params.get(1) else { return };
+            for nick in list.split(',').filter(|n| !n.is_empty()) {
+                ctx.state.monitor_remove(client_id, nick).await;
+            }
+        }
+        "C" => {
+            ctx.state.monitor_clear(client_id).await;
+        }
+        "L" => {
+            let list: Vec<String> = {
+                if let Some(arc) = ctx.state.clients.get(&client_id) {
+                    let c = arc.read().await;
+                    c.monitored.iter().cloned().collect()
+                } else {
+                    Vec::new()
+                }
+            };
+            if !list.is_empty() {
+                ctx.send_numeric(RPL_MONLIST, vec![list.join(",")]).await;
+            }
+            ctx.send_numeric(RPL_ENDOFMONLIST, vec!["End of MONITOR list".into()]).await;
+        }
+        "S" => {
+            let nicks: Vec<String> = {
+                if let Some(arc) = ctx.state.clients.get(&client_id) {
+                    let c = arc.read().await;
+                    c.monitored.iter().cloned().collect()
+                } else {
+                    Vec::new()
+                }
+            };
+            let mut online_prefixes: Vec<String> = Vec::new();
+            let mut offline_nicks: Vec<String> = Vec::new();
+            for nick in &nicks {
+                if let Some(arc) = ctx.state.find_client_by_nick(nick) {
+                    let c = arc.read().await;
+                    online_prefixes.push(c.prefix());
+                } else if let Some(remote) = ctx.state.find_remote_by_nick(nick) {
+                    let r = remote.read().await;
+                    online_prefixes.push(r.prefix());
+                } else {
+                    offline_nicks.push(nick.clone());
+                }
+            }
+            if !online_prefixes.is_empty() {
+                ctx.send_numeric(RPL_MONONLINE, vec![online_prefixes.join(",")]).await;
+            }
+            if !offline_nicks.is_empty() {
+                ctx.send_numeric(RPL_MONOFFLINE, vec![offline_nicks.join(",")]).await;
+            }
+        }
+        _ => {
+            // Silently ignore unknown subcommands — IRCv3 spec says
+            // the server MAY do this; clients self-heal by retrying
+            // with a known subcommand.
+        }
+    }
+}
+
 /// Handle WHOWAS — replay historical records for nicks that have
 /// since disconnected. `WHOWAS <nick>[,<nick>...] [<count>]` per
 /// RFC2812 §3.6.3; `count` is an optional cap on how many records
