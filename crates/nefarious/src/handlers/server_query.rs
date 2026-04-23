@@ -68,6 +68,25 @@ pub async fn handle_stats(ctx: &HandlerContext, msg: &Message) {
                 .await;
             }
         }
+        'o' | 'O' => {
+            // Show configured oper blocks — hostmask + name + class.
+            // Does not reveal passwords. Useful for opers auditing
+            // who can /OPER from where.
+            for op in &ctx.state.config.operators {
+                ctx.send_numeric(
+                    243, // RPL_STATSOLINE
+                    vec![
+                        "O".into(),
+                        op.host.clone(),
+                        "*".into(), // password placeholder
+                        op.name.clone(),
+                        "0".into(), // port (unused)
+                        op.class.clone(),
+                    ],
+                )
+                .await;
+            }
+        }
         // Ban stats — G/S/Z/J emit one line per stored entry. The
         // 247/542/546 numerics match nefarious2 s_err.c: a sign
         // char, the mask, three timestamps (expire, lastmod,
