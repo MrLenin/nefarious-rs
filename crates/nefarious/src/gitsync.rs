@@ -66,12 +66,40 @@ fn short(sha: &str) -> &str {
     &sha[..sha.len().min(8)]
 }
 
+/// Format a byte slice as `aa:bb:cc:...` lower-case hex. Matches
+/// the fingerprint format libssh2 emits (and nefarious2's
+/// gitsync_format_fingerprint).
+fn hex_colon(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 {
+            out.push(':');
+        }
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+/// Tolerant fingerprint compare: case-insensitive, separators
+/// stripped. Operators copy-paste these from `ssh-keygen -F` or
+/// similar which may use colons or no separator and either case.
+fn fingerprint_eq(a: &str, b: &str) -> bool {
+    let norm = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .flat_map(|c| c.to_lowercase())
+            .collect()
+    };
+    norm(a) == norm(b)
+}
+
 /// One pull-and-maybe-reload cycle. git2 is sync; we run the call
 /// on a blocking thread via `spawn_blocking` so the async loop
 /// doesn't stall. Result comes back as a SyncOutcome ready for
 /// operator display.
 pub async fn sync_once(state: Arc<ServerState>) -> SyncOutcome {
-    let path = match state.config.load().git_config_path() {
+    let cfg = state.config.load();
+    let path = match cfg.git_config_path() {
         Some(p) => PathBuf::from(p),
         None => {
             return SyncOutcome::Error {
@@ -80,14 +108,59 @@ pub async fn sync_once(state: Arc<ServerState>) -> SyncOutcome {
         }
     };
 
+    // Snapshot the knobs the blocking thread needs so we don't
+    // hold an ArcSwap guard across an await.
+    let ssh_key_path = cfg
+        .gitsync_ssh_key()
+        .map(String::from)
+        .or_else(|| std::env::var("SSL_CERT").ok());
+    let pinned_fp = cfg.gitsync_host_fingerprint().map(String::from);
+    drop(cfg);
+
+    // Pre-pull TOFU fingerprint (if we've seen the host before).
+    let tofu_before = state
+        .gitsync_tofu
+        .read()
+        .ok()
+        .and_then(|g| g.clone());
+
     // Fetch + fast-forward on a blocking thread. The git2 work is
     // synchronous and can block for multiple seconds on a slow
-    // remote, so we don't want it on the reactor.
+    // remote, so we don't want it on the reactor. The callback
+    // captures the observed host-key fingerprint in a shared slot
+    // the caller can read after the sync completes.
     let sync_state = Arc::clone(&state);
-    let result: Result<(String, String), String> =
-        tokio::task::spawn_blocking(move || sync_repo(&path)).await.unwrap_or_else(|e| {
-            Err(format!("join error: {e}"))
-        });
+    let observed_fp: Arc<std::sync::Mutex<Option<(String, String)>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let observed_fp_cb = Arc::clone(&observed_fp);
+    let pinned_for_cb = pinned_fp.clone();
+    let tofu_for_cb = tofu_before.clone();
+    let result: Result<(String, String), String> = tokio::task::spawn_blocking(move || {
+        sync_repo(
+            &path,
+            ssh_key_path.as_deref(),
+            pinned_for_cb.as_deref(),
+            tofu_for_cb,
+            observed_fp_cb,
+        )
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("join error: {e}")));
+
+    // If the fetch succeeded and we saw a host fingerprint that
+    // wasn't already pinned, store it as the TOFU anchor for
+    // future pulls.
+    if result.is_ok() {
+        if let Some((host, fp)) = observed_fp.lock().ok().and_then(|g| g.clone()) {
+            let already_pinned = pinned_fp.is_some();
+            let already_tofu = tofu_before.as_ref().map(|t| &t.fingerprint) == Some(&fp);
+            if !already_pinned && !already_tofu {
+                if let Ok(mut slot) = state.gitsync_tofu.write() {
+                    *slot = Some(crate::state::GitsyncTofu { host, fingerprint: fp });
+                }
+            }
+        }
+    }
 
     match result {
         Err(e) => SyncOutcome::Error { message: e },
@@ -106,8 +179,26 @@ pub async fn sync_once(state: Arc<ServerState>) -> SyncOutcome {
 /// the current branch, fast-forward-merge. Returns `(old_head,
 /// new_head)` shas on success. String errors so we can shuttle the
 /// message across the blocking boundary without fighting Send.
-fn sync_repo(path: &Path) -> Result<(String, String), String> {
-    use git2::{AutotagOption, FetchOptions, RemoteCallbacks, Repository};
+///
+/// `ssh_key` is the path libssh2 should load as the private key.
+/// Matches nefarious2 gitsync.c's scheme: operator configures
+/// `GITSYNC_SSH_KEY` explicitly, or we fall back to the server's
+/// TLS certfile (which ships a PEM key that libssh2 accepts).
+///
+/// `pinned_fp` is an operator-provided SSH host-key fingerprint;
+/// when present the remote MUST match it exactly. `tofu` is the
+/// fingerprint we captured on the previous successful pull;
+/// serves as a softer contract when no pin is configured. Any new
+/// fingerprint observed during this call is written into
+/// `observed_fp_out` so the caller can update the TOFU anchor.
+fn sync_repo(
+    path: &Path,
+    ssh_key: Option<&str>,
+    pinned_fp: Option<&str>,
+    tofu: Option<crate::state::GitsyncTofu>,
+    observed_fp_out: Arc<std::sync::Mutex<Option<(String, String)>>>,
+) -> Result<(String, String), String> {
+    use git2::{AutotagOption, CertificateCheckStatus, FetchOptions, RemoteCallbacks, Repository};
 
     let repo = Repository::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
 
@@ -121,9 +212,7 @@ fn sync_repo(path: &Path) -> Result<(String, String), String> {
         .ok_or_else(|| "HEAD has no target".to_string())?
         .to_string();
 
-    // Find the configured upstream for the current branch. Most
-    // deploys use `origin/<branch>`; if the branch has no upstream
-    // we bail with a clear message rather than guess.
+    // Find the configured upstream for the current branch.
     let upstream_name = {
         let config = repo.config().map_err(|e| format!("config: {e}"))?;
         config
@@ -134,17 +223,72 @@ fn sync_repo(path: &Path) -> Result<(String, String), String> {
         .find_remote(&upstream_name)
         .map_err(|e| format!("remote {upstream_name}: {e}"))?;
 
-    // Credential resolution: try SSH agent first, then anonymous.
-    // Matches libgit2's default-credentials dance.
+    // Build credential + certificate callbacks.
+    let ssh_key_owned = ssh_key.map(|s| s.to_string());
+    let pinned_fp_owned = pinned_fp.map(|s| s.to_string());
+    let tofu_owned = tofu.clone();
+
     let mut callbacks = RemoteCallbacks::new();
-    callbacks.credentials(|_url, username_from_url, allowed_types| {
+    callbacks.credentials(move |_url, username_from_url, allowed_types| {
         if allowed_types.is_ssh_key() {
-            if let Some(user) = username_from_url {
-                return git2::Cred::ssh_key_from_agent(user);
+            let user = username_from_url.unwrap_or("git");
+            if let Some(ref key) = ssh_key_owned {
+                // PEM files contain the private key inline; libssh2
+                // can derive the public half, so we don't need a
+                // separate .pub path.
+                return git2::Cred::ssh_key(user, None, Path::new(key), None);
+            }
+            if let Ok(cred) = git2::Cred::ssh_key_from_agent(user) {
+                return Ok(cred);
             }
         }
         git2::Cred::default()
     });
+
+    // SSH host-key verification with TOFU semantics. libgit2 gives
+    // us the observed cert; we format its hash as colon-hex and
+    // either accept (first sighting), confirm (known), or reject
+    // (mismatch). HTTPS certs pass through unchanged.
+    callbacks.certificate_check(move |cert, host| {
+        if let Some(hostkey) = cert.as_hostkey() {
+            let fp = if let Some(h) = hostkey.hash_sha256() {
+                hex_colon(h)
+            } else if let Some(h) = hostkey.hash_sha1() {
+                hex_colon(h)
+            } else {
+                return Err(git2::Error::from_str("unknown SSH host-key hash"));
+            };
+
+            // Capture the observed fingerprint for the outer
+            // caller, who may promote it to the TOFU slot after
+            // the pull succeeds.
+            if let Ok(mut slot) = observed_fp_out.lock() {
+                *slot = Some((host.to_string(), fp.clone()));
+            }
+
+            if let Some(ref pinned) = pinned_fp_owned {
+                if fingerprint_eq(pinned, &fp) {
+                    return Ok(CertificateCheckStatus::CertificateOk);
+                }
+                return Err(git2::Error::from_str(
+                    "SSH host-key mismatch (pinned via GITSYNC_HOST_FINGERPRINT)",
+                ));
+            }
+            if let Some(ref t) = tofu_owned {
+                if fingerprint_eq(&t.fingerprint, &fp) {
+                    return Ok(CertificateCheckStatus::CertificateOk);
+                }
+                return Err(git2::Error::from_str(
+                    "SSH host-key changed since first pull (TOFU mismatch)",
+                ));
+            }
+            // First pull — accept and let caller store TOFU.
+            return Ok(CertificateCheckStatus::CertificateOk);
+        }
+        // HTTPS / other — defer to libgit2's native verification.
+        Ok(CertificateCheckStatus::CertificatePassthrough)
+    });
+
     let mut fetch_opts = FetchOptions::new();
     fetch_opts.remote_callbacks(callbacks);
     fetch_opts.download_tags(AutotagOption::None);

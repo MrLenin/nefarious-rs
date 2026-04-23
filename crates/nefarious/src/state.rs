@@ -183,6 +183,13 @@ pub struct ServerState {
     /// when the operator points MMDB_FILE at a new file. `None`
     /// means GeoIP tagging is disabled; clients get "--" tags.
     pub geoip: std::sync::RwLock<Option<Arc<maxminddb::Reader<Vec<u8>>>>>,
+    /// Gitsync TOFU host fingerprint. First successful pull
+    /// records the remote's SSH host key fingerprint here; later
+    /// pulls verify against it. Cleared on explicit operator
+    /// request so a legitimate host-key rotation can be accepted.
+    /// Pinned operator-provided fingerprints live in config
+    /// (`GITSYNC_HOST_FINGERPRINT`) and take precedence over this.
+    pub gitsync_tofu: std::sync::RwLock<Option<GitsyncTofu>>,
     /// IRCv3 capabilities the server currently advertises. Built once at
     /// startup from `default_advertised_caps`; each Phase 2 sub-phase
     /// flips a new cap on as its behaviour ships. A REQ for a cap not in
@@ -236,6 +243,17 @@ pub struct ServerState {
     /// accepting new connections promptly while existing sessions
     /// drain naturally.
     pub shutdown: Arc<tokio::sync::Notify>,
+}
+
+/// Pinned SSH host fingerprint captured on first successful pull.
+/// Later pulls refuse to connect if the remote presents a different
+/// key, which is the TOFU (Trust On First Use) contract. Callers
+/// that want a stricter posture set `GITSYNC_HOST_FINGERPRINT` in
+/// config; that value takes precedence over this cached form.
+#[derive(Debug, Clone)]
+pub struct GitsyncTofu {
+    pub host: String,
+    pub fingerprint: String,
 }
 
 /// One past-user record kept for `/WHOWAS` lookups.
@@ -292,6 +310,7 @@ impl ServerState {
             motd_path: std::sync::RwLock::new(None),
             dns_resolver,
             geoip: std::sync::RwLock::new(None),
+            gitsync_tofu: std::sync::RwLock::new(None),
             advertised_caps: default_advertised_caps(),
             account_store: crate::accounts::empty_in_memory(),
             whowas: tokio::sync::Mutex::new(std::collections::VecDeque::with_capacity(WHOWAS_MAX)),

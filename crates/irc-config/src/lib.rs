@@ -308,6 +308,24 @@ impl Config {
             .unwrap_or(300)
     }
 
+    /// `GITSYNC_SSH_KEY` — path to a PEM/OpenSSH key for libssh2
+    /// to authenticate against the git remote. When unset, gitsync
+    /// falls back to the server's TLS certfile (which contains a
+    /// usable private key in PEM form); this is how nefarious2
+    /// avoids provisioning a separate SSH key on each host.
+    pub fn gitsync_ssh_key(&self) -> Option<&str> {
+        self.feature("GITSYNC_SSH_KEY")
+    }
+
+    /// `GITSYNC_HOST_FINGERPRINT` — pinned SSH host key fingerprint
+    /// (hex-with-colons form, e.g. `aa:bb:cc:...`). When set, the
+    /// host must present exactly this fingerprint or the pull
+    /// fails. When unset, TOFU behaviour applies: the first pull
+    /// records the remote's fingerprint, later pulls verify it.
+    pub fn gitsync_host_fingerprint(&self) -> Option<&str> {
+        self.feature("GITSYNC_HOST_FINGERPRINT")
+    }
+
     /// `HOST_HIDING_STYLE` — which cloak strategy applies on +x.
     /// 0 = no cloak, 1 = account-based only, 2 = crypto cloak
     /// only, 3 = both (account wins when logged in, crypto
