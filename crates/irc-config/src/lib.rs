@@ -380,37 +380,15 @@ impl Config {
         Self::from_str_with_includes(&content, base_dir)
     }
 
-    /// Parse config from a string, resolving includes relative to `base_dir`.
+    /// Parse config from a string, resolving includes relative to
+    /// `base_dir`. Nested includes are handled recursively with a
+    /// seen-set that prevents include cycles from looping forever.
     pub fn from_str_with_includes(input: &str, base_dir: &Path) -> Result<Self, ConfigError> {
         let items = parse_config(input).map_err(ConfigError::Parse)?;
-
         let mut all_blocks = Vec::new();
-
-        for item in items {
-            match item {
-                TopLevel::Block(b) => all_blocks.push(b),
-                TopLevel::Include(path) => {
-                    let full_path = base_dir.join(&path);
-                    match std::fs::read_to_string(&full_path) {
-                        Ok(content) => {
-                            let _include_dir = full_path.parent().unwrap_or(base_dir);
-                            let sub_items = parse_config(&content)
-                                .map_err(|e| ConfigError::Parse(format!("in {path}: {e}")))?;
-                            for sub in sub_items {
-                                if let TopLevel::Block(b) = sub {
-                                    all_blocks.push(b);
-                                }
-                                // Nested includes could be handled recursively, skip for now
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("could not read include file {}: {}", path, e);
-                        }
-                    }
-                }
-            }
-        }
-
+        let mut seen: std::collections::HashSet<std::path::PathBuf> =
+            std::collections::HashSet::new();
+        collect_blocks(items, base_dir, &mut all_blocks, &mut seen)?;
         Self::from_blocks(&all_blocks)
     }
 
@@ -642,6 +620,53 @@ impl Config {
     pub fn client_ports(&self) -> impl Iterator<Item = &PortConfig> {
         self.ports.iter().filter(|p| !p.server)
     }
+}
+
+/// Depth-first walk over top-level items, flattening Block entries
+/// into `out` and chasing Include directives recursively. `seen`
+/// tracks canonicalised paths so a cycle (A → B → A) gets detected
+/// on the second visit rather than recursing forever. Missing
+/// include files log a warning and continue — same behaviour the
+/// original non-recursive code had, which is what nefarious2's
+/// ircd_parser.y does for typo-resilience.
+fn collect_blocks(
+    items: Vec<TopLevel>,
+    base_dir: &Path,
+    out: &mut Vec<Block>,
+    seen: &mut std::collections::HashSet<std::path::PathBuf>,
+) -> Result<(), ConfigError> {
+    for item in items {
+        match item {
+            TopLevel::Block(b) => out.push(b),
+            TopLevel::Include(path) => {
+                let full_path = base_dir.join(&path);
+                let canonical = std::fs::canonicalize(&full_path).unwrap_or(full_path.clone());
+                if !seen.insert(canonical.clone()) {
+                    tracing::warn!(
+                        "include cycle detected at {}; skipping",
+                        full_path.display()
+                    );
+                    continue;
+                }
+                match std::fs::read_to_string(&full_path) {
+                    Ok(content) => {
+                        let include_dir = full_path.parent().unwrap_or(base_dir);
+                        let sub_items = parse_config(&content)
+                            .map_err(|e| ConfigError::Parse(format!("in {path}: {e}")))?;
+                        // Recurse so nested includes resolve from
+                        // the included file's directory, letting
+                        // operators use relative paths that mean
+                        // what they say.
+                        collect_blocks(sub_items, include_dir, out, seen)?;
+                    }
+                    Err(e) => {
+                        tracing::warn!("could not read include file {}: {}", path, e);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
