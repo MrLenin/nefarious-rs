@@ -100,10 +100,47 @@ pub async fn run(
         return;
     }
 
+    // Signal handler: flip state.shutdown on SIGINT (Ctrl-C) and —
+    // on Unix — SIGTERM. Listener loops select on the Notify and
+    // exit accept(), which lets the outer handle joins resolve and
+    // returns control to the orchestrator. Existing client and
+    // server sessions keep running until they close naturally or
+    // the orchestrator kills the process. A more thorough drain
+    // (broadcast SQUIT, disconnect clients) can layer on later.
+    let shutdown = Arc::clone(&state.shutdown);
+    tokio::spawn(async move {
+        let ctrl_c = tokio::signal::ctrl_c();
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut term = match signal(SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("couldn't install SIGTERM handler: {e}");
+                    let _ = ctrl_c.await;
+                    info!("SIGINT received — starting shutdown");
+                    shutdown.notify_waiters();
+                    return;
+                }
+            };
+            tokio::select! {
+                _ = ctrl_c => info!("SIGINT received — starting shutdown"),
+                _ = term.recv() => info!("SIGTERM received — starting shutdown"),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = ctrl_c.await;
+            info!("SIGINT received — starting shutdown");
+        }
+        shutdown.notify_waiters();
+    });
+
     // Wait for all listeners
     for handle in handles {
         let _ = handle.await;
     }
+    info!("all listeners closed — exiting");
 }
 
 /// Accept loop for a single listener.
@@ -115,8 +152,17 @@ async fn accept_loop(
     is_server: bool,
     port: u16,
 ) {
+    let shutdown = Arc::clone(&state.shutdown);
     loop {
-        let (stream, addr) = match listener.accept().await {
+        let accept = tokio::select! {
+            biased;
+            _ = shutdown.notified() => {
+                info!("stopping listener on port {port}");
+                return;
+            }
+            a = listener.accept() => a,
+        };
+        let (stream, addr) = match accept {
             Ok(s) => s,
             Err(e) => {
                 error!("accept error on port {port}: {e}");

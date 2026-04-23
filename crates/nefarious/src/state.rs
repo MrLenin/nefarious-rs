@@ -214,6 +214,11 @@ pub struct ServerState {
     /// blow through FEAT_IPCHECK_CLONE_LIMIT in the configured
     /// period.
     pub ipcheck: crate::ipcheck::IpCheck,
+    /// Fires once when the process receives a shutdown signal
+    /// (SIGINT/SIGTERM). Listener tasks select on it so we stop
+    /// accepting new connections promptly while existing sessions
+    /// drain naturally.
+    pub shutdown: Arc<tokio::sync::Notify>,
 }
 
 /// One past-user record kept for `/WHOWAS` lookups.
@@ -278,6 +283,7 @@ impl ServerState {
             zlines: DashMap::new(),
             jupes: DashMap::new(),
             ipcheck: crate::ipcheck::IpCheck::new(),
+            shutdown: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
