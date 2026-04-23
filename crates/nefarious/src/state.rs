@@ -281,6 +281,29 @@ impl ServerState {
         }
     }
 
+    /// Broadcast a server notice to every locally-connected oper
+    /// with the `+s` user mode set. The wire form is a NOTICE from
+    /// the server to each recipient — clients render it as a
+    /// "*** Notice:" snotice. Caller is responsible for gating on
+    /// FEAT_CONNEXIT_NOTICES or similar policy flags.
+    pub async fn snotice(&self, text: &str) {
+        let src = crate::tags::SourceInfo::now();
+        for entry in self.clients.iter() {
+            let c = entry.value().read().await;
+            if c.modes.contains(&'s') {
+                let nick = c.nick.clone();
+                c.send_from(
+                    irc_proto::Message::with_source(
+                        &self.server_name,
+                        irc_proto::Command::Notice,
+                        vec![nick, format!("*** Notice -- {text}")],
+                    ),
+                    &src,
+                );
+            }
+        }
+    }
+
     /// (Re)load the MOTD from the `MPATH` feature value. Called at
     /// startup after ServerState::new, and again on /REHASH.
     /// Returns `Ok(line_count)` on success, `Err(reason)` on failure.

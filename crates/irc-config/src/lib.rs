@@ -243,6 +243,13 @@ impl Config {
         self.feature("MPATH")
     }
 
+    /// `CONNEXIT_NOTICES` — when true, send server notices for each
+    /// connect/exit/nickchg to opers with the `+s` umode. Defaults
+    /// to false in nefarious2 (operators opt in explicitly).
+    pub fn connexit_notices(&self) -> bool {
+        self.feature_bool("CONNEXIT_NOTICES", false)
+    }
+
     /// `MAXWATCHS` — per-client cap on the WATCH/MONITOR list size.
     /// Defaults to 128, matching nefarious2's F_I(MAXWATCHS, …, 128).
     /// Invalid values in the config silently fall back to the default.

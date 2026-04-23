@@ -270,6 +270,19 @@ pub async fn handle_connection<S>(
 
     info!("client {nick} ({addr}) registered");
 
+    // Server notice to +s opers if the feature flag is on.
+    if state.config.connexit_notices() {
+        let (user, host, realname) = {
+            let c = client.read().await;
+            (c.user.clone(), c.host.clone(), c.realname.clone())
+        };
+        state
+            .snotice(&format!(
+                "Client connecting: {nick} ({user}@{host}) [{addr}] {{{realname}}}"
+            ))
+            .await;
+    }
+
     // Register in global state
     state.register_client(Arc::clone(&client), &nick).await;
 
@@ -326,6 +339,15 @@ pub async fn handle_connection<S>(
                 }
             }
         }
+    }
+
+    // Server notice to +s opers if feature flag is on.
+    if state.config.connexit_notices() {
+        state
+            .snotice(&format!(
+                "Client exiting: {nick} [{addr}] ({quit_reason})"
+            ))
+            .await;
     }
 
     // Remove from state

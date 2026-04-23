@@ -74,6 +74,20 @@ pub async fn handle_nick_change(ctx: &HandlerContext, msg: &Message) {
         ctx.state.notify_monitor_online(&new_nick, &new_prefix).await;
     }
 
+    // Server notice to +s opers — nick changes are part of the
+    // CONNEXIT audit trail.
+    if ctx.state.config.connexit_notices() && !old_nick.is_empty() {
+        let (user, host) = {
+            let c = ctx.client.read().await;
+            (c.user.clone(), c.host.clone())
+        };
+        ctx.state
+            .snotice(&format!(
+                "Nick change: From {old_nick} to {new_nick} [{user}@{host}]"
+            ))
+            .await;
+    }
+
     // Notify the client
     let nick_msg = Message::with_source(&old_prefix, Command::Nick, vec![new_nick.clone()]);
 
