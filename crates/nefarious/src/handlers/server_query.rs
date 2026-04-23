@@ -68,6 +68,105 @@ pub async fn handle_stats(ctx: &HandlerContext, msg: &Message) {
                 .await;
             }
         }
+        // Ban stats — G/S/Z/J emit one line per stored entry. The
+        // 247/542/546 numerics match nefarious2 s_err.c: a sign
+        // char, the mask, three timestamps (expire, lastmod,
+        // lifetime), then reason. Inactive entries are shown with
+        // '-' so opers can confirm peer deactivations landed.
+        'g' | 'G' => {
+            let now = chrono::Utc::now();
+            for entry in ctx.state.glines.iter() {
+                let gl = entry.value().read().await;
+                let sign = if gl.active { '+' } else { '-' };
+                let expire = gl
+                    .expires_at
+                    .map(|t| (t.timestamp() - now.timestamp()).max(0))
+                    .unwrap_or(0);
+                let lifetime = gl.lifetime.unwrap_or(0);
+                ctx.send_numeric(
+                    RPL_STATSGLINE,
+                    vec![format!(
+                        "{sign} {mask} {expire} {lastmod} {lifetime} {setter} :{reason}",
+                        mask = gl.mask,
+                        lastmod = gl.lastmod,
+                        setter = gl.set_by,
+                        reason = gl.reason,
+                    )],
+                )
+                .await;
+            }
+        }
+        's' | 'S' => {
+            let now = chrono::Utc::now();
+            for entry in ctx.state.shuns.iter() {
+                let sh = entry.value().read().await;
+                let sign = if sh.active { '+' } else { '-' };
+                let expire = sh
+                    .expires_at
+                    .map(|t| (t.timestamp() - now.timestamp()).max(0))
+                    .unwrap_or(0);
+                let lifetime = sh.lifetime.unwrap_or(0);
+                ctx.send_numeric(
+                    RPL_STATSSHUN,
+                    vec![format!(
+                        "{sign} {mask} {expire} {lastmod} {lifetime} {setter} :{reason}",
+                        mask = sh.mask,
+                        lastmod = sh.lastmod,
+                        setter = sh.set_by,
+                        reason = sh.reason,
+                    )],
+                )
+                .await;
+            }
+        }
+        'z' | 'Z' => {
+            let now = chrono::Utc::now();
+            for entry in ctx.state.zlines.iter() {
+                let zl = entry.value().read().await;
+                let sign = if zl.active { '+' } else { '-' };
+                let expire = zl
+                    .expires_at
+                    .map(|t| (t.timestamp() - now.timestamp()).max(0))
+                    .unwrap_or(0);
+                let lifetime = zl.lifetime.unwrap_or(0);
+                ctx.send_numeric(
+                    RPL_STATSZLINE,
+                    vec![format!(
+                        "{sign} {mask} {expire} {lastmod} {lifetime} {setter} :{reason}",
+                        mask = zl.mask,
+                        lastmod = zl.lastmod,
+                        setter = zl.set_by,
+                        reason = zl.reason,
+                    )],
+                )
+                .await;
+            }
+        }
+        'j' | 'J' => {
+            // RPL_STATSJLINE has the minimal `J %s` wire format.
+            // Include active flag + expiry in the displayed string
+            // so the oper gets useful context without a new numeric.
+            let now = chrono::Utc::now();
+            for entry in ctx.state.jupes.iter() {
+                let ju = entry.value().read().await;
+                let sign = if ju.active { '+' } else { '-' };
+                let expire = ju
+                    .expires_at
+                    .map(|t| (t.timestamp() - now.timestamp()).max(0))
+                    .unwrap_or(0);
+                ctx.send_numeric(
+                    RPL_STATSJLINE,
+                    vec![format!(
+                        "{sign}{name} {expire} {lastmod} {setter} :{reason}",
+                        name = ju.server,
+                        lastmod = ju.lastmod,
+                        setter = ju.set_by,
+                        reason = ju.reason,
+                    )],
+                )
+                .await;
+            }
+        }
         _ => {} // unknown letters silently produce just RPL_ENDOFSTATS
     }
 

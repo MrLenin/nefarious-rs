@@ -16,8 +16,14 @@ pub const RPL_ISUPPORT: u16 = 5;
 
 // Stats
 pub const RPL_STATSLINKINFO: u16 = 211;
+pub const RPL_STATSJLINE: u16 = 222;
+pub const RPL_STATSGLINE: u16 = 247;
 pub const RPL_STATSUPTIME: u16 = 242;
 pub const RPL_ENDOFSTATS: u16 = 219;
+/// 542: one line per SHUN entry; format mirrors RPL_STATSGLINE.
+pub const RPL_STATSSHUN: u16 = 542;
+/// 546: one line per ZLINE entry; mask-only rather than user@host.
+pub const RPL_STATSZLINE: u16 = 546;
 
 // Admin
 pub const RPL_ADMINME: u16 = 256;
