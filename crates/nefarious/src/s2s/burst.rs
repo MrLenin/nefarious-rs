@@ -314,6 +314,34 @@ pub async fn send_burst(state: &ServerState, link: &ServerLink) {
         info!("burst: sent {shun_count} SHUN entries");
     }
 
+    // 3c. ZLINEs — same shape as G-lines on the wire (no user@host
+    // split, just a single mask field).
+    let mut zline_count = 0;
+    for entry in state.zlines.iter() {
+        let zl = entry.value().read().await;
+        if zl.lastmod == 0 {
+            continue;
+        }
+        let sign = if zl.active { '+' } else { '-' };
+        let expire_offset = match zl.expires_at {
+            Some(exp) => (exp.timestamp() - now_secs).max(0),
+            None => 0,
+        };
+        let lifetime = zl.lifetime.unwrap_or(0);
+        link.send_line(format!(
+            "{server} ZL * {sign}{mask} {expire_offset} {lastmod} {lifetime} :{reason}",
+            server = state.server_name,
+            mask = zl.mask,
+            lastmod = zl.lastmod,
+            reason = zl.reason,
+        ))
+        .await;
+        zline_count += 1;
+    }
+    if zline_count > 0 {
+        info!("burst: sent {zline_count} ZLINE entries");
+    }
+
     // 4. Send END_OF_BURST
     let eb = format!("{} EB", our_numeric);
     link.send_line(eb).await;

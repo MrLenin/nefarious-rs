@@ -12,6 +12,7 @@ mod server;
 mod shun;
 mod state;
 mod tags;
+mod zline;
 
 use std::path::PathBuf;
 

@@ -3433,6 +3433,132 @@ pub async fn handle_shun(
     }
 }
 
+/// Handle inbound S2S ZLINE (token `ZL`). IP-mask variant of GLINE;
+/// enforcement is at connect. Wire shape is identical to GL / SU.
+pub async fn handle_zline(
+    state: &ServerState,
+    msg: &P10Message,
+    skip: ServerNumeric,
+) {
+    if msg.params.len() < 2 {
+        return;
+    }
+    let origin = match &msg.origin {
+        Some(o) => o.as_str(),
+        None => return,
+    };
+    let target = &msg.params[0];
+    let mask_with_action = &msg.params[1];
+    let mask_with_action = mask_with_action
+        .strip_prefix('!')
+        .unwrap_or(mask_with_action);
+    let (action, mask) = match mask_with_action.chars().next() {
+        Some('+') => ('+', &mask_with_action[1..]),
+        Some('-') => ('-', &mask_with_action[1..]),
+        Some('>') => ('>', &mask_with_action[1..]),
+        Some('<') => ('<', &mask_with_action[1..]),
+        _ => return,
+    };
+    if mask.is_empty() {
+        return;
+    }
+    let is_global = target == "*";
+    let key = crate::zline::mask_key(mask);
+    let now = chrono::Utc::now();
+
+    match action {
+        '+' if is_global => {
+            if msg.params.len() < 4 {
+                tracing::debug!("ZL +{mask} from {origin}: too few params, ignoring");
+            } else {
+                let expire_offset: i64 = msg.params[2].parse().unwrap_or(0);
+                let lastmod: u64 = msg.params[3].parse().unwrap_or_else(|_| now.timestamp() as u64);
+                let lifetime: Option<u64> = msg.params.get(4).and_then(|v| v.parse().ok());
+                let reason = msg
+                    .params
+                    .last()
+                    .filter(|s| !s.is_empty() && msg.params.len() >= 5)
+                    .cloned()
+                    .unwrap_or_else(|| "No reason".to_string());
+                let expires_at = if expire_offset > 0 {
+                    Some(now + chrono::Duration::seconds(expire_offset))
+                } else {
+                    None
+                };
+                let zl = crate::zline::Zline {
+                    mask: mask.to_string(),
+                    reason,
+                    expires_at,
+                    set_by: origin.to_string(),
+                    set_at: now,
+                    lastmod,
+                    lifetime,
+                    active: true,
+                };
+                let expires_display = expires_at
+                    .map(|t| t.to_rfc3339())
+                    .unwrap_or_else(|| "never".to_string());
+                let reason_for_kick = zl.reason.clone();
+                let mask_for_kick = zl.mask.clone();
+                state
+                    .zlines
+                    .insert(key.clone(), Arc::new(RwLock::new(zl)));
+                tracing::info!(
+                    "ZL +{mask} from {origin}: stored, expires={expires_display}"
+                );
+
+                // Post-add scan by IP — same pattern as GLINE but
+                // matching the socket's peer IP rather than user@host.
+                let mut victims = Vec::new();
+                for entry in state.clients.iter() {
+                    let c = entry.value().read().await;
+                    if c.is_registered() {
+                        let ip = c.addr.ip().to_string();
+                        if crate::channel::wildcard_match(&mask_for_kick, &ip) {
+                            victims.push(entry.key().clone());
+                        }
+                    }
+                }
+                for id in victims {
+                    if let Some(arc) = state.clients.get(&id) {
+                        arc.read().await.request_disconnect(format!(
+                            "Z-lined: {reason_for_kick}"
+                        ));
+                    }
+                }
+            }
+        }
+        '-' if is_global => {
+            if let Some(entry) = state.zlines.get(&key) {
+                let mut zl = entry.write().await;
+                zl.active = false;
+                if let Some(lm) = msg.params.get(2).and_then(|v| v.parse::<u64>().ok()) {
+                    zl.lastmod = lm;
+                }
+                tracing::info!("ZL -{mask} from {origin}: marked inactive");
+            }
+        }
+        _ => {
+            tracing::debug!(
+                "ZL action {action}{mask} target={target} from {origin}: passthrough only"
+            );
+        }
+    }
+
+    let wire = if msg.params.len() >= 5 {
+        let head = msg.params[..msg.params.len() - 1].join(" ");
+        let trailing = &msg.params[msg.params.len() - 1];
+        format!("{origin} ZL {head} :{trailing}")
+    } else {
+        format!("{origin} ZL {}", msg.params.join(" "))
+    };
+    for entry in state.links.iter() {
+        if *entry.key() != skip {
+            entry.value().send_line(wire.clone()).await;
+        }
+    }
+}
+
 pub async fn handle_gline(
     state: &ServerState,
     msg: &P10Message,

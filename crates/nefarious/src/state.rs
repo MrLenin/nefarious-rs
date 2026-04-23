@@ -197,6 +197,10 @@ pub struct ServerState {
     /// Same shape as `glines` but enforced at outbound messaging
     /// rather than connect.
     pub shuns: crate::shun::ShunStore,
+    /// Active + suspended Z-line set, keyed by lowercased mask.
+    /// Matches on client IP rather than user@host; enforced at
+    /// connect like glines.
+    pub zlines: crate::zline::ZlineStore,
 }
 
 /// One past-user record kept for `/WHOWAS` lookups.
@@ -257,6 +261,7 @@ impl ServerState {
             watched_by: DashMap::new(),
             glines: DashMap::new(),
             shuns: DashMap::new(),
+            zlines: DashMap::new(),
         }
     }
 
@@ -527,6 +532,21 @@ impl ServerState {
             }
         }
         false
+    }
+
+    /// Search the Z-line store for the first enforceable entry
+    /// matching the given peer IP string. Returns a (mask, reason)
+    /// snapshot so the connect-gate can close the socket without
+    /// holding the store lock.
+    pub async fn find_matching_zline(&self, ip: &str) -> Option<(String, String)> {
+        let now = chrono::Utc::now();
+        for entry in self.zlines.iter() {
+            let zl = entry.value().read().await;
+            if zl.is_enforceable(now) && zl.matches(ip) {
+                return Some((zl.mask.clone(), zl.reason.clone()));
+            }
+        }
+        None
     }
 
     /// Allocate a P10 client numeric and record it against `id`. Returns

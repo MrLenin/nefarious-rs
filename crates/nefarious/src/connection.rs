@@ -99,32 +99,38 @@ pub async fn handle_connection<S>(
     let client_id = client.read().await.id;
     let nick = client.read().await.nick.clone();
 
-    // G-line gate: refuse registration if this user@host matches an
-    // active network ban. Happens *after* nick/USER are parsed so
-    // we have `user` filled in, but *before* we tell the network
-    // about the client. That way a G-lined user never gets a
-    // numeric announced on the wire and never touches the channel
-    // graph, matching the "reject at connect" model in nefarious2
-    // register_user() (s_user.c).
-    let gline_match = {
+    // Network-ban gates. Happen *after* nick/USER are parsed so we
+    // have `user` + a resolved hostname, but *before* we tell the
+    // network about the client — a banned user never gets a numeric
+    // announced on the wire and never touches the channel graph,
+    // matching register_user() in nefarious2 s_user.c.
+    //
+    // Two checks run in sequence: ZLINE (IP match) first because
+    // it's cheaper and strictly cruder than GLINE; GLINE's
+    // user@host match covers everything a ZLINE would plus more.
+    let ban_match = {
         let c = client.read().await;
+        let ip = c.addr.ip().to_string();
         let user_host = format!("{}@{}", c.user, c.host);
-        state.find_matching_gline(&user_host).await
+        if let Some((mask, reason)) = state.find_matching_zline(&ip).await {
+            Some(("Z-lined", mask, reason))
+        } else if let Some((mask, reason)) = state.find_matching_gline(&user_host).await {
+            Some(("G-lined", mask, reason))
+        } else {
+            None
+        }
     };
-    if let Some((mask, reason)) = gline_match {
-        info!("refusing registration of {nick} ({addr}): G-lined by {mask}");
+    if let Some((kind, mask, reason)) = ban_match {
+        info!("refusing registration of {nick} ({addr}): {kind} by {mask}");
         let (id, nick_for_release) = {
             let c = client.read().await;
             (c.id, c.nick.clone())
         };
-        // Send ERROR so the client sees a clean failure reason
-        // before the socket closes. Bypass the tags pipeline since
-        // the client isn't registered for IRCv3 caps at this point.
         let c = client.read().await;
         c.send_raw(irc_proto::Message::with_source(
             &state.server_name,
             irc_proto::Command::Error,
-            vec![format!("Closing Link: {nick} [G-lined ({reason})]")],
+            vec![format!("Closing Link: {nick} [{kind} ({reason})]")],
         ));
         drop(c);
         if !nick_for_release.is_empty() {
