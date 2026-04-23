@@ -143,9 +143,9 @@ fn who_status(flags: &crate::channel::MembershipFlags, multi_prefix: bool) -> St
 ///   `L` — emit 732 with the current list, then 733.
 ///   `S` — emit 730/731 summary of current list (status).
 ///
-/// No list-cap enforcement yet — the 734 ERR_MONLISTFULL constant
-/// is defined but we let clients subscribe to as many nicks as they
-/// like. A cap ties to FEAT_MAXMONITOR which we haven't wired.
+/// Per-client size is capped at `FEAT_MAXWATCHS` (default 128), the
+/// same limit WATCH uses; overflow on `+` emits 734 ERR_MONLISTFULL
+/// and stops processing the rest of that request.
 pub async fn handle_monitor(ctx: &HandlerContext, msg: &Message) {
     if msg.params.is_empty() {
         ctx.send_numeric(
@@ -167,9 +167,28 @@ pub async fn handle_monitor(ctx: &HandlerContext, msg: &Message) {
             // targets — batch the walk.
             let nicks: Vec<String> =
                 list.split(',').filter(|n| !n.is_empty()).map(|n| n.to_string()).collect();
+            let max = ctx.state.config.max_watchs() as usize;
             let mut online_prefixes: Vec<String> = Vec::new();
             let mut offline_nicks: Vec<String> = Vec::new();
+            let mut overflow_nick: Option<String> = None;
             for nick in &nicks {
+                // Cap on pre-insert count matches m_monitor.c: we
+                // refuse the request that would push the watch count
+                // past the limit, flushing what we've already staged
+                // before emitting 734. Subsequent nicks in this batch
+                // are skipped so the client sees a single overflow
+                // error rather than a trickle.
+                let current = {
+                    if let Some(arc) = ctx.state.clients.get(&client_id) {
+                        arc.read().await.monitored.len()
+                    } else {
+                        0
+                    }
+                };
+                if current >= max {
+                    overflow_nick = Some(nick.clone());
+                    break;
+                }
                 ctx.state.monitor_add(client_id, nick).await;
                 // Online check — local first, then remote.
                 if let Some(arc) = ctx.state.find_client_by_nick(nick) {
@@ -187,6 +206,13 @@ pub async fn handle_monitor(ctx: &HandlerContext, msg: &Message) {
             }
             if !offline_nicks.is_empty() {
                 ctx.send_numeric(RPL_MONOFFLINE, vec![offline_nicks.join(",")]).await;
+            }
+            if let Some(nick) = overflow_nick {
+                ctx.send_numeric(
+                    ERR_MONLISTFULL,
+                    vec![max.to_string(), nick, "Monitor list is full".into()],
+                )
+                .await;
             }
         }
         "-" => {

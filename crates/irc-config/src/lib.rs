@@ -140,6 +140,15 @@ impl Config {
         self.feature("HIS_SERVERINFO")
     }
 
+    /// `MAXWATCHS` — per-client cap on the WATCH/MONITOR list size.
+    /// Defaults to 128, matching nefarious2's F_I(MAXWATCHS, …, 128).
+    /// Invalid values in the config silently fall back to the default.
+    pub fn max_watchs(&self) -> u32 {
+        self.feature("MAXWATCHS")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(128)
+    }
+
     /// Load a configuration from a file path, resolving includes.
     pub fn from_file(path: &Path) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path).map_err(|e| ConfigError::Io(e.to_string()))?;
