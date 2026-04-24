@@ -4117,3 +4117,23 @@ async fn clear_client_sasl(client: &Arc<RwLock<crate::client::Client>>) {
     c.sasl_buffer = None;
     c.sasl_session_token = None;
 }
+
+/// Handle a numeric message received over S2S (token is a bare
+/// number like `"402"`). Most numerics we encounter from an uplink
+/// are informational or already delivered to a specific client by
+/// name; this function only intercepts the ones that drive ircd
+/// state, not the ones that just pass through.
+///
+/// - **402 ERR_NOSUCHSERVER** — the hub couldn't route something.
+///   In practice this fires when we tried to send a SASL line to
+///   a target that has since disconnected; fast-fail any in-flight
+///   sessions rather than wait 30s for the timeout sweeper.
+pub async fn handle_numeric(state: &ServerState, msg: &P10Message, numeric: u16) {
+    if numeric == 402 {
+        debug!(
+            "received 402 from upstream ({params:?}); re-checking SASL reachability",
+            params = msg.params
+        );
+        crate::sasl::abort_unreachable_sessions(state).await;
+    }
+}

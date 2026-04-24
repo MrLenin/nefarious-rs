@@ -228,7 +228,7 @@ pub async fn handle_authenticate(ctx: &HandlerContext, msg: &Message) {
     let Some(mech) = mechanism else {
         let mech_upper = param.to_ascii_uppercase();
         let relay_active = ctx.state.config().sasl_server().is_some()
-            && crate::sasl::services_link(&ctx.state).is_some();
+            && crate::sasl::services_link(&ctx.state).await.is_some();
 
         if relay_active {
             // Start a relay session. We trust services to validate
@@ -653,13 +653,15 @@ pub async fn handle_cap(ctx: &HandlerContext, msg: &Message) {
 /// the testnet's x3.services broadcasts its supported list at link
 /// time, and we fold those in so clients see the full picture.
 async fn advertised_list(ctx: &HandlerContext) -> Vec<String> {
+    // Precompute the SASL `sasl=` value once (it queries async state)
+    // so the iter below stays cheap and synchronous.
+    let sasl_value = sasl_mechanisms_advertisement(ctx).await;
     ctx.state
         .advertised_caps
         .iter()
         .map(|cap| {
             if *cap == crate::capabilities::Capability::Sasl {
-                let value = sasl_mechanisms_advertisement(ctx);
-                format!("{}={value}", cap.name())
+                format!("{}={sasl_value}", cap.name())
             } else {
                 match cap.ls_value() {
                     Some(v) => format!("{}={v}", cap.name()),
@@ -685,11 +687,11 @@ async fn advertised_list(ctx: &HandlerContext) -> Vec<String> {
 ///    cleanly if it can't handle the mechanism.
 /// 4. **No relay** (SASL_SERVER unset or link down) — advertise our
 ///    locally-implemented mechanisms.
-fn sasl_mechanisms_advertisement(ctx: &HandlerContext) -> String {
+async fn sasl_mechanisms_advertisement(ctx: &HandlerContext) -> String {
     let state = &ctx.state;
     let cfg = state.config();
     let relay_possible = cfg.sasl_server().is_some()
-        && crate::sasl::services_link(state).is_some();
+        && crate::sasl::services_link(state).await.is_some();
     if relay_possible {
         let announced = state.sasl.mechanisms_snapshot();
         if !announced.is_empty() {

@@ -40,6 +40,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
+use p10_proto::ServerNumeric;
 use tracing::{debug, info, warn};
 
 use crate::client::ClientId;
@@ -225,14 +226,68 @@ async fn handle_timeout(state: &ServerState, token: &str, session: &SaslSession)
 }
 
 /// Find the live S2S link we'd use to reach the configured
-/// SASL_SERVER. Returns `None` when SASL_SERVER is unset or no
-/// link is active — the caller then falls back to local SASL.
-pub fn services_link(state: &ServerState) -> Option<(Arc<crate::s2s::types::ServerLink>, String)> {
-    let target = state.config().sasl_server()?.to_string();
-    // Single-upstream topology: get_link() returns that link. Hub
-    // handles routing to target by its name.
+/// SASL_SERVER, plus the target server's P10 numeric for the
+/// wire. Returns `None` when SASL_SERVER is unset, no link is
+/// active, or the target server isn't currently in the network —
+/// the caller then falls back to local SASL.
+///
+/// The target on the wire **must** be the server's 2-character
+/// base64 numeric, not its hostname — `m_authenticate.c:283` in
+/// nefarious2 emits `"%C %C!%u.%u ..."` where both `%C` are
+/// server numerics. Sending the name works by accident on
+/// name-lookup-capable hubs but isn't the canonical format.
+///
+/// Reachability check walks `state.remote_servers` by name; a
+/// target that isn't there (either never joined, or was SQUIT'd)
+/// would otherwise produce a 402 ping-pong 38 seconds later when
+/// the session times out. Early return saves the wait and gives
+/// the client a clean failure. The racy "target goes down
+/// between our check and our send" case still exists; we catch
+/// that via the timeout sweeper and via inbound numeric 402.
+pub async fn services_link(
+    state: &ServerState,
+) -> Option<(Arc<crate::s2s::types::ServerLink>, ServerNumeric)> {
+    let target_name = state.config().sasl_server()?.to_string();
     let link = state.get_link()?;
-    Some((link, target))
+    let target_numeric = resolve_server_numeric(state, &target_name).await?;
+    Some((link, target_numeric))
+}
+
+/// Look up a server by name (case-insensitive) and return its
+/// P10 numeric. `None` means we haven't seen that name in burst
+/// or since — i.e. it's not currently in the network.
+async fn resolve_server_numeric(state: &ServerState, name: &str) -> Option<ServerNumeric> {
+    if name.eq_ignore_ascii_case(&state.server_name) {
+        // Routing SASL to ourselves is nonsense; caller falls back.
+        return None;
+    }
+    for entry in state.remote_servers.iter() {
+        let rs_name = entry.value().read().await.name.clone();
+        if rs_name.eq_ignore_ascii_case(name) {
+            return Some(*entry.key());
+        }
+    }
+    None
+}
+
+/// Abort every in-flight session whose target is no longer in the
+/// network. Called when the hub tells us (via numeric 402) that
+/// it couldn't route something — a cheap generic fast-fail that
+/// doesn't require the numeric to carry a session token.
+pub async fn abort_unreachable_sessions(state: &ServerState) {
+    let target = match state.config().sasl_server() {
+        Some(s) => s.to_string(),
+        None => return,
+    };
+    if resolve_server_numeric(state, &target).await.is_some() {
+        return;
+    }
+    // Target has disappeared. Fail every session — they're all
+    // going to time out anyway.
+    let sessions = state.sasl.sweep_expired(Duration::from_secs(0));
+    for (token, session) in sessions {
+        handle_timeout(state, &token, &session).await;
+    }
 }
 
 /// Emit the initial `SASL ... S <mech> [:<initial>]` line to the
@@ -242,7 +297,7 @@ pub async fn start_relay(
     client_id: ClientId,
     mechanism: &str,
 ) -> Option<String> {
-    let (link, target) = services_link(state)?;
+    let (link, target) = services_link(state).await?;
     let token = state.sasl.new_token(state.numeric);
     state.sasl.register(token.clone(), client_id, mechanism.to_string());
     // `S` with no initial response — services will reply with a `C`
@@ -254,14 +309,14 @@ pub async fn start_relay(
         mech = mechanism,
     );
     link.send_line(line).await;
-    debug!("SASL relay started: {token} mech={mechanism}");
+    debug!("SASL relay started: {token} mech={mechanism} target={target}");
     Some(token)
 }
 
 /// Forward a client AUTHENTICATE chunk to services as `SASL ... C`.
 /// `data` is passed through untouched — services reassembles.
 pub async fn forward_chunk(state: &ServerState, token: &str, data: &str) {
-    let Some((link, target)) = services_link(state) else {
+    let Some((link, target)) = services_link(state).await else {
         warn!("SASL forward_chunk: no services link; dropping");
         return;
     };
@@ -274,7 +329,7 @@ pub async fn forward_chunk(state: &ServerState, token: &str, data: &str) {
 
 /// Forward a client `AUTHENTICATE *` as `SASL ... D A`.
 pub async fn abort_to_services(state: &ServerState, token: &str) {
-    let Some((link, target)) = services_link(state) else {
+    let Some((link, target)) = services_link(state).await else {
         return;
     };
     let line = format!(
