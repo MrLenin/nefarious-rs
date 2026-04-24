@@ -523,7 +523,31 @@ async fn registration_phase(
 
     let ctx = HandlerContext::new(Arc::clone(state), Arc::clone(client));
 
-    while let Some(result) = stream.next().await {
+    // Pipelined clients (e.g. Goguma) send CAP END before the SASL
+    // round trip completes. In that case cap_negotiating goes false
+    // and NICK/USER are already stashed, so the post-line gate
+    // would return true even though SASL is mid-flight. To handle
+    // this cleanly we `select!` on stream input AND a SASL
+    // resolution notify — when services replies (or the timeout
+    // sweeper aborts), the notify fires and we re-evaluate the
+    // gate without needing a fresh client line.
+    let sasl_notify = client.read().await.sasl_resolved.clone();
+
+    loop {
+        let msg_opt = tokio::select! {
+            biased;
+            maybe = stream.next() => maybe,
+            _ = sasl_notify.notified() => {
+                // No line to process — fall through to the gate check.
+                if gate_passed(client, got_nick, got_user).await {
+                    return true;
+                }
+                continue;
+            }
+        };
+        let Some(result) = msg_opt else {
+            return false;
+        };
         let msg = match result {
             Ok(m) => m,
             Err(e) => {
@@ -715,19 +739,35 @@ async fn registration_phase(
             }
         }
 
-        if got_nick && got_user {
-            // Hold registration open while IRCv3 CAP negotiation is in
-            // progress — the client must send CAP END before we can
-            // send the welcome burst. Without this gate, CAP LS / REQ
-            // would race the welcome and capabilities that gate
-            // registration (notably SASL) wouldn't work at all.
-            if !client.read().await.cap_negotiating {
-                return true;
-            }
+        if gate_passed(client, got_nick, got_user).await {
+            return true;
         }
     }
+}
 
-    false
+/// Readiness gate for registration completion.
+///
+/// Must have: NICK + USER received, CAP negotiation finished
+/// (client sent CAP END), and no SASL exchange still in flight.
+/// The SASL check matters for pipelined clients (Goguma, and any
+/// IRCv3 client following sasl-3.2) that fire CAP END before the
+/// services round trip completes — without it we'd send the
+/// welcome burst and have the client registered before the
+/// account login landed, which breaks `require_sasl` gating and
+/// makes the post-registration state incoherent until services
+/// replies.
+async fn gate_passed(
+    client: &Arc<RwLock<Client>>,
+    got_nick: bool,
+    got_user: bool,
+) -> bool {
+    if !(got_nick && got_user) {
+        return false;
+    }
+    let c = client.read().await;
+    !c.cap_negotiating
+        && c.sasl_session_token.is_none()
+        && c.sasl_mechanism.is_none()
 }
 
 /// Send the welcome burst after registration.

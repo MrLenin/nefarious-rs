@@ -186,6 +186,13 @@ pub struct Client {
     /// correlation identifier. Cleared on success / fail / abort /
     /// timeout. `None` means local SASL (or no SASL in progress).
     pub sasl_session_token: Option<String>,
+    /// Fires whenever a SASL exchange reaches a terminal state
+    /// (success / fail / abort / timeout). Pipelined clients like
+    /// Goguma send `CAP END` before the SASL round trip completes;
+    /// the registration loop awaits this notify so it can
+    /// re-evaluate readiness after services replies rather than
+    /// stalling at `stream.next()`.
+    pub sasl_resolved: Arc<Notify>,
 }
 
 /// Per-dispatch labeled-response capture.
@@ -259,6 +266,7 @@ impl Client {
             class: None,
             sasl_buffer: None,
             sasl_session_token: None,
+            sasl_resolved: Arc::new(Notify::new()),
         }
     }
 
@@ -351,6 +359,17 @@ impl Client {
     /// Whether the given capability is active for this client.
     pub fn has_cap(&self, cap: Capability) -> bool {
         self.enabled_caps.contains(&cap)
+    }
+
+    /// Mark a SASL exchange as terminated. Clears all SASL-related
+    /// fields and wakes anyone (usually the registration loop)
+    /// blocked on `sasl_resolved`. Call this at every terminal
+    /// point: success, fail, abort, timeout.
+    pub fn finish_sasl(&mut self) {
+        self.sasl_mechanism = None;
+        self.sasl_buffer = None;
+        self.sasl_session_token = None;
+        self.sasl_resolved.notify_one();
     }
 
     /// Whether `sender_prefix` (nick!user@host form) is filtered by

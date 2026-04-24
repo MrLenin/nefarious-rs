@@ -4119,13 +4119,11 @@ pub async fn handle_sasl(state: &ServerState, msg: &P10Message) {
 }
 
 /// Clear all SASL-related flags on a local client so a subsequent
-/// AUTHENTICATE starts clean. Used by the relay reply handlers
-/// (success / fail / abort) so the client can retry if they want.
+/// AUTHENTICATE starts clean, and wake anyone blocked on the
+/// resolution notify (typically the registration loop for a
+/// pipelined client that sent CAP END before services replied).
 async fn clear_client_sasl(client: &Arc<RwLock<crate::client::Client>>) {
-    let mut c = client.write().await;
-    c.sasl_mechanism = None;
-    c.sasl_buffer = None;
-    c.sasl_session_token = None;
+    client.write().await.finish_sasl();
 }
 
 /// Handle a numeric message received over S2S (token is a bare

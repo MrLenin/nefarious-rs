@@ -203,8 +203,7 @@ pub async fn handle_authenticate(ctx: &HandlerContext, msg: &Message) {
         let relay_token = {
             let mut c = ctx.client.write().await;
             let token = c.sasl_session_token.take();
-            c.sasl_mechanism = None;
-            c.sasl_buffer = None;
+            c.finish_sasl();
             token
         };
         if let Some(token) = relay_token {
@@ -319,8 +318,7 @@ pub async fn handle_authenticate(ctx: &HandlerContext, msg: &Message) {
         if is_continuation {
             let buf = c.sasl_buffer.get_or_insert_with(String::new);
             if buf.len() + param.len() > SASL_PAYLOAD_MAX {
-                c.sasl_mechanism = None;
-                c.sasl_buffer = None;
+                c.finish_sasl();
                 drop(c);
                 ctx.send_numeric(
                     crate::numeric::ERR_SASLTOOLONG,
@@ -338,7 +336,7 @@ pub async fn handle_authenticate(ctx: &HandlerContext, msg: &Message) {
         let mut buf = c.sasl_buffer.take().unwrap_or_default();
         if param != "+" {
             if buf.len() + param.len() > SASL_PAYLOAD_MAX {
-                c.sasl_mechanism = None;
+                c.finish_sasl();
                 drop(c);
                 ctx.send_numeric(
                     crate::numeric::ERR_SASLTOOLONG,
@@ -431,10 +429,7 @@ async fn handle_sasl_plain(ctx: &HandlerContext, payload: &[u8]) {
     )
     .await;
 
-    let mut c = ctx.client.write().await;
-    c.sasl_mechanism = None;
-    c.sasl_buffer = None;
-    c.sasl_session_token = None;
+    ctx.client.write().await.finish_sasl();
 }
 
 /// Finish SASL EXTERNAL. `payload` is the requested authzid (often
@@ -485,19 +480,11 @@ async fn handle_sasl_external(ctx: &HandlerContext, payload: &[u8]) {
     )
     .await;
 
-    let mut c = ctx.client.write().await;
-    c.sasl_mechanism = None;
-    c.sasl_buffer = None;
-    c.sasl_session_token = None;
+    ctx.client.write().await.finish_sasl();
 }
 
 async fn reset_sasl_and_fail(ctx: &HandlerContext, _reason: &str) {
-    {
-        let mut c = ctx.client.write().await;
-        c.sasl_mechanism = None;
-        c.sasl_buffer = None;
-        c.sasl_session_token = None;
-    }
+    ctx.client.write().await.finish_sasl();
     ctx.send_numeric(
         crate::numeric::ERR_SASLFAIL,
         vec!["SASL authentication failed".into()],

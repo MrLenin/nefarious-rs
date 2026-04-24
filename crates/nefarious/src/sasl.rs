@@ -225,10 +225,7 @@ async fn handle_timeout(state: &ServerState, token: &str, session: &SaslSession)
         );
     }
     info!("SASL session for {nick} timed out after {token}");
-    let mut c = client_arc.write().await;
-    c.sasl_session_token = None;
-    c.sasl_mechanism = None;
-    c.sasl_buffer = None;
+    client_arc.write().await.finish_sasl();
 }
 
 /// Find the live S2S link we'd use to reach the configured
