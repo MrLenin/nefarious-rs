@@ -416,7 +416,7 @@ async fn handle_server_link_inner<S>(
             P10Token::Destruct => {
                 super::handlers::handle_destruct(&state, &msg).await;
             }
-            P10Token::Unknown(ref tok) => {
+            P10Token::Unknown(tok) => {
                 // Numeric tokens ("402", "401", etc.) aren't in the
                 // P10Token enum; route them to the numeric handler
                 // so in-flight protocol state (e.g. SASL sessions)
