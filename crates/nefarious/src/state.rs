@@ -184,6 +184,10 @@ pub struct ServerState {
     /// `connection.rs` rather than at construction so unit tests
     /// (which never run a tokio runtime) don't need to plumb one.
     pub dnsbl_cache: Arc<crate::dnsbl::DnsblCache>,
+    /// SASL relay state — in-flight sessions + services-announced
+    /// mechanism list. Always present; inert when `SASL_SERVER` is
+    /// unset (no sessions registered, mechanism list stays empty).
+    pub sasl: Arc<crate::sasl::SaslState>,
     /// MaxMindDB reader for GeoIP lookups at connect. Wrapped in
     /// RwLock so `/REHASH` can swap in a freshly-opened reader
     /// when the operator points MMDB_FILE at a new file. `None`
@@ -336,6 +340,7 @@ impl ServerState {
             motd_path: std::sync::RwLock::new(None),
             dns_resolver,
             dnsbl_cache: Arc::new(crate::dnsbl::DnsblCache::new()),
+            sasl: Arc::new(crate::sasl::SaslState::new()),
             geoip: std::sync::RwLock::new(None),
             gitsync_tofu: std::sync::RwLock::new(None),
             ssl_acceptor: ArcSwap::from_pointee(None),

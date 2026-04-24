@@ -173,7 +173,19 @@ pub struct Client {
     /// resolves (success / fail / abort). Capped at
     /// `SASL_PAYLOAD_MAX` so a misbehaving client can't flood
     /// memory pre-registration.
+    ///
+    /// Only populated on the *local* SASL path (PLAIN/EXTERNAL
+    /// handled in-process). When the exchange is being relayed to
+    /// services (`sasl_session_token` set), chunks go through the
+    /// S2S link line-by-line without reassembly.
     pub sasl_buffer: Option<String>,
+    /// When this is `Some(token)`, an AUTHENTICATE exchange is in
+    /// flight against a services SASL peer; subsequent
+    /// `AUTHENTICATE <b64>` lines are forwarded as
+    /// `SASL ... C :<b64>` S2S lines using this token as the
+    /// correlation identifier. Cleared on success / fail / abort /
+    /// timeout. `None` means local SASL (or no SASL in progress).
+    pub sasl_session_token: Option<String>,
 }
 
 /// Per-dispatch labeled-response capture.
@@ -246,6 +258,7 @@ impl Client {
             tls_cert_cn: None,
             class: None,
             sasl_buffer: None,
+            sasl_session_token: None,
         }
     }
 

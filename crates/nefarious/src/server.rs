@@ -162,6 +162,15 @@ pub async fn run(
         Arc::clone(&state.shutdown),
     );
 
+    // SASL relay timeout sweeper: aborts any in-flight services
+    // SASL exchange older than FEAT_SASL_TIMEOUT (30s default),
+    // sending `D A` to services and ERR_SASLFAIL to the client.
+    // No-op when SASL_SERVER is unset.
+    crate::sasl::spawn_timeout_sweeper(
+        Arc::clone(&state),
+        Arc::clone(&state.shutdown),
+    );
+
     // Git config sync: if GIT_CONFIG_PATH is set, spawn a
     // background loop that runs `git pull --ff-only` on the
     // configured interval and, when HEAD moves, triggers a

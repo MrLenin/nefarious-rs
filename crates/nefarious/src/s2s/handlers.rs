@@ -3939,3 +3939,181 @@ pub async fn handle_gline(
         }
     }
 }
+
+/// Handle a P10 `SASL` token from services.
+///
+/// Wire shapes from services → us:
+/// ```text
+/// <origin> SASL <target_server> <session_token> C :<b64>     (challenge)
+/// <origin> SASL <target_server> <session_token> L :<account> (login)
+/// <origin> SASL <target_server> <session_token> D S          (success)
+/// <origin> SASL <target_server> <session_token> D F          (fail)
+/// <origin> SASL <target_server> <session_token> D A          (abort)
+/// <origin> SASL * * M :<csv>                                 (mech list)
+/// ```
+///
+/// Correlation uses the session token we minted when the client's
+/// `AUTHENTICATE <mech>` was relayed out. A reply whose token we
+/// don't recognise is dropped silently — either services is
+/// speaking about a session that already timed out, or the token
+/// was mangled by an intermediate hop.
+pub async fn handle_sasl(state: &ServerState, msg: &P10Message) {
+    if msg.params.len() < 3 {
+        debug!("SASL: too few params, dropping");
+        return;
+    }
+    // params[0] = target server (us, or `*` for broadcasts)
+    // params[1] = session token (or `*` for broadcasts)
+    // params[2] = action letter (first char of this param)
+    let session_token = &msg.params[1];
+    let action = msg.params[2].chars().next().unwrap_or('?');
+
+    // Global broadcast: `SASL * * M :<mechs>` — update the
+    // services-announced mechanism list for CAP LS output.
+    if session_token == "*" {
+        if action == 'M'
+            && let Some(csv) = msg.params.get(3)
+        {
+            let mechs: Vec<String> = csv
+                .split(',')
+                .map(|s| s.trim().to_ascii_uppercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+            debug!("SASL: services-announced mechanisms = {mechs:?}");
+            state.sasl.set_mechanisms(mechs);
+        }
+        return;
+    }
+
+    let Some(session) = state.sasl.lookup(session_token) else {
+        debug!("SASL: unknown session token {session_token}; dropping");
+        return;
+    };
+    let client_id = session.client_id;
+
+    // Clone the Arc out of the DashMap Ref immediately so we don't
+    // hold a shard lock across the await points below.
+    let client_arc = match state.clients.get(&client_id) {
+        Some(r) => Arc::clone(r.value()),
+        None => {
+            // Client disconnected between starting the exchange and
+            // this reply arriving. Services will also get told when
+            // the session times out.
+            debug!("SASL: client {client_id:?} gone; dropping reply");
+            state.sasl.remove(session_token);
+            return;
+        }
+    };
+
+    match action {
+        // Challenge — forward to the client as AUTHENTICATE <b64>.
+        // Empty data maps to `+` per IRCv3.
+        'C' => {
+            let data = msg.params.get(3).cloned().unwrap_or_default();
+            let wire_data = if data.is_empty() { "+".to_string() } else { data };
+            let c = client_arc.read().await;
+            c.send_raw(irc_proto::Message::with_source(
+                &state.server_name,
+                irc_proto::Command::Authenticate,
+                vec![wire_data],
+            ));
+        }
+        // Login — stash the account name so the follow-up `D S`
+        // can finalise. Matches nefarious2 sasl_auth.c's
+        // cli_saslaccount stash before sasl_complete_login.
+        'L' => {
+            if let Some(account) = msg.params.get(3) {
+                state.sasl.stash_account(session_token, account.clone());
+            }
+        }
+        // Done. Sub-action: S = success, F = fail, A = abort.
+        'D' => {
+            let sub = msg.params.get(3).and_then(|s| s.chars().next()).unwrap_or('?');
+            match sub {
+                'S' => {
+                    // Completion: if we have a stashed account,
+                    // apply the login through login_local so the
+                    // standard path (RPL_LOGGEDIN, account-notify,
+                    // AC S2S broadcast) fires. Then emit
+                    // RPL_SASLSUCCESS and clear SASL state.
+                    let session_now = state.sasl.lookup(session_token);
+                    let account = session_now.as_ref().and_then(|s| s.pending_account.clone());
+                    if let Some(name) = account {
+                        let info = crate::accounts::AccountInfo {
+                            name,
+                            registered_ts: chrono::Utc::now().timestamp().max(0) as u64,
+                        };
+                        state.login_local(client_id, &info).await;
+                    } else {
+                        warn!("SASL D S with no stashed account for {session_token}");
+                    }
+                    {
+                        let c = client_arc.read().await;
+                        c.send_numeric(
+                            &state.server_name,
+                            crate::numeric::RPL_SASLSUCCESS,
+                            vec!["SASL authentication successful".into()],
+                        );
+                    }
+                    clear_client_sasl(&client_arc).await;
+                    state.sasl.remove(session_token);
+                    info!(
+                        "SASL success via services for client {client_id:?} session {session_token}"
+                    );
+                }
+                'F' => {
+                    let c = client_arc.read().await;
+                    c.send_numeric(
+                        &state.server_name,
+                        crate::numeric::ERR_SASLFAIL,
+                        vec!["SASL authentication failed".into()],
+                    );
+                    drop(c);
+                    clear_client_sasl(&client_arc).await;
+                    state.sasl.remove(session_token);
+                }
+                'A' => {
+                    let c = client_arc.read().await;
+                    c.send_numeric(
+                        &state.server_name,
+                        crate::numeric::ERR_SASLABORTED,
+                        vec!["SASL authentication aborted".into()],
+                    );
+                    drop(c);
+                    clear_client_sasl(&client_arc).await;
+                    state.sasl.remove(session_token);
+                }
+                other => {
+                    debug!("SASL D{other}: unknown sub-action; dropping");
+                }
+            }
+        }
+        // Per-session mechanism list — services can narrow the
+        // client's advertised set. Wire: `M :<csv>`.
+        'M' => {
+            if let Some(csv) = msg.params.get(3) {
+                let c = client_arc.read().await;
+                c.send_numeric(
+                    &state.server_name,
+                    crate::numeric::RPL_SASLMECHS,
+                    vec![csv.clone(), "available SASL mechanisms".into()],
+                );
+            }
+        }
+        // H (host info) is a request we sometimes emit toward
+        // services; we shouldn't see it coming back. Log and drop.
+        other => {
+            debug!("SASL: unexpected action '{other}' on session {session_token}; dropping");
+        }
+    }
+}
+
+/// Clear all SASL-related flags on a local client so a subsequent
+/// AUTHENTICATE starts clean. Used by the relay reply handlers
+/// (success / fail / abort) so the client can retry if they want.
+async fn clear_client_sasl(client: &Arc<RwLock<crate::client::Client>>) {
+    let mut c = client.write().await;
+    c.sasl_mechanism = None;
+    c.sasl_buffer = None;
+    c.sasl_session_token = None;
+}

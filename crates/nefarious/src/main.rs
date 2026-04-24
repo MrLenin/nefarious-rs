@@ -15,6 +15,7 @@ mod jupe;
 mod numeric;
 mod password;
 mod s2s;
+mod sasl;
 mod server;
 mod shun;
 mod ssl;

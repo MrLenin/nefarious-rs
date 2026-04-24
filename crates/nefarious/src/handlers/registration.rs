@@ -195,12 +195,21 @@ pub async fn handle_authenticate(ctx: &HandlerContext, msg: &Message) {
     };
 
     // Explicit abort: client sends `AUTHENTICATE *`. Clears any
-    // in-progress chunk buffer along with the mechanism selection.
+    // in-progress chunk buffer and session token along with the
+    // mechanism selection. When an outbound relay session is
+    // active, we forward the abort so services drops its state
+    // too.
     if param == "*" {
-        {
+        let relay_token = {
             let mut c = ctx.client.write().await;
+            let token = c.sasl_session_token.take();
             c.sasl_mechanism = None;
             c.sasl_buffer = None;
+            token
+        };
+        if let Some(token) = relay_token {
+            crate::sasl::abort_to_services(&ctx.state, &token).await;
+            ctx.state.sasl.remove(&token);
         }
         ctx.send_numeric(
             crate::numeric::ERR_SASLABORTED,
@@ -211,11 +220,45 @@ pub async fn handle_authenticate(ctx: &HandlerContext, msg: &Message) {
     }
 
     // First phase: no mechanism yet → param is the mechanism name.
+    // We branch here: if SASL_SERVER is configured and a services
+    // peer is reachable, the exchange is relayed to services and
+    // we don't handle any mechanism ourselves. Otherwise the local
+    // in-process mechanism path handles PLAIN/EXTERNAL.
     let mechanism = ctx.client.read().await.sasl_mechanism.clone();
     let Some(mech) = mechanism else {
         let mech_upper = param.to_ascii_uppercase();
+        let relay_active = ctx.state.config().sasl_server().is_some()
+            && crate::sasl::services_link(&ctx.state).is_some();
+
+        if relay_active {
+            // Start a relay session. We trust services to validate
+            // the mechanism name — if services doesn't support
+            // `mech_upper` it will respond with `M :<list>` (→ 908)
+            // and `D F`.
+            let client_id = ctx.client_id().await;
+            let Some(token) =
+                crate::sasl::start_relay(&ctx.state, client_id, &mech_upper).await
+            else {
+                // Services link disappeared between the check above
+                // and the send — unlikely but handle cleanly.
+                ctx.send_numeric(
+                    crate::numeric::ERR_SASLFAIL,
+                    vec!["SASL authentication failed".into()],
+                )
+                .await;
+                return;
+            };
+            let mut c = ctx.client.write().await;
+            c.sasl_mechanism = Some(mech_upper);
+            c.sasl_buffer = None;
+            c.sasl_session_token = Some(token);
+            // Do NOT emit AUTHENTICATE + locally — services will
+            // reply with a `C :<challenge>` that we relay back.
+            return;
+        }
+
+        // Local path. Only PLAIN / EXTERNAL are supported.
         if !matches!(mech_upper.as_str(), "PLAIN" | "EXTERNAL") {
-            // Unsupported mechanism. Advertise what we do support and fail.
             ctx.send_numeric(
                 crate::numeric::RPL_SASLMECHS,
                 vec!["PLAIN,EXTERNAL".into(), "available SASL mechanisms".into()],
@@ -243,10 +286,21 @@ pub async fn handle_authenticate(ctx: &HandlerContext, msg: &Message) {
         return;
     };
 
-    // Second phase: base64-encoded mechanism payload, possibly
-    // split across multiple AUTHENTICATE lines. A 400-byte chunk
-    // means "more coming"; anything shorter (including `+`) is
-    // the terminator.
+    // Second phase: mechanism-payload AUTHENTICATE. Two shapes:
+    //
+    // - **Relay** (`sasl_session_token` is set): every line is
+    //   forwarded to services line-by-line with no reassembly.
+    //   Services does the 400-byte reassembly on its side. `+` is
+    //   forwarded verbatim so services can see an empty payload.
+    // - **Local**: accumulate 400-byte chunks until a terminator,
+    //   then base64-decode and dispatch to the mechanism's handler.
+    let relay_token = ctx.client.read().await.sasl_session_token.clone();
+    if let Some(token) = relay_token {
+        crate::sasl::forward_chunk(&ctx.state, &token, &param).await;
+        return;
+    }
+
+    // Local path: reassemble chunks and dispatch.
     //
     // The `+` terminator has two meanings depending on buffer
     // state: with no prior chunk it's a literal empty payload
@@ -375,6 +429,7 @@ async fn handle_sasl_plain(ctx: &HandlerContext, payload: &[u8]) {
     let mut c = ctx.client.write().await;
     c.sasl_mechanism = None;
     c.sasl_buffer = None;
+    c.sasl_session_token = None;
 }
 
 /// Finish SASL EXTERNAL. `payload` is the requested authzid (often
@@ -428,6 +483,7 @@ async fn handle_sasl_external(ctx: &HandlerContext, payload: &[u8]) {
     let mut c = ctx.client.write().await;
     c.sasl_mechanism = None;
     c.sasl_buffer = None;
+    c.sasl_session_token = None;
 }
 
 async fn reset_sasl_and_fail(ctx: &HandlerContext, _reason: &str) {
@@ -435,6 +491,7 @@ async fn reset_sasl_and_fail(ctx: &HandlerContext, _reason: &str) {
         let mut c = ctx.client.write().await;
         c.sasl_mechanism = None;
         c.sasl_buffer = None;
+        c.sasl_session_token = None;
     }
     ctx.send_numeric(
         crate::numeric::ERR_SASLFAIL,
@@ -590,15 +647,55 @@ pub async fn handle_cap(ctx: &HandlerContext, msg: &Message) {
 
 /// Build the list of currently-advertised capability tokens, with
 /// `=<value>` metadata when the cap has any (e.g. `sasl=PLAIN,EXTERNAL`).
+///
+/// The `sasl=` value merges the local mechanisms (PLAIN, EXTERNAL)
+/// with any mechanism list services announced via `SASL * * M` —
+/// the testnet's x3.services broadcasts its supported list at link
+/// time, and we fold those in so clients see the full picture.
 async fn advertised_list(ctx: &HandlerContext) -> Vec<String> {
     ctx.state
         .advertised_caps
         .iter()
-        .map(|cap| match cap.ls_value() {
-            Some(v) => format!("{}={v}", cap.name()),
-            None => cap.name().to_string(),
+        .map(|cap| {
+            if *cap == crate::capabilities::Capability::Sasl {
+                let value = sasl_mechanisms_advertisement(ctx);
+                format!("{}={value}", cap.name())
+            } else {
+                match cap.ls_value() {
+                    Some(v) => format!("{}={v}", cap.name()),
+                    None => cap.name().to_string(),
+                }
+            }
         })
         .collect()
+}
+
+/// Compose the `sasl=` CAP LS value: local mechanisms plus any
+/// services-announced ones, de-duplicated, in stable order. If
+/// services has announced a list, prefer its ordering (services is
+/// authoritative on the network's real surface); otherwise fall
+/// back to the hard-coded local list.
+fn sasl_mechanisms_advertisement(ctx: &HandlerContext) -> String {
+    let services = ctx.state.sasl.mechanisms_snapshot();
+    let local: &[&str] = &["PLAIN", "EXTERNAL"];
+    let mut seen = std::collections::HashSet::<String>::new();
+    let mut out: Vec<String> = Vec::new();
+    for m in services.iter() {
+        if seen.insert(m.clone()) {
+            out.push(m.clone());
+        }
+    }
+    for m in local {
+        let s = (*m).to_string();
+        if seen.insert(s.clone()) {
+            out.push(s);
+        }
+    }
+    if out.is_empty() {
+        "PLAIN,EXTERNAL".to_string()
+    } else {
+        out.join(",")
+    }
 }
 
 /// Send a CAP list reply (LS / LIST / ACK / NAK). For CAP 302+ long

@@ -375,6 +375,9 @@ async fn handle_server_link_inner<S>(
             P10Token::Whois => {
                 super::handlers::handle_whois(&state, &msg).await;
             }
+            P10Token::Sasl => {
+                super::handlers::handle_sasl(&state, &msg).await;
+            }
             P10Token::Wallops => {
                 super::handlers::handle_wallops(&state, &msg).await;
             }
