@@ -236,8 +236,13 @@ pub async fn handle_authenticate(ctx: &HandlerContext, msg: &Message) {
             // `mech_upper` it will respond with `M :<list>` (→ 908)
             // and `D F`.
             let client_id = ctx.client_id().await;
-            let Some(token) =
-                crate::sasl::start_relay(&ctx.state, client_id, &mech_upper).await
+            let Some(token) = crate::sasl::start_relay(
+                &ctx.state,
+                client_id,
+                std::sync::Arc::clone(&ctx.client),
+                &mech_upper,
+            )
+            .await
             else {
                 // Services link disappeared between the check above
                 // and the send — unlikely but handle cleanly.

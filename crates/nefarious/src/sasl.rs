@@ -47,9 +47,16 @@ use crate::client::ClientId;
 use crate::state::ServerState;
 
 /// One in-flight SASL relay session.
-#[derive(Debug, Clone)]
+///
+/// Holds the `Arc<RwLock<Client>>` directly so inbound replies
+/// can reach the client even during CAP-phase SASL, when the
+/// client hasn't been registered into `ServerState.clients` yet.
+/// Services typically SASL-s clients before they send USER/NICK,
+/// so pre-registration is the common path.
+#[derive(Clone)]
 pub struct SaslSession {
     pub client_id: ClientId,
+    pub client: Arc<tokio::sync::RwLock<crate::client::Client>>,
     pub started_at: Instant,
     pub mechanism: String,
     /// Account name stashed from an `L` reply so `D S` can finalise
@@ -100,11 +107,18 @@ impl SaslState {
         format!("{server_numeric}!{local}.{cookie}")
     }
 
-    pub fn register(&self, token: String, client_id: ClientId, mechanism: String) {
+    pub fn register(
+        &self,
+        token: String,
+        client_id: ClientId,
+        client: Arc<tokio::sync::RwLock<crate::client::Client>>,
+        mechanism: String,
+    ) {
         self.sessions.insert(
             token,
             SaslSession {
                 client_id,
+                client,
                 started_at: Instant::now(),
                 mechanism,
                 pending_account: None,
@@ -195,15 +209,9 @@ async fn handle_timeout(state: &ServerState, token: &str, session: &SaslSession)
     );
     // Notify services so their session drops too.
     abort_to_services(state, token).await;
-    // Clone the Arc out of the DashMap Ref so we don't hold a
-    // shard lock across awaits.
-    let Some(client_arc) = state
-        .clients
-        .get(&session.client_id)
-        .map(|r| Arc::clone(r.value()))
-    else {
-        return;
-    };
+    // Use the Arc stored on the session directly — pre-registration
+    // clients aren't in state.clients yet.
+    let client_arc = &session.client;
     let nick = {
         let c = client_arc.read().await;
         c.nick.clone()
@@ -216,8 +224,6 @@ async fn handle_timeout(state: &ServerState, token: &str, session: &SaslSession)
             vec!["SASL authentication timed out".into()],
         );
     }
-    // Log at info so stalled auth attempts are visible without
-    // cranking debug on the container.
     info!("SASL session for {nick} timed out after {token}");
     let mut c = client_arc.write().await;
     c.sasl_session_token = None;
@@ -291,15 +297,21 @@ pub async fn abort_unreachable_sessions(state: &ServerState) {
 }
 
 /// Emit the initial `SASL ... S <mech> [:<initial>]` line to the
-/// configured services peer and register the session.
+/// configured services peer and register the session. The session
+/// holds the client Arc so replies can reach the client even
+/// during CAP negotiation, when the client isn't yet in
+/// `state.clients`.
 pub async fn start_relay(
     state: &ServerState,
     client_id: ClientId,
+    client: Arc<tokio::sync::RwLock<crate::client::Client>>,
     mechanism: &str,
 ) -> Option<String> {
     let (link, target) = services_link(state).await?;
     let token = state.sasl.new_token(state.numeric);
-    state.sasl.register(token.clone(), client_id, mechanism.to_string());
+    state
+        .sasl
+        .register(token.clone(), client_id, client, mechanism.to_string());
     // `S` with no initial response — services will reply with a `C`
     // challenge (typically an empty one for PLAIN/EXTERNAL, prompting
     // the client-initial-response).

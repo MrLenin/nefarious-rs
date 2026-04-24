@@ -3990,20 +3990,10 @@ pub async fn handle_sasl(state: &ServerState, msg: &P10Message) {
         return;
     };
     let client_id = session.client_id;
-
-    // Clone the Arc out of the DashMap Ref immediately so we don't
-    // hold a shard lock across the await points below.
-    let client_arc = match state.clients.get(&client_id) {
-        Some(r) => Arc::clone(r.value()),
-        None => {
-            // Client disconnected between starting the exchange and
-            // this reply arriving. Services will also get told when
-            // the session times out.
-            debug!("SASL: client {client_id:?} gone; dropping reply");
-            state.sasl.remove(session_token);
-            return;
-        }
-    };
+    // Use the Arc stored on the session — pre-registration clients
+    // (the common case, since SASL runs during CAP) aren't in
+    // state.clients yet.
+    let client_arc = Arc::clone(&session.client);
 
     match action {
         // Challenge — forward to the client as AUTHENTICATE <b64>.
@@ -4031,24 +4021,44 @@ pub async fn handle_sasl(state: &ServerState, msg: &P10Message) {
             let sub = msg.params.get(3).and_then(|s| s.chars().next()).unwrap_or('?');
             match sub {
                 'S' => {
-                    // Completion: if we have a stashed account,
-                    // apply the login through login_local so the
-                    // standard path (RPL_LOGGEDIN, account-notify,
-                    // AC S2S broadcast) fires. Then emit
-                    // RPL_SASLSUCCESS and clear SASL state.
+                    // Completion: apply the stashed account name to
+                    // the Client directly, then emit RPL_LOGGEDIN
+                    // and RPL_SASLSUCCESS. We don't call
+                    // `login_local` because that path assumes the
+                    // client is already registered (in
+                    // `state.clients`) and does the account-notify
+                    // + AC broadcast — neither of which makes sense
+                    // here: SASL usually runs during CAP, before
+                    // registration completes, so there's no peer set
+                    // that knows about the client yet. The
+                    // `route_nick_intro` path that fires after
+                    // registration picks up Client.account and emits
+                    // the AC follow-up as part of the NICK intro.
                     let session_now = state.sasl.lookup(session_token);
-                    let account = session_now.as_ref().and_then(|s| s.pending_account.clone());
-                    if let Some(name) = account {
-                        let info = crate::accounts::AccountInfo {
-                            name,
-                            registered_ts: chrono::Utc::now().timestamp().max(0) as u64,
-                        };
-                        state.login_local(client_id, &info).await;
-                    } else {
+                    let account_name = session_now.and_then(|s| s.pending_account);
+                    let Some(account) = account_name else {
                         warn!("SASL D S with no stashed account for {session_token}");
-                    }
+                        state.sasl.remove(session_token);
+                        return;
+                    };
+                    let (nick, prefix) = {
+                        let mut c = client_arc.write().await;
+                        c.account = Some(account.clone());
+                        (c.nick.clone(), c.prefix())
+                    };
                     {
                         let c = client_arc.read().await;
+                        // RPL_LOGGEDIN 900 <nick> <prefix> <account> :...
+                        c.send_raw(irc_proto::Message::with_source(
+                            &state.server_name,
+                            irc_proto::Command::Numeric(crate::numeric::RPL_LOGGEDIN),
+                            vec![
+                                nick,
+                                prefix,
+                                account.clone(),
+                                format!("You are now logged in as {account}"),
+                            ],
+                        ));
                         c.send_numeric(
                             &state.server_name,
                             crate::numeric::RPL_SASLSUCCESS,
