@@ -300,12 +300,14 @@ async fn shutdown_drain(state: &Arc<ServerState>) {
     let reason = "Server shutting down";
 
     // ERROR per client — they render it as "*** ERROR: <reason>".
+    // Sent without a `:source` prefix per RFC 2812: client-facing
+    // ERROR is expected sourceless (strict parsers like Goguma
+    // flag the prefixed form as unparseable).
     // We also tag with QUIT so channel-mates on other servers see
     // the expected departure sequence once S2S routing forwards it.
     for entry in state.clients.iter() {
         let c = entry.value().read().await;
-        c.send_raw(irc_proto::Message::with_source(
-            &state.server_name,
+        c.send_raw(irc_proto::Message::new(
             irc_proto::Command::Error,
             vec![format!("Closing Link: {} [{reason}]", c.nick)],
         ));

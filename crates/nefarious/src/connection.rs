@@ -222,8 +222,7 @@ pub async fn handle_connection<S>(
             (c.id, c.nick.clone())
         };
         let c = client.read().await;
-        c.send_raw(irc_proto::Message::with_source(
-            &state.server_name,
+        c.send_raw(irc_proto::Message::new(
             irc_proto::Command::Error,
             vec![format!("Closing Link: {nick} [{reason}]")],
         ));
@@ -279,8 +278,7 @@ pub async fn handle_connection<S>(
             (c.id, c.nick.clone())
         };
         let c = client.read().await;
-        c.send_raw(irc_proto::Message::with_source(
-            &state.server_name,
+        c.send_raw(irc_proto::Message::new(
             irc_proto::Command::Error,
             vec![format!("Closing Link: {nick} [{kind} ({reason})]")],
         ));
@@ -333,8 +331,7 @@ pub async fn handle_connection<S>(
                             (c.id, c.nick.clone())
                         };
                         let c = client.read().await;
-                        c.send_raw(irc_proto::Message::with_source(
-                            &state.server_name,
+                        c.send_raw(irc_proto::Message::new(
                             irc_proto::Command::Error,
                             vec![format!("Closing Link: {nick} [DNSBL: {mark}]")],
                         ));
@@ -385,8 +382,7 @@ pub async fn handle_connection<S>(
             (c.id, c.nick.clone())
         };
         let c = client.read().await;
-        c.send_raw(irc_proto::Message::with_source(
-            &state.server_name,
+        c.send_raw(irc_proto::Message::new(
             irc_proto::Command::Error,
             vec!["Closing Link: SASL authentication required for this connection class".into()],
         ));
@@ -668,8 +664,7 @@ async fn registration_phase(
                 });
                 if matched.is_none() {
                     let c = client.read().await;
-                    c.send_raw(Message::with_source(
-                        &state.server_name,
+                    c.send_raw(Message::new(
                         Command::Error,
                         vec![format!(
                             "Closing Link: [{peer_ip}] (WEBIRC authentication failed)"
@@ -696,8 +691,7 @@ async fn registration_phase(
                     }
                     Err(_) => {
                         let c = client.read().await;
-                        c.send_raw(Message::with_source(
-                            &state.server_name,
+                        c.send_raw(Message::new(
                             Command::Error,
                             vec![format!(
                                 "Closing Link: [{peer_ip}] (WEBIRC malformed IP)"
