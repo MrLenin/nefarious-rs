@@ -349,6 +349,17 @@ impl Config {
             .unwrap_or(30)
     }
 
+    /// `SASL_DEFAULT_MECHANISMS` — operator-configured fallback list
+    /// for the CAP LS `sasl=` advertisement. Used when SASL_SERVER
+    /// is set and relay is active but services hasn't broadcast its
+    /// own mechanism list (legacy X3 doesn't emit `SASL * * M`).
+    /// The value is the raw comma-separated string as written in
+    /// the conf, passed through untouched to the wire. Matches
+    /// nefarious2 `FEAT_SASL_DEFAULT_MECHANISMS`.
+    pub fn sasl_default_mechanisms(&self) -> Option<&str> {
+        self.feature("SASL_DEFAULT_MECHANISMS")
+    }
+
     /// `GIT_CONFIG_PATH` — working-tree path of a git checkout
     /// containing the config file. When set, a background task
     /// runs `git pull --ff-only` every `GIT_SYNC_INTERVAL`

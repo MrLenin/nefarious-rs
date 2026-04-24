@@ -670,32 +670,40 @@ async fn advertised_list(ctx: &HandlerContext) -> Vec<String> {
         .collect()
 }
 
-/// Compose the `sasl=` CAP LS value: local mechanisms plus any
-/// services-announced ones, de-duplicated, in stable order. If
-/// services has announced a list, prefer its ordering (services is
-/// authoritative on the network's real surface); otherwise fall
-/// back to the hard-coded local list.
+/// Compose the `sasl=` CAP LS value.
+///
+/// Priority, mirroring nefarious2 m_cap.c::get_effective_sasl_mechanisms:
+///
+/// 1. **Relay active + services announced** — use the list services
+///    broadcast via `SASL * * M`. Services owns the mechanism
+///    surface when it's authoritative.
+/// 2. **Relay active + legacy-X3 fallback** — services hasn't
+///    announced (classic X3 doesn't), so use
+///    `FEAT_SASL_DEFAULT_MECHANISMS` verbatim.
+/// 3. **Relay active + nothing else** — safe-guess `PLAIN,EXTERNAL`
+///    so clients at least try something and services can fail them
+///    cleanly if it can't handle the mechanism.
+/// 4. **No relay** (SASL_SERVER unset or link down) — advertise our
+///    locally-implemented mechanisms.
 fn sasl_mechanisms_advertisement(ctx: &HandlerContext) -> String {
-    let services = ctx.state.sasl.mechanisms_snapshot();
-    let local: &[&str] = &["PLAIN", "EXTERNAL"];
-    let mut seen = std::collections::HashSet::<String>::new();
-    let mut out: Vec<String> = Vec::new();
-    for m in services.iter() {
-        if seen.insert(m.clone()) {
-            out.push(m.clone());
+    let state = &ctx.state;
+    let cfg = state.config();
+    let relay_possible = cfg.sasl_server().is_some()
+        && crate::sasl::services_link(state).is_some();
+    if relay_possible {
+        let announced = state.sasl.mechanisms_snapshot();
+        if !announced.is_empty() {
+            return announced.join(",");
         }
-    }
-    for m in local {
-        let s = (*m).to_string();
-        if seen.insert(s.clone()) {
-            out.push(s);
+        if let Some(feat) = cfg.sasl_default_mechanisms()
+            && !feat.trim().is_empty()
+        {
+            return feat.to_string();
         }
+        return "PLAIN,EXTERNAL".to_string();
     }
-    if out.is_empty() {
-        "PLAIN,EXTERNAL".to_string()
-    } else {
-        out.join(",")
-    }
+    // Local-only: exactly what our handlers implement.
+    "PLAIN,EXTERNAL".to_string()
 }
 
 /// Send a CAP list reply (LS / LIST / ACK / NAK). For CAP 302+ long
