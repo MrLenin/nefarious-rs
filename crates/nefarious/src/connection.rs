@@ -162,13 +162,47 @@ pub async fn handle_connection<S>(
     let framed = Framed::new(stream, IrcCodec::new());
     let (mut sink, mut reader) = framed.split();
 
-    // Spawn the writer task
+    // Spawn the writer task. It watches the mpsc queue for outbound
+    // messages AND the client's disconnect_signal. When disconnect
+    // fires (every refuse/shutdown path fires it, directly or via
+    // state.remove_client), we drain whatever is already in the
+    // queue — in particular the final ERROR / numeric / NOTICE the
+    // refusal path just enqueued — and THEN close the sink cleanly.
+    //
+    // Previously the cleanup sites called `writer_handle.abort()`
+    // immediately after send_raw'ing the closing ERROR, which would
+    // kill the writer before the kernel buffer had the bytes. C
+    // nefarious had the same bug; the symptom was inconsistent
+    // delivery of class-rejection / shutdown / K-line messages.
+    let writer_disconnect = client.read().await.disconnect_signal.clone();
     let writer_handle = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if sink.send(msg).await.is_err() {
-                break;
+        loop {
+            tokio::select! {
+                biased;
+                maybe_msg = rx.recv() => {
+                    match maybe_msg {
+                        Some(msg) => {
+                            if sink.send(msg).await.is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = writer_disconnect.notified() => {
+                    // Drain whatever's already queued before closing.
+                    while let Ok(msg) = rx.try_recv() {
+                        if sink.send(msg).await.is_err() {
+                            break;
+                        }
+                    }
+                    break;
+                }
             }
         }
+        // Flush + shut down the write half cleanly so the last
+        // bytes make it onto the wire before the TCP close.
+        let _ = sink.close().await;
     });
 
     // Registration phase
@@ -187,7 +221,7 @@ pub async fn handle_connection<S>(
         state.release_numeric(id);
         state.ipcheck.release(addr.ip());
         debug!("client {addr} disconnected during registration");
-        writer_handle.abort();
+        graceful_close_writer(writer_handle, &client).await;
         return;
     }
 
@@ -232,7 +266,7 @@ pub async fn handle_connection<S>(
         }
         state.release_numeric(id);
         state.ipcheck.release(addr.ip());
-        writer_handle.abort();
+        graceful_close_writer(writer_handle, &client).await;
         return;
     }
 
@@ -288,7 +322,7 @@ pub async fn handle_connection<S>(
         }
         state.release_numeric(id);
         state.ipcheck.release(addr.ip());
-        writer_handle.abort();
+        graceful_close_writer(writer_handle, &client).await;
         return;
     }
 
@@ -341,7 +375,7 @@ pub async fn handle_connection<S>(
                         }
                         state.release_numeric(id);
                         state.ipcheck.release(addr.ip());
-                        writer_handle.abort();
+                        graceful_close_writer(writer_handle, &client).await;
                         return;
                     }
                     DnsBlAction::Mark => {
@@ -392,7 +426,7 @@ pub async fn handle_connection<S>(
         }
         state.release_numeric(id);
         state.ipcheck.release(addr.ip());
-        writer_handle.abort();
+        graceful_close_writer(writer_handle, &client).await;
         return;
     }
 
@@ -505,7 +539,33 @@ pub async fn handle_connection<S>(
     // Remove from state
     state.remove_client(client_id).await;
     state.ipcheck.release(addr.ip());
-    writer_handle.abort();
+    graceful_close_writer(writer_handle, &client).await;
+}
+
+/// Gracefully tear down the writer task: fire the disconnect
+/// signal to wake its drain path, then await the handle with a
+/// bounded timeout. On timeout, abort. Replaces bare
+/// `writer_handle.abort()` at every close site so messages
+/// queued right before close (final ERROR, numeric refusals,
+/// shutdown notices) actually land on the wire.
+///
+/// Mirrors a real C-nefarious bug the user flagged: close would
+/// race the writer and drop the last N bytes of whatever the
+/// handler had just enqueued.
+async fn graceful_close_writer(
+    mut writer_handle: tokio::task::JoinHandle<()>,
+    client: &Arc<RwLock<Client>>,
+) {
+    client.read().await.disconnect_signal.notify_one();
+    if tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        &mut writer_handle,
+    )
+    .await
+    .is_err()
+    {
+        writer_handle.abort();
+    }
 }
 
 /// Registration phase: wait for NICK + USER, handle PING, CAP.
