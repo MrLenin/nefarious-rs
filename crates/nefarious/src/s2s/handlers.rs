@@ -4129,16 +4129,26 @@ async fn clear_client_sasl(client: &Arc<RwLock<crate::client::Client>>) {
 }
 
 /// Handle a numeric message received over S2S (token is a bare
-/// number like `"402"`). Most numerics we encounter from an uplink
-/// are informational or already delivered to a specific client by
-/// name; this function only intercepts the ones that drive ircd
-/// state, not the ones that just pass through.
+/// number like `"402"`).
 ///
-/// - **402 ERR_NOSUCHSERVER** — the hub couldn't route something.
-///   In practice this fires when we tried to send a SASL line to
-///   a target that has since disconnected; fast-fail any in-flight
-///   sessions rather than wait 30s for the timeout sweeper.
+/// Two kinds of work run here:
+///
+/// 1. **State hooks** — numerics that drive ircd state regardless
+///    of their target run before the relay logic. e.g. 402
+///    (ERR_NOSUCHSERVER) triggers a SASL reachability re-check.
+///
+/// 2. **Generic relay** — most numerics are replies addressed to
+///    a specific user or server and the ircd just has to deliver
+///    them. If the target is one of our local clients we rewrite
+///    the target field to the user's nick (so the client receives
+///    it in RFC form) and forward. If the target is a remote user
+///    or another server we forward the line untouched through our
+///    uplink.
+///
+/// Unresolved targets (nick/numeric we don't recognise) are logged
+/// at debug and dropped rather than looped back.
 pub async fn handle_numeric(state: &ServerState, msg: &P10Message, numeric: u16) {
+    // -------- state hooks --------
     if numeric == 402 {
         debug!(
             "received 402 from upstream ({params:?}); re-checking SASL reachability",
@@ -4146,4 +4156,114 @@ pub async fn handle_numeric(state: &ServerState, msg: &P10Message, numeric: u16)
         );
         crate::sasl::abort_unreachable_sessions(state).await;
     }
+
+    // -------- generic relay --------
+    let Some(target_str) = msg.params.first().cloned() else {
+        // No target — nothing to route. State hooks (if any) already ran.
+        return;
+    };
+
+    // Wildcard / unaddressed: often used for server-directed errors
+    // that the state hooks handle above. No generic delivery.
+    if target_str == "*" {
+        return;
+    }
+
+    // ClientNumeric (5 chars, server + slot) — the P10 form of a user.
+    if let Some(cnum) = ClientNumeric::from_str(&target_str) {
+        if cnum.server == state.numeric {
+            if let Some(client_id) = state.client_by_numeric_slot(cnum.client)
+                && let Some(client_arc) =
+                    state.clients.get(&client_id).map(|r| Arc::clone(r.value()))
+            {
+                forward_numeric_to_local(state, &client_arc, msg, numeric).await;
+            }
+            return;
+        }
+        // Remote client: forward across uplink. Hub handles onward routing.
+        if let Some(link) = state.get_link() {
+            link.send_line(msg.to_wire()).await;
+        }
+        return;
+    }
+
+    // ServerNumeric (2 chars) — addressed to a server.
+    if let Some(snum) = ServerNumeric::from_str(&target_str) {
+        if snum == state.numeric {
+            // Addressed to us. The state hooks above caught the ones
+            // we act on; drop the rest rather than log-spam.
+            return;
+        }
+        if let Some(link) = state.get_link() {
+            link.send_line(msg.to_wire()).await;
+        }
+        return;
+    }
+
+    // Nick-form target — try local first, remote second.
+    if let Some(client_arc) = state.find_client_by_nick(&target_str) {
+        forward_numeric_to_local(state, &client_arc, msg, numeric).await;
+        return;
+    }
+    if state.find_remote_by_nick(&target_str).is_some() {
+        if let Some(link) = state.get_link() {
+            link.send_line(msg.to_wire()).await;
+        }
+        return;
+    }
+
+    debug!(
+        "numeric {numeric}: unresolved target '{target_str}' from origin {origin:?}; dropping",
+        origin = msg.origin
+    );
+}
+
+/// Deliver a P10-wire numeric to a locally-connected client.
+///
+/// Two adjustments relative to the S2S form:
+/// - Source is the *name* of the emitting server (resolved from
+///   `msg.origin`), not its base64 numeric — clients parse names,
+///   not numerics.
+/// - The first param (target) is rewritten from the P10 numeric
+///   form to the client's nick, which is what RFC-style clients
+///   expect in numeric-reply params.
+async fn forward_numeric_to_local(
+    state: &ServerState,
+    client_arc: &Arc<RwLock<crate::client::Client>>,
+    msg: &P10Message,
+    numeric: u16,
+) {
+    let source_name = resolve_origin_name(state, msg.origin.as_deref()).await;
+    let nick = client_arc.read().await.nick.clone();
+    let mut params = Vec::with_capacity(msg.params.len());
+    params.push(nick);
+    if msg.params.len() > 1 {
+        params.extend(msg.params.iter().skip(1).cloned());
+    }
+    let c = client_arc.read().await;
+    c.send_raw(irc_proto::Message::with_source(
+        &source_name,
+        irc_proto::Command::Numeric(numeric),
+        params,
+    ));
+}
+
+/// Resolve a P10 origin string (a server numeric or a nick) to the
+/// server's human-readable name, which is what clients want to see
+/// in the `:source` prefix. Falls back to the origin string itself
+/// when we can't resolve it — better to pass a funny-looking but
+/// intact source than to drop the reply.
+async fn resolve_origin_name(state: &ServerState, origin: Option<&str>) -> String {
+    let Some(origin) = origin else {
+        return state.server_name.clone();
+    };
+    if let Some(snum) = ServerNumeric::from_str(origin) {
+        if snum == state.numeric {
+            return state.server_name.clone();
+        }
+        if let Some(entry) = state.remote_servers.get(&snum) {
+            return entry.value().read().await.name.clone();
+        }
+    }
+    origin.to_string()
 }
