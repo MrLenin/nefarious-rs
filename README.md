@@ -215,6 +215,7 @@ Supported block types:
 | `Kill` | Local K-lines — host glob or IP CIDR connect bans |
 | `WebIRC` | Trusted gateway passthrough (password, host) |
 | `DNSBL` | DNSBL zones (`name`, `host` index list, `bitmask`, `action`: block/block\_all/block\_anon/mark/whitelist, `mark`, `score`). Legacy aliases `domain`/`reply`/`reason` accepted. |
+| `Pseudo "<CMD>"` | User command alias rewritten to PRIVMSG against a services nick (`name`, `nick = AuthServ@x3.services`, optional `prepend`). Powers `/AUTH`, `/MEMOSERV`, etc. |
 | `Features` | Key-value network settings (see table below) |
 
 Key `Features` entries:

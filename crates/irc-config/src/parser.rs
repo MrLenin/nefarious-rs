@@ -12,6 +12,13 @@ use nom::{
 #[derive(Debug, Clone)]
 pub struct Block {
     pub kind: String,
+    /// Optional quoted-string label appearing between the kind and
+    /// the `{` — e.g. `Pseudo "AUTH" { ... };`. `None` for the
+    /// majority of blocks which use the simpler `Kind { ... };`
+    /// form. Only `Pseudo` uses this in nefarious2's grammar but
+    /// we accept it generally so the parser doesn't fail on any
+    /// future labelled block.
+    pub label: Option<String>,
     pub entries: Vec<Entry>,
 }
 
@@ -282,6 +289,11 @@ fn block(input: &str) -> IResult<&str, Block> {
     let (rest, _) = ws(input)?;
     let (rest, kind) = identifier(rest)?;
     let (rest, _) = ws(rest)?;
+    // Optional quoted-string label, e.g. `Pseudo "AUTH" { ... };`.
+    // `nom::combinator::opt` fails parsing as a no-op when the
+    // string isn't there.
+    let (rest, label) = opt(quoted_string).parse(rest)?;
+    let (rest, _) = ws(rest)?;
     let (rest, _) = char('{').parse(rest)?;
     let (rest, entries) = many0(entry).parse(rest)?;
     let (rest, _) = ws(rest)?;
@@ -293,6 +305,7 @@ fn block(input: &str) -> IResult<&str, Block> {
         rest,
         Block {
             kind: kind.to_string(),
+            label,
             entries,
         },
     ))

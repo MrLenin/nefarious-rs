@@ -203,14 +203,29 @@ impl HandlerContext {
             // so clients can negotiate SASL as part of CAP.
             Command::Authenticate => registration::handle_authenticate(&ctx, msg).await,
 
-            // Unknown
+            // Unknown — but check Pseudo aliases first (`/AUTH`,
+            // `/MEMOSERV`, etc., configured in the conf as
+            // `Pseudo "AUTH" { nick = "AuthServ@x3.services"; ... }`).
+            // A hit rewrites the command into a directed PRIVMSG
+            // and runs it through the standard messaging handler;
+            // a miss falls through to ERR_UNKNOWNCOMMAND.
             Command::Unknown(cmd) => {
-                debug!("unknown command from client: {cmd}");
-                ctx.send_numeric(
-                    ERR_UNKNOWNCOMMAND,
-                    vec![cmd.clone(), "Unknown command".to_string()],
-                )
-                .await;
+                match build_pseudo_message(&ctx, cmd, msg).await {
+                    PseudoLookup::Rewrite(pseudo_msg) => {
+                        messaging::handle_privmsg(&ctx, &pseudo_msg).await;
+                    }
+                    PseudoLookup::HandledEmpty => {
+                        // Helper already sent ERR_NOTEXTTOSEND.
+                    }
+                    PseudoLookup::NoMatch => {
+                        debug!("unknown command from client: {cmd}");
+                        ctx.send_numeric(
+                            ERR_UNKNOWNCOMMAND,
+                            vec![cmd.clone(), "Unknown command".to_string()],
+                        )
+                        .await;
+                    }
+                }
             }
 
             // Other known commands we haven't implemented yet
@@ -343,6 +358,63 @@ impl HandlerContext {
         self.apply_reply_tags(&mut msg, &client);
         client.send(msg);
     }
+}
+
+/// Outcome of a Pseudo-alias lookup. Three states so the caller
+/// dispatches each correctly without double-sending errors.
+enum PseudoLookup {
+    /// Not a Pseudo command — caller falls through to
+    /// ERR_UNKNOWNCOMMAND as normal.
+    NoMatch,
+    /// Matched but the user supplied no text. We already sent
+    /// ERR_NOTEXTTOSEND inside the helper; caller should stop.
+    HandledEmpty,
+    /// Matched with a non-empty body — caller should run the
+    /// rewritten PRIVMSG through the messaging handler.
+    Rewrite(Message),
+}
+
+/// Look up a Pseudo command alias and produce the rewritten PRIVMSG
+/// (or signal that the user typed it with no text). Mirrors
+/// nefarious2 m_pseudo.c:
+///
+/// - Joins the user's params into a single text string.
+/// - Empty text → ERR_NOTEXTTOSEND.
+/// - Optional `prepend` is glued before the user's text — that's
+///   how one services bot fronts multiple sub-commands (`/SEND`
+///   carries `prepend = "SEND "` so MemoServ sees the verb).
+/// - Builds a `Command::Privmsg` with params
+///   `[<nick@server>, <prepended_text>]`; the caller runs it
+///   through `messaging::handle_privmsg` so channel checks, S2S
+///   routing, and msgid tagging all apply uniformly.
+async fn build_pseudo_message(
+    ctx: &HandlerContext,
+    cmd: &str,
+    msg: &Message,
+) -> PseudoLookup {
+    let cfg = ctx.state.config();
+    let Some(pseudo) = cfg.find_pseudo(cmd) else {
+        return PseudoLookup::NoMatch;
+    };
+
+    let user_text = msg.params.join(" ");
+    if user_text.trim().is_empty() {
+        ctx.send_numeric(
+            crate::numeric::ERR_NOTEXTTOSEND,
+            vec!["No text to send".into()],
+        )
+        .await;
+        return PseudoLookup::HandledEmpty;
+    }
+
+    let body = match &pseudo.prepend {
+        Some(prefix) => format!("{prefix}{user_text}"),
+        None => user_text,
+    };
+    PseudoLookup::Rewrite(Message::new(
+        Command::Privmsg,
+        vec![pseudo.nick.clone(), body],
+    ))
 }
 
 /// Flush a labeled-response capture in the shape dictated by reply

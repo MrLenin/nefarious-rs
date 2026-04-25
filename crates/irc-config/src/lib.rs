@@ -18,6 +18,7 @@ pub struct Config {
     pub kills: Vec<KillConfig>,
     pub webirc: Vec<WebIrcConfig>,
     pub dnsbl: Vec<DnsBlConfig>,
+    pub pseudo: Vec<PseudoConfig>,
     pub features: Vec<(String, String)>,
 }
 
@@ -77,6 +78,34 @@ pub enum DnsBlAction {
     Mark,
     /// Exempt the IP from other DNSBL checks in this list.
     Whitelist,
+}
+
+/// A user-facing command alias that rewrites to a directed PRIVMSG
+/// against a services nick/server. Mirrors nefarious2's
+/// `Pseudo "<COMMAND>" { name = ...; nick = nick@server; prepend = ...; }`
+/// blocks. The testnet uses these heavily — `/AUTH foo bar` becomes
+/// `PRIVMSG AuthServ@x3.services :AUTH foo bar`, etc.
+///
+/// Multiple Pseudo blocks can share a `name` to define a fallback
+/// chain of services; we only honour the first reachable target
+/// in the order they appear, matching m_pseudo.c's behaviour.
+#[derive(Debug, Clone)]
+pub struct PseudoConfig {
+    /// The user-typed command this entry intercepts (uppercased
+    /// at parse time so dispatch doesn't have to keep re-folding).
+    pub command: String,
+    /// Logical service name shared across fallback entries (for
+    /// the ERR_SERVICESDOWN message and oper-visible diagnostics).
+    pub name: String,
+    /// Target in `nick@server` form. Routing splits this into the
+    /// nick and server name at dispatch time.
+    pub nick: String,
+    /// Optional string prepended to the user's message text before
+    /// it's sent to services. The testnet uses this to encode the
+    /// real verb when one services bot fronts several commands —
+    /// e.g. `/SEND` carries `prepend = "SEND "` so MemoServ sees
+    /// the full sub-command.
+    pub prepend: Option<String>,
 }
 
 /// Trusted WEBIRC gateway entry — lets a known webchat gateway
@@ -595,6 +624,7 @@ impl Config {
         let mut kills = Vec::new();
         let mut webirc = Vec::new();
         let mut dnsbl = Vec::new();
+        let mut pseudo: Vec<PseudoConfig> = Vec::new();
         let mut features = Vec::new();
 
         for block in blocks {
@@ -797,6 +827,41 @@ impl Config {
                     });
                 }
 
+                "Pseudo" => {
+                    // The block's quoted-string label IS the
+                    // command name in nefarious2's grammar
+                    // (`Pseudo "AUTH" { ... };`). Skip silently if
+                    // it's missing — there's no useful default.
+                    let Some(command) = block.label.as_ref().map(|s| s.to_ascii_uppercase()) else {
+                        tracing::warn!("Pseudo block missing command label; ignoring");
+                        continue;
+                    };
+                    let nick = match block.get_str("nick") {
+                        Some(n) if !n.is_empty() => n.to_string(),
+                        _ => {
+                            tracing::warn!("Pseudo {command}: missing nick; ignoring");
+                            continue;
+                        }
+                    };
+                    if !nick.contains('@') {
+                        tracing::warn!(
+                            "Pseudo {command}: nick {nick:?} is not nick@server form; ignoring"
+                        );
+                        continue;
+                    }
+                    let name = block
+                        .get_str("name")
+                        .unwrap_or(&command)
+                        .to_string();
+                    let prepend = block.get_str("prepend").map(|s| s.to_string());
+                    pseudo.push(PseudoConfig {
+                        command,
+                        name,
+                        nick,
+                        prepend,
+                    });
+                }
+
                 "WebIRC" => {
                     let password = match block.get_str("password") {
                         Some(p) => p.to_string(),
@@ -874,6 +939,7 @@ impl Config {
             kills,
             webirc,
             dnsbl,
+            pseudo,
             features,
         })
     }
@@ -891,6 +957,15 @@ impl Config {
         self.classes
             .iter()
             .find(|c| c.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Look up a Pseudo command alias (case-insensitive on the
+    /// command). The Pseudo block's command name is uppercased at
+    /// parse time, so the lookup is exact-match on the uppercased
+    /// form.
+    pub fn find_pseudo(&self, command: &str) -> Option<&PseudoConfig> {
+        let upper = command.to_ascii_uppercase();
+        self.pseudo.iter().find(|p| p.command == upper)
     }
 }
 
