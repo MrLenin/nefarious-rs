@@ -285,11 +285,19 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
             }
         };
 
-        let chan = channel.read().await;
         let is_account = ctx.client.read().await.account.is_some();
 
-        // Check if client can send to channel
-        if !chan.can_send(&client_id, is_account) {
+        // Capture per-channel state we need *before* doing any
+        // async ban-check that re-locks channels by name. This
+        // avoids holding a read guard across the recursive
+        // is_user_banned_in walk — which would risk starvation
+        // if a writer were queued on the same channel.
+        let (can_send_ok, is_op) = {
+            let chan = channel.read().await;
+            (chan.can_send(&client_id, is_account), chan.is_op(&client_id))
+        };
+
+        if !can_send_ok {
             if cmd == Command::Privmsg {
                 ctx.send_numeric(
                     ERR_CANNOTSENDTOCHAN,
@@ -299,6 +307,52 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
             }
             return;
         }
+
+        // Extban quiet (~q) gate. A `+b ~q:nick!user@host` (or
+        // `~q:~a:badaccount`, etc.) lets the user JOIN but
+        // refuses their messages. activity=Some(Quiet) restricts
+        // the ban-check to entries actually flagged with the
+        // Quiet activity — hard bans don't fire here (those
+        // would have already blocked JOIN). Ops bypass to keep
+        // the channel governable; mirrors nefarious2's chanop
+        // exemption.
+        if !is_op {
+            let (account_owned, realname_owned, mark_owned) = {
+                let c = ctx.client.read().await;
+                (c.account.clone(), c.realname.clone(), c.dnsbl_mark.clone())
+            };
+            let user_channels = ctx.state.user_channel_view(client_id).await;
+            let chan_view: Vec<(&str, crate::channel::InChannelStatus)> = user_channels
+                .iter()
+                .map(|(n, s)| (n.as_str(), *s))
+                .collect();
+            let view = crate::channel::ExtBanUserView {
+                prefix: &prefix,
+                account: account_owned.as_deref(),
+                realname: realname_owned.as_str(),
+                dnsbl_mark: mark_owned.as_deref(),
+                channels: &chan_view,
+            };
+            if ctx
+                .state
+                .is_user_banned_in(
+                    target,
+                    &view,
+                    Some(crate::channel::ExtBanActivity::Quiet),
+                )
+                .await
+            {
+                if cmd == Command::Privmsg {
+                    ctx.send_numeric(
+                        ERR_CANNOTSENDTOCHAN,
+                        vec![target.clone(), "Cannot send to channel (+q)".into()],
+                    )
+                    .await;
+                }
+                return;
+            }
+        }
+        let chan = channel.read().await;
 
         // Content-aware gates (+C no-CTCP, +N no-notice, +c no-colour).
         // Ops bypass per channel.rs::check_content. Refusal emits 404
