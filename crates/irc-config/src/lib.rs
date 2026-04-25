@@ -400,6 +400,14 @@ impl Config {
         self.feature("SASL_DEFAULT_MECHANISMS")
     }
 
+    /// `NOMULTITARGETS` — when true, refuse PRIVMSG/NOTICE that
+    /// list more than one target with ERR_TOOMANYTARGETS. The
+    /// testnet sets this to TRUE to keep messages 1-to-1 across
+    /// the network. Default off, matching nefarious2.
+    pub fn nomultitargets(&self) -> bool {
+        self.feature_bool("NOMULTITARGETS", false)
+    }
+
     /// `GIT_CONFIG_PATH` — working-tree path of a git checkout
     /// containing the config file. When set, a background task
     /// runs `git pull --ff-only` every `GIT_SYNC_INTERVAL`

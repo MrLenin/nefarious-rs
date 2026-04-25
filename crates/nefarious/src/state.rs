@@ -415,6 +415,51 @@ impl ServerState {
         self.ssl_acceptor.load_full()
     }
 
+    /// Resolve a P10 message origin (server numeric or user
+    /// numeric, as a wire string) to whether the source is on a
+    /// `UWorld { name = ... }` listed services / U-lined server.
+    ///
+    /// Three cases:
+    /// - 2-char ServerNumeric → look up the server by name and
+    ///   consult `Config::is_uworld`. Our own server can't be
+    ///   U-lined relative to itself, so a self-match returns
+    ///   false.
+    /// - 5-char ClientNumeric → resolve to the user's home
+    ///   server numeric and recurse to the server case.
+    /// - Anything else → false (nick prefixes shouldn't reach
+    ///   us as P10 origins, and an absent origin isn't U-lined).
+    ///
+    /// Currently no consumer enforces a U-line bypass — our
+    /// inbound MODE handler already force-accepts every S2S
+    /// mode change, so there's no op-check to override. The
+    /// predicate exists so when op-enforcement gates are added
+    /// (KICK against U-lined target, MODE-from-non-server
+    /// without op, etc.) the U-line bypass already has its
+    /// data source.
+    pub async fn is_uworld_source(&self, origin: Option<&str>) -> bool {
+        let Some(origin) = origin else { return false };
+        if let Some(snum) = ServerNumeric::from_str(origin) {
+            if snum == self.numeric {
+                return false;
+            }
+            if let Some(entry) = self.remote_servers.get(&snum) {
+                let name = entry.value().read().await.name.clone();
+                return self.config().is_uworld(&name);
+            }
+            return false;
+        }
+        if let Some(cnum) = ClientNumeric::from_str(origin) {
+            if cnum.server == self.numeric {
+                return false;
+            }
+            if let Some(entry) = self.remote_servers.get(&cnum.server) {
+                let name = entry.value().read().await.name.clone();
+                return self.config().is_uworld(&name);
+            }
+        }
+        false
+    }
+
     /// Snapshot of the current GeoIP reader, if any. Cheap Arc
     /// clone — cheap enough to call per lookup without caching.
     pub fn geoip_reader(&self) -> Option<Arc<maxminddb::Reader<Vec<u8>>>> {

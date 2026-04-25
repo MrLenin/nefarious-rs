@@ -1560,6 +1560,22 @@ pub async fn handle_mode(state: &ServerState, msg: &P10Message) {
         }
     }
 
+    // Audit trail: log MODE changes from U-lined services (per
+    // `UWorld { name = ... }`) at info so operators can see when
+    // services took action. The source still rides through the
+    // standard apply path; nothing about acceptance changes here
+    // (we already force-accept all S2S MODE), this is purely
+    // visibility into the services-mediated subset.
+    if state.is_uworld_source(msg.origin.as_deref()).await
+        && msg.params.len() >= 2
+    {
+        info!(
+            "U-lined MODE on {target} from {origin}: {modes}",
+            origin = msg.origin.as_deref().unwrap_or("?"),
+            modes = msg.params[1..].join(" ")
+        );
+    }
+
     // Apply the mode change to our own channel state BEFORE relaying. Without
     // this, local op/voice/ban/flag state drifts out of sync with peers and
     // every subsequent permission check gives the wrong answer.

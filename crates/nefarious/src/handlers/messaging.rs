@@ -232,6 +232,25 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
     let target = &msg.params[0];
     let text = &msg.params[1];
 
+    // FEAT_NOMULTITARGETS: refuse PRIVMSG/NOTICE that list more
+    // than one target. Mirrors nefarious2 ircd_relay.c:413/574.
+    // Implementation detail: we don't currently dispatch
+    // multi-target messages either way (target is treated as a
+    // single name), so a comma here would otherwise just produce
+    // ERR_NOSUCHNICK. The explicit ERR_TOOMANYTARGETS gives the
+    // correct diagnostic while leaving multi-target dispatch
+    // unimplemented behind the same gate.
+    if target.contains(',') && ctx.state.config().nomultitargets() {
+        if cmd == Command::Privmsg {
+            ctx.send_numeric(
+                ERR_TOOMANYTARGETS,
+                vec![target.clone(), "Too many targets".into()],
+            )
+            .await;
+        }
+        return;
+    }
+
     let prefix = ctx.prefix().await;
     let client_id = ctx.client_id().await;
 
