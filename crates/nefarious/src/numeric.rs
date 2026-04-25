@@ -182,12 +182,30 @@ pub const ERR_NOSUCHSERVER: u16 = 402;
 pub const ERR_NOSUCHCHANNEL: u16 = 403;
 pub const ERR_CANNOTSENDTOCHAN: u16 = 404;
 pub const ERR_TOOMANYCHANNELS: u16 = 405;
+/// 407 — PRIVMSG listed too many recipients. Emitted under
+/// `FEAT_NOMULTITARGETS` when a single PRIVMSG/NOTICE names
+/// more than one target.
+pub const ERR_TOOMANYTARGETS: u16 = 407;
 pub const ERR_NOTEXTTOSEND: u16 = 412;
 pub const ERR_UNKNOWNCOMMAND: u16 = 421;
 pub const ERR_NOMOTD: u16 = 422;
 pub const ERR_NONICKNAMEGIVEN: u16 = 431;
 pub const ERR_ERRONEUSNICKNAME: u16 = 432;
 pub const ERR_NICKNAMEINUSE: u16 = 433;
+/// 436 — Nick collision detected during link/burst. Sent by an
+/// upstream to notify the ircd of a TS-losing collision; the
+/// real state transition is driven by the accompanying KILL or
+/// NICK token, not by this numeric.
+pub const ERR_NICKCOLLISION: u16 = 436;
+/// 437 — Target (nick/channel) temporarily unavailable. Most
+/// commonly emitted by services in response to a directed
+/// message when they're recovering or the delay mechanism
+/// kicked in. Transient; clients are expected to retry.
+pub const ERR_UNAVAILRESOURCE: u16 = 437;
+/// 440 — Services unavailable network-wide. Emitted when the
+/// configured services peer is offline / unreachable. Any
+/// in-flight SASL exchange against it will never complete.
+pub const ERR_SERVICESDOWN: u16 = 440;
 pub const ERR_USERNOTINCHANNEL: u16 = 441;
 pub const ERR_NOTONCHANNEL: u16 = 442;
 pub const ERR_USERONCHANNEL: u16 = 443;

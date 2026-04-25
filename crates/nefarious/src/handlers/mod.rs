@@ -214,8 +214,9 @@ impl HandlerContext {
                     PseudoLookup::Rewrite(pseudo_msg) => {
                         messaging::handle_privmsg(&ctx, &pseudo_msg).await;
                     }
-                    PseudoLookup::HandledEmpty => {
-                        // Helper already sent ERR_NOTEXTTOSEND.
+                    PseudoLookup::HandledEmpty
+                    | PseudoLookup::HandledServicesDown => {
+                        // Helper already sent the appropriate numeric.
                     }
                     PseudoLookup::NoMatch => {
                         debug!("unknown command from client: {cmd}");
@@ -360,7 +361,7 @@ impl HandlerContext {
     }
 }
 
-/// Outcome of a Pseudo-alias lookup. Three states so the caller
+/// Outcome of a Pseudo-alias lookup. Four states so the caller
 /// dispatches each correctly without double-sending errors.
 enum PseudoLookup {
     /// Not a Pseudo command — caller falls through to
@@ -369,8 +370,15 @@ enum PseudoLookup {
     /// Matched but the user supplied no text. We already sent
     /// ERR_NOTEXTTOSEND inside the helper; caller should stop.
     HandledEmpty,
-    /// Matched with a non-empty body — caller should run the
-    /// rewritten PRIVMSG through the messaging handler.
+    /// Matched but the target services bot isn't reachable (the
+    /// named server is missing from `remote_servers`, or the nick
+    /// isn't currently online there). Helper already sent
+    /// ERR_SERVICESDOWN; caller should stop. Mirrors m_pseudo.c's
+    /// fall-through to `send_reply(sptr, ERR_SERVICESDOWN, ...)`.
+    HandledServicesDown,
+    /// Matched with a non-empty body and a reachable target —
+    /// caller should run the rewritten PRIVMSG through the
+    /// messaging handler.
     Rewrite(Message),
 }
 
@@ -407,6 +415,51 @@ async fn build_pseudo_message(
         return PseudoLookup::HandledEmpty;
     }
 
+    // Reachability check before we route. Pseudo's `nick` is
+    // `bot@server.name`; m_pseudo.c at line 142 calls `FindServer`
+    // and at 145 calls `FindUser`, falling through to
+    // ERR_SERVICESDOWN when either fails. Without this check we'd
+    // hand a doomed PRIVMSG to the messaging handler and the user
+    // would see ERR_NOSUCHNICK ("No such nick/channel") instead of
+    // a meaningful "services down" — wrong diagnostic for an
+    // operator-side outage.
+    if let Some((nick, server)) = pseudo.nick.split_once('@') {
+        let server_ok = server.eq_ignore_ascii_case(&ctx.state.server_name)
+            || pseudo_server_reachable(ctx, server).await;
+        // Find the bot by nick — could be local or remote — and
+        // verify it actually lives on the named server (matches
+        // the C check that `cli_user(target)->server == server`).
+        let nick_ok = if let Some(remote) = ctx.state.find_remote_by_nick(nick) {
+            let r = remote.read().await;
+            let owner = ctx
+                .state
+                .remote_servers
+                .get(&r.server)
+                .map(|e| e.value().clone());
+            match owner {
+                Some(s) => s.read().await.name.eq_ignore_ascii_case(server),
+                None => false,
+            }
+        } else {
+            // Local user with the services nick? Vanishingly
+            // unlikely on a real network (bot nicks are normally
+            // juped) but cover the case for completeness.
+            ctx.state.find_client_by_nick(nick).is_some()
+                && server.eq_ignore_ascii_case(&ctx.state.server_name)
+        };
+        if !server_ok || !nick_ok {
+            ctx.send_numeric(
+                crate::numeric::ERR_SERVICESDOWN,
+                vec![
+                    pseudo.name.clone(),
+                    "Services are currently unavailable".into(),
+                ],
+            )
+            .await;
+            return PseudoLookup::HandledServicesDown;
+        }
+    }
+
     let body = match &pseudo.prepend {
         Some(prefix) => format!("{prefix}{user_text}"),
         None => user_text,
@@ -415,6 +468,24 @@ async fn build_pseudo_message(
         Command::Privmsg,
         vec![pseudo.nick.clone(), body],
     ))
+}
+
+/// True if `server_name` is in our current network view (either
+/// us or a known remote). Async because `RemoteServer.name` lives
+/// behind a `RwLock`.
+async fn pseudo_server_reachable(ctx: &HandlerContext, server_name: &str) -> bool {
+    for entry in ctx.state.remote_servers.iter() {
+        if entry
+            .value()
+            .read()
+            .await
+            .name
+            .eq_ignore_ascii_case(server_name)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Flush a labeled-response capture in the shape dictated by reply

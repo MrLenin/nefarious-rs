@@ -4148,12 +4148,22 @@ async fn clear_client_sasl(client: &Arc<RwLock<crate::client::Client>>) {
 pub async fn handle_numeric(state: &ServerState, msg: &P10Message, numeric: u16) {
     // -------- state hooks --------
     if numeric == 402 {
+        // ERR_NOSUCHSERVER — the hub couldn't route something we
+        // sent (typically a SASL line to a target that's now gone).
+        // Re-check reachability and fail sessions if the target is
+        // genuinely missing from the server tree.
         debug!(
             "received 402 from upstream ({params:?}); re-checking SASL reachability",
             params = msg.params
         );
         crate::sasl::abort_unreachable_sessions(state).await;
     }
+    // 437 (ERR_UNAVAILRESOURCE) is transient — clients retry.
+    // 436 (ERR_NICKCOLLISION) is informational; the real state
+    // transition rides on KILL/NICK tokens.
+    // 440 (ERR_SERVICESDOWN) is something *we* emit to our own
+    // clients via the Pseudo dispatcher — no upstream sends it,
+    // so there's no inbound hook to add.
 
     // -------- generic relay --------
     let Some(target_str) = msg.params.first().cloned() else {

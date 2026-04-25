@@ -285,8 +285,10 @@ pub async fn abort_unreachable_sessions(state: &ServerState) {
     if resolve_server_numeric(state, &target).await.is_some() {
         return;
     }
-    // Target has disappeared. Fail every session — they're all
-    // going to time out anyway.
+    // Target has disappeared. Fail every session — `sweep_expired(0)`
+    // drains the whole map (every session is "older than zero
+    // seconds"), and `handle_timeout` runs the standard terminal
+    // path on each.
     let sessions = state.sasl.sweep_expired(Duration::from_secs(0));
     for (token, session) in sessions {
         handle_timeout(state, &token, &session).await;
