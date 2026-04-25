@@ -216,10 +216,15 @@ async fn handle_channel_mode(ctx: &HandlerContext, msg: &Message) {
                         if chan.bans.iter().any(|b| b.mask == *mask) {
                             continue;
                         }
+                        let extban = crate::channel::ExtBan::parse(
+                            mask,
+                            &ctx.state.config(),
+                        );
                         chan.bans.push(BanEntry {
                             mask: mask.clone(),
                             set_by: prefix.clone(),
                             set_at: chrono::Utc::now(),
+                            extban,
                         });
                         applied_add.push('b');
                         applied_params.push(mask.clone());

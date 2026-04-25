@@ -408,6 +408,45 @@ impl Config {
         self.feature_bool("NOMULTITARGETS", false)
     }
 
+    /// `EXTBANS` — global on/off for extended-ban (`~x:value`)
+    /// parsing and matching. When false, `~`-prefixed bans are
+    /// stored as plain masks and never extban-matched. Default
+    /// off, matching nefarious2.
+    pub fn extbans_enabled(&self) -> bool {
+        self.feature_bool("EXTBANS", false)
+    }
+
+    /// Per-type EXTBAN gate. Each extban character (a, c, j, m,
+    /// M, n, q, r) has its own `EXTBAN_<x>` flag — operators can
+    /// disable individual extban types without disabling the
+    /// whole feature. Default true (when `EXTBANS` is on, all
+    /// types work unless explicitly disabled), matching the
+    /// testnet conf which lists each type explicitly.
+    pub fn extban_type_enabled(&self, ch: char) -> bool {
+        let key = format!("EXTBAN_{ch}");
+        self.feature_bool(&key, true)
+    }
+
+    /// `EXTBAN_j_MAXDEPTH` — recursion cap for `~j:#chan` (which
+    /// resolves to that channel's banlist). Without a cap, two
+    /// channels each with `~j:` to the other would infinite-loop.
+    /// Defaults to 1, matching nefarious2 ircd_features.c.
+    pub fn extban_j_maxdepth(&self) -> u32 {
+        self.feature("EXTBAN_j_MAXDEPTH")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(1)
+    }
+
+    /// `EXTBAN_j_MAXPERCHAN` — cap on the number of `~j:` extbans
+    /// allowed per channel banlist. Limits the fan-out cost of a
+    /// banlist walk that has to recursively check other channels.
+    /// Defaults to 2, matching nefarious2.
+    pub fn extban_j_maxperchan(&self) -> u32 {
+        self.feature("EXTBAN_j_MAXPERCHAN")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(2)
+    }
+
     /// `GIT_CONFIG_PATH` — working-tree path of a git checkout
     /// containing the config file. When set, a background task
     /// runs `git pull --ff-only` every `GIT_SYNC_INTERVAL`

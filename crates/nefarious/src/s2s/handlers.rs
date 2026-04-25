@@ -709,13 +709,14 @@ pub async fn handle_burst(state: &ServerState, msg: &P10Message) {
             // are bans, everything after the '~' is a ban exception.
             let mut in_excepts = false;
             let first_chunk = &param[1..];
+            let cfg = state.config();
             if accept_status {
-                absorb_ban_list(&mut chan, first_chunk, &mut in_excepts);
+                absorb_ban_list(&mut chan, first_chunk, &mut in_excepts, &cfg);
             }
             idx += 1;
             while idx < msg.params.len() {
                 if accept_status {
-                    absorb_ban_list(&mut chan, &msg.params[idx], &mut in_excepts);
+                    absorb_ban_list(&mut chan, &msg.params[idx], &mut in_excepts, &cfg);
                 }
                 idx += 1;
             }
@@ -745,16 +746,23 @@ pub async fn handle_burst(state: &ServerState, msg: &P10Message) {
 /// burst `%`-param into the channel. A bare `~` toggles the stream
 /// into ban-exception mode for the remainder of the burst (matches
 /// nefarious2/ircd/m_burst.c:408-413).
-fn absorb_ban_list(chan: &mut Channel, chunk: &str, in_excepts: &mut bool) {
+fn absorb_ban_list(
+    chan: &mut Channel,
+    chunk: &str,
+    in_excepts: &mut bool,
+    cfg: &irc_config::Config,
+) {
     for token in chunk.split(' ').filter(|s| !s.is_empty()) {
         if token == "~" {
             *in_excepts = true;
             continue;
         }
+        let extban = crate::channel::ExtBan::parse(token, cfg);
         let entry = BanEntry {
             mask: token.to_string(),
             set_by: "burst".to_string(),
             set_at: chrono::Utc::now(),
+            extban,
         };
         if *in_excepts {
             chan.excepts.push(entry);
@@ -1833,10 +1841,13 @@ async fn apply_remote_channel_mode(
             'b' => {
                 if let Some(mask) = params.get(pi) {
                     if adding {
+                        let extban =
+                            crate::channel::ExtBan::parse(mask, &state.config());
                         chan.bans.push(BanEntry {
                             mask: mask.clone(),
                             set_by: "remote".to_string(),
                             set_at: chrono::Utc::now(),
+                            extban,
                         });
                     } else {
                         chan.bans.retain(|b| &b.mask != mask);
