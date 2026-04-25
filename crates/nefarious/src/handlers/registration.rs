@@ -24,6 +24,19 @@ pub async fn handle_nick_change(ctx: &HandlerContext, msg: &Message) {
         return;
     }
 
+    // Reject nicks juped by config (`Jupe { nick = "OperServ,..."; }`).
+    // Returned as ERR_ERRONEUSNICKNAME, matching nefarious2's
+    // addNickJupes path which makes the nick look syntactically
+    // forbidden to the client.
+    if ctx.state.config().is_nick_juped(&new_nick) {
+        ctx.send_numeric(
+            ERR_ERRONEUSNICKNAME,
+            vec![new_nick, "Nickname is reserved by network policy".into()],
+        )
+        .await;
+        return;
+    }
+
     let client_id = ctx.client_id().await;
     let old_prefix = ctx.prefix().await;
     let old_nick = ctx.nick().await;

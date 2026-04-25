@@ -19,6 +19,17 @@ pub struct Config {
     pub webirc: Vec<WebIrcConfig>,
     pub dnsbl: Vec<DnsBlConfig>,
     pub pseudo: Vec<PseudoConfig>,
+    /// Casefolded nicknames forbidden by `Jupe { nick = "..."; ... };`
+    /// blocks. Each conf entry is comma-separated; we flatten and
+    /// casefold at parse time so `is_nick_juped` is an O(1) hash
+    /// lookup. Independent of the runtime `/JUPE` command (which
+    /// jupes *server* names).
+    pub juped_nicks: std::collections::HashSet<String>,
+    /// Casefolded server names declared as services / U-lined via
+    /// `UWorld { name = "..."; ... };` blocks. Trusted to use ops
+    /// without channel membership, override TS, etc. — currently
+    /// just stored; consumers query `is_uworld` as features land.
+    pub uworld_servers: std::collections::HashSet<String>,
     pub features: Vec<(String, String)>,
 }
 
@@ -625,6 +636,10 @@ impl Config {
         let mut webirc = Vec::new();
         let mut dnsbl = Vec::new();
         let mut pseudo: Vec<PseudoConfig> = Vec::new();
+        let mut juped_nicks: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut uworld_servers: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let mut features = Vec::new();
 
         for block in blocks {
@@ -903,6 +918,44 @@ impl Config {
                     }
                 }
 
+                "Jupe" => {
+                    // Jupe blocks contain one or more
+                    // `nick = "csv,of,nicks";` entries. Mirrors
+                    // nefarious2 ircd_parser.y::jupenick which
+                    // calls addNickJupes on each comma-list. We
+                    // flatten + casefold so dispatch is O(1) hash
+                    // lookup. Note: this is for **nick** jupes
+                    // (forbidden user names); server jupes are a
+                    // separate runtime command and store.
+                    for v in block.get_all("nick") {
+                        let Some(s) = v.as_str() else { continue };
+                        for nick in s.split(',') {
+                            let trimmed = nick.trim();
+                            if !trimmed.is_empty() {
+                                juped_nicks.insert(rfc1459_fold(trimmed));
+                            }
+                        }
+                    }
+                }
+
+                "UWorld" => {
+                    // UWorld blocks contain one or more
+                    // `name = "...";` entries naming services /
+                    // U-lined servers. nefarious2 grants those
+                    // servers' users override authority for ops,
+                    // TS, etc. We just store the set here;
+                    // consumers query `Config::is_uworld` as
+                    // the relevant gates land.
+                    for v in block.get_all("name") {
+                        if let Some(s) = v.as_str() {
+                            let trimmed = s.trim();
+                            if !trimmed.is_empty() {
+                                uworld_servers.insert(trimmed.to_ascii_lowercase());
+                            }
+                        }
+                    }
+                }
+
                 "Features" => {
                     for entry in &block.entries {
                         if let parser::Entry::KeyValue(k, v) = entry {
@@ -940,6 +993,8 @@ impl Config {
             webirc,
             dnsbl,
             pseudo,
+            juped_nicks,
+            uworld_servers,
             features,
         })
     }
@@ -967,6 +1022,42 @@ impl Config {
         let upper = command.to_ascii_uppercase();
         self.pseudo.iter().find(|p| p.command == upper)
     }
+
+    /// Whether `nick` is forbidden by a `Jupe { nick = ... }`
+    /// config entry. Lookup is rfc1459-casefolded so `oper` and
+    /// `OPER` resolve the same way.
+    pub fn is_nick_juped(&self, nick: &str) -> bool {
+        self.juped_nicks.contains(&rfc1459_fold(nick))
+    }
+
+    /// Whether `server_name` is declared as a U-lined / services
+    /// server via a `UWorld { name = ... }` block. Case-insensitive.
+    pub fn is_uworld(&self, server_name: &str) -> bool {
+        self.uworld_servers
+            .contains(&server_name.to_ascii_lowercase())
+    }
+}
+
+/// RFC 1459 / IRC nick casefold: lowercase ASCII plus the
+/// `[`/`{`, `]`/`}`, `\`/`|`, `^`/`~` equivalences specified by
+/// the protocol. Used here so the Jupe lookup table and the
+/// runtime nick comparison agree without pulling `irc-proto` in
+/// as a build dep on this otherwise stand-alone parser crate.
+/// Equivalent to `irc_proto::irc_casefold`.
+fn rfc1459_fold(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let folded = match c {
+            'A'..='Z' => (c as u8 + 32) as char,
+            '[' => '{',
+            ']' => '}',
+            '\\' => '|',
+            '^' => '~',
+            other => other,
+        };
+        out.push(folded);
+    }
+    out
 }
 
 /// Parse a comma-separated DNSBL index list (e.g. `"2,3,5,6"`)

@@ -216,6 +216,8 @@ Supported block types:
 | `WebIRC` | Trusted gateway passthrough (password, host) |
 | `DNSBL` | DNSBL zones (`name`, `host` index list, `bitmask`, `action`: block/block\_all/block\_anon/mark/whitelist, `mark`, `score`). Legacy aliases `domain`/`reply`/`reason` accepted. |
 | `Pseudo "<CMD>"` | User command alias rewritten to PRIVMSG against a services nick (`name`, `nick = AuthServ@x3.services`, optional `prepend`). Powers `/AUTH`, `/MEMOSERV`, etc. |
+| `Jupe` | Reserved nicknames; one or more `nick = "csv,of,names";` entries. Refused at NICK with ERR_ERRONEUSNICKNAME. Server-name jupes still use the runtime `/JUPE`. |
+| `UWorld` | Trusted services / U-lined servers; one or more `name = "...";` entries. Stored for downstream override checks. |
 | `Features` | Key-value network settings (see table below) |
 
 Key `Features` entries:

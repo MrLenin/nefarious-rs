@@ -628,6 +628,23 @@ async fn registration_phase(
                         );
                         continue;
                     }
+                    // Config-juped nicks (services bots, reserved
+                    // network names) are unavailable network-wide.
+                    // Mirrors the post-registration NICK handler so
+                    // a client can't smuggle a juped name in via
+                    // their initial registration NICK.
+                    if state.config().is_nick_juped(nick) {
+                        let c = client.read().await;
+                        c.send_numeric(
+                            &state.server_name,
+                            ERR_ERRONEUSNICKNAME,
+                            vec![
+                                nick.clone(),
+                                "Nickname is reserved by network policy".into(),
+                            ],
+                        );
+                        continue;
+                    }
                     // Atomic reserve — no TOCTOU window between the usage
                     // check and taking the nick.
                     let (id, old_nick) = {
