@@ -341,6 +341,72 @@ impl ExtBan {
     }
 }
 
+/// Snapshot of the user attributes an extban matcher needs.
+///
+/// Built once per ban-check sweep so we don't re-read the
+/// `Client` / `RemoteClient` structs (which would mean a lock
+/// per ban). Borrowed view; the caller owns the strings. The
+/// `joined_channel_*` fields are populated when the caller
+/// supports `~c` / `~j`; later commits will fill them in. For
+/// the simple-types matcher (this commit) they stay empty and
+/// those criteria return false.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtBanUserView<'a> {
+    /// `nick!user@host` — the canonical RFC form. Hostmask
+    /// leaves of activity-only extbans (e.g. `~q:nick!user@host`)
+    /// match against this.
+    pub prefix: &'a str,
+    /// Logged-in account name, if any. `~a` matches against it;
+    /// `~M` (mark-but-only-unauthed) requires this to be `None`.
+    pub account: Option<&'a str>,
+    /// Realname / GECOS field. `~r` matches against it.
+    pub realname: &'a str,
+    /// DNSBL mark stored at connect time when a mark-action
+    /// zone fired. `~m` matches against it; `~M` matches it
+    /// only when `account` is None. Free-form text (we store as
+    /// `<zone>: <reason>`).
+    pub dnsbl_mark: Option<&'a str>,
+}
+
+impl ExtBan {
+    /// Does this extban apply to the user described by `view`?
+    ///
+    /// Returns the *match-criterion* result, including any `~!`
+    /// negation. The activity flag (whether this ban *blocks*
+    /// JOIN vs MSG vs NICK) is a separate concern handled by the
+    /// integrating ban-check site — this method only answers
+    /// "does the user match this mask".
+    ///
+    /// `~c` and `~j` always return false here; their data
+    /// requirements (channel-membership scan / recursive
+    /// banlist walk) live above this layer and need extra
+    /// arguments. They land in the next commits.
+    pub fn matches(&self, view: &ExtBanUserView<'_>) -> bool {
+        let raw = match &self.criterion {
+            ExtBanMatch::Account(glob) => view
+                .account
+                .is_some_and(|a| wildcard_match(glob, a)),
+            ExtBanMatch::Realname(glob) => wildcard_match(glob, view.realname),
+            ExtBanMatch::Mark(glob) => view
+                .dnsbl_mark
+                .is_some_and(|m| wildcard_match(glob, m)),
+            ExtBanMatch::MarkUnauthed(glob) => {
+                view.account.is_none()
+                    && view.dnsbl_mark.is_some_and(|m| wildcard_match(glob, m))
+            }
+            ExtBanMatch::Hostmask(mask) => wildcard_match(mask, view.prefix),
+            // ~c and ~j land in subsequent commits with their
+            // accompanying data plumbing. Until then they
+            // never match; a banlist using them silently
+            // permits everyone who would otherwise be blocked,
+            // which matches our current pre-extban behaviour
+            // and is the safest no-op.
+            ExtBanMatch::InChannel { .. } | ExtBanMatch::JoinedBan(_) => false,
+        };
+        if self.negate { !raw } else { raw }
+    }
+}
+
 fn parse_in_channel(value: &str) -> Option<ExtBanMatch> {
     let (prefix, channel) = match value.chars().next()? {
         c @ ('@' | '%' | '+') => (Some(c), value.get(1..)?.to_string()),
@@ -443,6 +509,88 @@ mod extban_tests {
         )
         .expect("config");
         assert!(ExtBan::parse("~a:bob", &cfg).is_none());
+    }
+
+    fn view<'a>(
+        prefix: &'a str,
+        account: Option<&'a str>,
+        realname: &'a str,
+        mark: Option<&'a str>,
+    ) -> ExtBanUserView<'a> {
+        ExtBanUserView {
+            prefix,
+            account,
+            realname,
+            dnsbl_mark: mark,
+        }
+    }
+
+    #[test]
+    fn match_account_glob() {
+        let cfg = cfg_all_on();
+        let eb = ExtBan::parse("~a:bo*", &cfg).unwrap();
+        assert!(eb.matches(&view("a!b@c", Some("bob"), "Bob", None)));
+        assert!(eb.matches(&view("a!b@c", Some("boris"), "Bob", None)));
+        assert!(!eb.matches(&view("a!b@c", Some("alice"), "Bob", None)));
+        // Unauthenticated never matches ~a.
+        assert!(!eb.matches(&view("a!b@c", None, "Bob", None)));
+    }
+
+    #[test]
+    fn match_account_negated() {
+        let cfg = cfg_all_on();
+        let eb = ExtBan::parse("~!a:trusted", &cfg).unwrap();
+        // Anyone NOT logged in as `trusted` matches.
+        assert!(eb.matches(&view("a!b@c", Some("alice"), "x", None)));
+        assert!(eb.matches(&view("a!b@c", None, "x", None)));
+        assert!(!eb.matches(&view("a!b@c", Some("trusted"), "x", None)));
+    }
+
+    #[test]
+    fn match_realname() {
+        let cfg = cfg_all_on();
+        let eb = ExtBan::parse("~r:*spam*", &cfg).unwrap();
+        assert!(eb.matches(&view("a!b@c", None, "buy spam now", None)));
+        assert!(!eb.matches(&view("a!b@c", None, "regular user", None)));
+    }
+
+    #[test]
+    fn match_mark_any_user() {
+        let cfg = cfg_all_on();
+        let eb = ExtBan::parse("~m:*sorbs*", &cfg).unwrap();
+        assert!(eb.matches(&view("a!b@c", Some("alice"), "x", Some("sorbs: listed"))));
+        assert!(eb.matches(&view("a!b@c", None, "x", Some("sorbs: listed"))));
+        assert!(!eb.matches(&view("a!b@c", None, "x", Some("dronebl: listed"))));
+        assert!(!eb.matches(&view("a!b@c", None, "x", None)));
+    }
+
+    #[test]
+    fn match_mark_unauthed_only() {
+        let cfg = cfg_all_on();
+        let eb = ExtBan::parse("~M:*sorbs*", &cfg).unwrap();
+        // Mark hits but the user is authed — ~M spares them.
+        assert!(!eb.matches(&view("a!b@c", Some("alice"), "x", Some("sorbs: listed"))));
+        // Unauthed with mark — caught.
+        assert!(eb.matches(&view("a!b@c", None, "x", Some("sorbs: listed"))));
+    }
+
+    #[test]
+    fn match_hostmask_leaf() {
+        let cfg = cfg_all_on();
+        let eb = ExtBan::parse("~q:nick!user@*.evil.example", &cfg).unwrap();
+        assert!(eb.matches(&view("nick!user@host.evil.example", None, "x", None)));
+        assert!(!eb.matches(&view("nick!user@good.example", None, "x", None)));
+    }
+
+    #[test]
+    fn pending_criteria_dont_match() {
+        let cfg = cfg_all_on();
+        // ~c and ~j always return false at this commit; integrators
+        // need to wire data plumbing before they can produce hits.
+        let chan_ban = ExtBan::parse("~c:#evil", &cfg).unwrap();
+        assert!(!chan_ban.matches(&view("a!b@c", Some("alice"), "x", None)));
+        let jupe_ban = ExtBan::parse("~j:#evil", &cfg).unwrap();
+        assert!(!jupe_ban.matches(&view("a!b@c", Some("alice"), "x", None)));
     }
 }
 
