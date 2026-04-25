@@ -352,6 +352,16 @@ async fn handle_message(ctx: &HandlerContext, msg: &Message, cmd: Command) {
                 return;
             }
         }
+        // `+D` reveal: if the sender is a delayed-join member,
+        // their first PRIVMSG/NOTICE to the channel announces
+        // their presence to non-op members. The reveal must
+        // happen *before* the message goes out so other clients
+        // see the JOIN line first; otherwise their UI would
+        // display the message from a user they never saw join.
+        // `reveal_delayed_join` is a no-op when the sender
+        // isn't delayed (or isn't a member).
+        crate::handlers::channel::reveal_delayed_join(ctx, target, client_id).await;
+
         let chan = channel.read().await;
 
         // Content-aware gates (+C no-CTCP, +N no-notice, +c no-colour).

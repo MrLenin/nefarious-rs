@@ -187,9 +187,16 @@ pub async fn handle_join(ctx: &HandlerContext, msg: &Message) {
             // or a prior link) and the joiner must not get ops for free.
             is_new = chan.is_empty();
 
-            // Add the member — first member (of a brand-new channel) gets ops.
+            // `+D` (MODE_DELJOINS): the joiner is initially hidden from
+            // other members until they "reveal" themselves by speaking,
+            // getting opped, parting, etc. The first joiner of a brand-
+            // new +D channel still gets ops — they need to be visible to
+            // run the channel — so the delayed flag and the new-channel
+            // op grant don't compete.
+            let is_deljoins = chan.modes.extended_flags.contains(&'D');
             let flags = MembershipFlags {
                 op: is_new,
+                delayed: is_deljoins && !is_new,
                 ..Default::default()
             };
             chan.add_member(client_id, flags);
@@ -223,7 +230,7 @@ pub async fn handle_join(ctx: &HandlerContext, msg: &Message) {
             Command::Join,
             vec![chan_name.to_string(), account, realname],
         );
-        send_join_to_channel(ctx, chan_name, &plain, &extended, &src).await;
+        send_join_to_channel(ctx, chan_name, client_id, &plain, &extended, &src).await;
 
         // Route to S2S
         {
@@ -278,7 +285,7 @@ pub async fn handle_part(ctx: &HandlerContext, msg: &Message) {
             }
         };
 
-        {
+        let was_delayed = {
             let chan = channel.read().await;
             if !chan.is_member(&client_id) {
                 ctx.send_numeric(
@@ -288,16 +295,28 @@ pub async fn handle_part(ctx: &HandlerContext, msg: &Message) {
                 .await;
                 continue;
             }
-        }
+            chan.members.get(&client_id).is_some_and(|f| f.delayed)
+        };
 
-        // Notify channel before removing (local client broadcast)
+        // Notify channel before removing (local client broadcast).
+        // `+D` delayed-join: a member who never revealed themselves
+        // parts silently — non-op members never saw the JOIN, so
+        // the matching PART would be confusing. Ops still see the
+        // PART so the audit trail is intact. Self-echo also goes
+        // through (the parter's own client gets the PART so it
+        // updates its UI). Mirrors nefarious2 channel.c, which
+        // skips the PART broadcast for IsDelayedJoin members.
         let mut part_params = vec![chan_name.to_string()];
         if !reason.is_empty() {
             part_params.push(reason.clone());
         }
         let part_msg = Message::with_source(&prefix, Command::Part, part_params);
         let src = crate::tags::SourceInfo::from_local(&*ctx.client.read().await);
-        send_to_channel(ctx, chan_name, &part_msg, &src).await;
+        if was_delayed {
+            send_part_to_ops_and_self(ctx, chan_name, client_id, &part_msg, &src).await;
+        } else {
+            send_to_channel(ctx, chan_name, &part_msg, &src).await;
+        }
 
         // Mutate local state BEFORE routing to S2S. The S2S read task
         // runs concurrently; if we routed first, a fast peer echo
@@ -860,9 +879,120 @@ pub async fn handle_list(ctx: &HandlerContext, _msg: &Message) {
 /// form for clients that negotiated the cap and the plain form for
 /// everyone else. Per-recipient IRCv3 tags are applied via
 /// `send_from`.
+/// Send a PART message to channel ops + the parter themselves,
+/// skipping non-op members. Used for `+D` delayed-join parters
+/// who never revealed — the non-ops never saw their JOIN and
+/// would be confused by an unsolicited PART.
+async fn send_part_to_ops_and_self(
+    ctx: &HandlerContext,
+    chan_name: &str,
+    parter_id: crate::client::ClientId,
+    msg: &Message,
+    src: &crate::tags::SourceInfo,
+) {
+    let channel = match ctx.state.get_channel(chan_name) {
+        Some(c) => c,
+        None => return,
+    };
+    let chan = channel.read().await;
+    for (&member_id, flags) in &chan.members {
+        if member_id != parter_id && !flags.op {
+            continue;
+        }
+        if let Some(member) = ctx.state.clients.get(&member_id) {
+            let m = member.read().await;
+            m.send_from(msg.clone(), src);
+        }
+    }
+}
+
+/// Reveal a delayed-join member to the rest of a `+D` channel.
+///
+/// Clears the member's `delayed` flag, then broadcasts the
+/// JOIN they originally suppressed to every member who hasn't
+/// seen them yet (everyone except ops, who already saw the
+/// hidden join, and themselves). Returns `true` if a reveal
+/// happened — caller can use this to decide whether to log.
+///
+/// Called from any path where a delayed user "shows themselves"
+/// per nef semantics: speaking, getting opped, parting (to
+/// emit PART after the implicit JOIN), kicking, etc. This
+/// commit only wires the speak path; later passes can hook
+/// the rest.
+pub async fn reveal_delayed_join(
+    ctx: &HandlerContext,
+    chan_name: &str,
+    member_id: crate::client::ClientId,
+) -> bool {
+    let channel = match ctx.state.get_channel(chan_name) {
+        Some(c) => c,
+        None => return false,
+    };
+
+    // Flip the flag and capture whether we actually need to
+    // reveal — racing reveals collapse to a single broadcast
+    // because the second one finds the flag already cleared.
+    let was_delayed = {
+        let mut chan = channel.write().await;
+        match chan.members.get_mut(&member_id) {
+            Some(flags) if flags.delayed => {
+                flags.delayed = false;
+                true
+            }
+            _ => false,
+        }
+    };
+    if !was_delayed {
+        return false;
+    }
+
+    // Build the JOIN messages from the revealed user's
+    // current Client state. Mirrors what the original (now
+    // suppressed) JOIN would have looked like.
+    let (prefix, src, account, realname) = {
+        let arc = match ctx.state.clients.get(&member_id) {
+            Some(c) => c.value().clone(),
+            None => return true,
+        };
+        let c = arc.read().await;
+        (
+            c.prefix(),
+            crate::tags::SourceInfo::from_local(&c),
+            c.account.clone().unwrap_or_else(|| "*".to_string()),
+            c.realname.clone(),
+        )
+    };
+    let plain = Message::with_source(&prefix, Command::Join, vec![chan_name.to_string()]);
+    let extended = Message::with_source(
+        &prefix,
+        Command::Join,
+        vec![chan_name.to_string(), account, realname],
+    );
+
+    // Send to every member except the revealed user and ops
+    // (ops already saw the original suppressed JOIN).
+    let chan = channel.read().await;
+    for (&other_id, flags) in &chan.members {
+        if other_id == member_id || flags.op {
+            continue;
+        }
+        if let Some(member) = ctx.state.clients.get(&other_id) {
+            let m = member.read().await;
+            let msg = if m.has_cap(crate::capabilities::Capability::ExtendedJoin) {
+                extended.clone()
+            } else {
+                plain.clone()
+            };
+            m.send_from(msg, &src);
+        }
+    }
+    true
+}
+
 async fn send_join_to_channel(
     ctx: &HandlerContext,
     chan_name: &str,
+    joiner_id: crate::client::ClientId,
     plain: &Message,
     extended: &Message,
     src: &crate::tags::SourceInfo,
@@ -873,7 +1003,21 @@ async fn send_join_to_channel(
     };
 
     let chan = channel.read().await;
-    for (&member_id, _) in &chan.members {
+    // `+D` (delayed-join) suppression: when the joiner is
+    // marked delayed, they're hidden from non-op members
+    // until they reveal themselves. The joiner still sees
+    // their own JOIN (so their client knows they entered);
+    // ops still see it (so they can govern the channel and
+    // notice quiet entrants). Mirrors nefarious2 channel.c's
+    // `find_delayed_joins` / `show_delayed_joins`.
+    let joiner_delayed = chan
+        .members
+        .get(&joiner_id)
+        .is_some_and(|f| f.delayed);
+    for (&member_id, flags) in &chan.members {
+        if joiner_delayed && member_id != joiner_id && !flags.op {
+            continue;
+        }
         if let Some(member) = ctx.state.clients.get(&member_id) {
             let m = member.read().await;
             let msg = if m.has_cap(crate::capabilities::Capability::ExtendedJoin) {
@@ -972,13 +1116,20 @@ async fn send_names(ctx: &HandlerContext, chan_name: &str) {
     //   multi-prefix      → emit every active prefix (e.g. `@+nick`)
     //                        instead of only the highest.
     //   userhost-in-names → emit `nick!user@host` instead of just `nick`.
-    let (multi_prefix, userhost_in_names) = {
+    let (multi_prefix, userhost_in_names, requester_id) = {
         let c = ctx.client.read().await;
         (
             c.has_cap(crate::capabilities::Capability::MultiPrefix),
             c.has_cap(crate::capabilities::Capability::UserhostInNames),
+            c.id,
         )
     };
+    // `+D` (delayed-join) filtering: hide members marked
+    // `delayed` from non-op requesters. The requester always
+    // sees themselves. Ops see everyone (so they can govern).
+    // Mirrors nefarious2's NAMES path which calls
+    // `IsDelayedJoin(member)` to skip in the rendering loop.
+    let requester_is_op = chan.is_op(&requester_id);
 
     // Build names list. Include BOTH local members and remote members
     // (from other servers via P10) so a client on our side actually
@@ -988,6 +1139,9 @@ async fn send_names(ctx: &HandlerContext, chan_name: &str) {
     // prevents it from rendering PRIVMSGs arriving from those users.
     let mut names = Vec::new();
     for (&member_id, flags) in &chan.members {
+        if flags.delayed && member_id != requester_id && !requester_is_op {
+            continue;
+        }
         if let Some(member) = ctx.state.clients.get(&member_id) {
             let m = member.read().await;
             let prefix = if multi_prefix {

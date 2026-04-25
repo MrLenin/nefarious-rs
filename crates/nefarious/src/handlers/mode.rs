@@ -290,6 +290,37 @@ async fn handle_channel_mode(ctx: &HandlerContext, msg: &Message) {
                 }
             }
 
+            // `+D` (MODE_DELJOINS) — delayed-join channel mode.
+            // Newly joining members become hidden until they
+            // reveal themselves. On `-D` we expose every member
+            // who's still delayed so the channel state matches
+            // what other clients now expect to see.
+            'D' => {
+                let mut chan = channel.write().await;
+                if adding {
+                    chan.modes.extended_flags.insert('D');
+                    applied_add.push('D');
+                } else {
+                    chan.modes.extended_flags.remove(&'D');
+                    applied_remove.push('D');
+                    // Snapshot the delayed members so we can
+                    // reveal them after dropping the write lock.
+                    let to_reveal: Vec<crate::client::ClientId> = chan
+                        .members
+                        .iter()
+                        .filter(|(_, f)| f.delayed)
+                        .map(|(id, _)| *id)
+                        .collect();
+                    drop(chan);
+                    for id in to_reveal {
+                        crate::handlers::channel::reveal_delayed_join(
+                            ctx, &chan_name, id,
+                        )
+                        .await;
+                    }
+                }
+            }
+
             other => {
                 ctx.send_numeric(
                     ERR_UNKNOWNMODE,

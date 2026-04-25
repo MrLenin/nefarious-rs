@@ -15,6 +15,13 @@ pub struct MembershipFlags {
     /// when the peer did not advertise oplevel support (in which case
     /// we treat the op as MAXOPLEVEL-equivalent for dispatch).
     pub oplevel: Option<u16>,
+    /// Per-member CHFL_DELAYED. Set when the user joins a `+D`
+    /// channel: their JOIN isn't fanned out to other members,
+    /// they're filtered from NAMES, and the channel acts as if
+    /// they aren't there until they "reveal" themselves by
+    /// speaking, getting opped, parting, etc. Mirrors
+    /// nefarious2 channel.h:84 `CHFL_DELAYED 0x40000`.
+    pub delayed: bool,
 }
 
 impl MembershipFlags {
