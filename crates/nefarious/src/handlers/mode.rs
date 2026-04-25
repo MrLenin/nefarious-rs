@@ -62,20 +62,50 @@ async fn handle_channel_mode(ctx: &HandlerContext, msg: &Message) {
 
     let client_id = ctx.client_id().await;
 
-    // Check operator permission
-    {
+    // Authority check. Ops may set anything; halfops may only
+    // set/unset voice (`+v`/`-v`) per nefarious2 m_mode.c
+    // (MODE_PARSE_ISHALFOP gates `+v` only). Anyone else gets
+    // ERR_CHANOPRIVSNEEDED. Per-mode enforcement below sends
+    // the same error if a halfop tries a non-voice mode.
+    let (is_op, is_halfop) = {
         let chan = channel.read().await;
-        if !chan.is_op(&client_id) {
+        (chan.is_op(&client_id), chan.is_halfop(&client_id))
+    };
+    if !is_op && !is_halfop {
+        ctx.send_numeric(
+            ERR_CHANOPRIVSNEEDED,
+            vec![chan_name.clone(), "You're not channel operator".into()],
+        )
+        .await;
+        return;
+    }
+
+    let mode_str = &msg.params[1];
+
+    // Halfops can only touch voice. If the modestring contains
+    // any letter other than `v`, refuse the whole MODE upfront
+    // — applying the voice parts while skipping op-only parts
+    // would mess up parameter counting (each mode consumes a
+    // different number of params). All-or-nothing matches what
+    // a halfop user expects from `MODE +vo nick nick2`: either
+    // both fire (impossible without op) or neither does.
+    if !is_op {
+        let touches_op_only = mode_str
+            .chars()
+            .any(|c| c.is_ascii_alphabetic() && c != 'v');
+        if touches_op_only {
             ctx.send_numeric(
                 ERR_CHANOPRIVSNEEDED,
-                vec![chan_name.clone(), "You're not channel operator".into()],
+                vec![
+                    chan_name.clone(),
+                    "Halfops can only set +v/-v".into(),
+                ],
             )
             .await;
             return;
         }
     }
 
-    let mode_str = &msg.params[1];
     let mut param_idx = 2;
     let mut adding = true;
 

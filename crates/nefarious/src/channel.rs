@@ -998,6 +998,14 @@ impl Channel {
         self.members.get(id).is_some_and(|f| f.op)
     }
 
+    /// Check if a client holds the halfop (`+h`) flag in this
+    /// channel. Used by MODE authority gating: per nefarious2
+    /// m_mode.c:174-176, halfops can set `+v` / `-v` (voice
+    /// only) but no other channel modes.
+    pub fn is_halfop(&self, id: &ClientId) -> bool {
+        self.members.get(id).is_some_and(|f| f.halfop)
+    }
+
     /// Check if a client has voice.
     pub fn has_voice(&self, id: &ClientId) -> bool {
         self.members.get(id).is_some_and(|f| f.voice)
