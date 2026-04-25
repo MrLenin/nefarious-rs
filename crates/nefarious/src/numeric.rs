@@ -211,6 +211,13 @@ pub const ERR_NOTONCHANNEL: u16 = 442;
 pub const ERR_USERONCHANNEL: u16 = 443;
 pub const ERR_NOTREGISTERED: u16 = 451;
 pub const ERR_NEEDMOREPARAMS: u16 = 461;
+/// 437 — Undernet/IRCu variant: `<nick> :Cannot change nickname
+/// while banned on a channel`. Emitted when an extban with the
+/// NoNick activity (`+b ~n:...`) matches the user in any
+/// channel they're currently in. Shares the wire numeric with
+/// IRCnet's ERR_UNAVAILRESOURCE; nef's m_nick.c uses it for
+/// nick-ban refusals specifically.
+pub const ERR_BANNICKCHANGE: u16 = 437;
 /// 438: `<nick> :Nick change too fast. Please wait <N> seconds.`
 pub const ERR_NICKTOOFAST: u16 = 438;
 pub const ERR_ALREADYREGISTERED: u16 = 462;

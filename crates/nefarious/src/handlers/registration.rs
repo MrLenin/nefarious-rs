@@ -41,6 +41,57 @@ pub async fn handle_nick_change(ctx: &HandlerContext, msg: &Message) {
     let old_prefix = ctx.prefix().await;
     let old_nick = ctx.nick().await;
 
+    // Extban NoNick (`~n:...`) gate. For each channel the user
+    // is currently in, refuse the nick change if any banlist
+    // there carries an `~n` extban that matches. Mirrors
+    // nefarious2 m_nick.c which calls find_ban with
+    // `extbantype = EBAN_NICK`. Ops in a channel still get
+    // refused if banned — nef's `is_banned(member, EBAN_NICK)`
+    // doesn't exempt ops; the bypass is `~!n:account` style
+    // negation in the ban itself. Skipped for case-only
+    // renames (no real nick change).
+    if !old_nick.is_empty() && !irc_eq(&old_nick, &new_nick) {
+        let (account_owned, realname_owned, mark_owned) = {
+            let c = ctx.client.read().await;
+            (c.account.clone(), c.realname.clone(), c.dnsbl_mark.clone())
+        };
+        let user_channels = ctx.state.user_channel_view(client_id).await;
+        let chan_view: Vec<(&str, crate::channel::InChannelStatus)> = user_channels
+            .iter()
+            .map(|(n, s)| (n.as_str(), *s))
+            .collect();
+        let view = crate::channel::ExtBanUserView {
+            prefix: &old_prefix,
+            account: account_owned.as_deref(),
+            realname: realname_owned.as_str(),
+            dnsbl_mark: mark_owned.as_deref(),
+            channels: &chan_view,
+        };
+        for (chan_name, _) in &user_channels {
+            if ctx
+                .state
+                .is_user_banned_in(
+                    chan_name,
+                    &view,
+                    Some(crate::channel::ExtBanActivity::NoNick),
+                )
+                .await
+            {
+                ctx.send_numeric(
+                    crate::numeric::ERR_BANNICKCHANGE,
+                    vec![
+                        new_nick,
+                        format!(
+                            "Cannot change nickname while banned on {chan_name}"
+                        ),
+                    ],
+                )
+                .await;
+                return;
+            }
+        }
+    }
+
     // NICKDELAY — throttle rapid nick cycling so a bot can't burn
     // through 100 nicks/second. Case-only renames (same casefold)
     // and opers bypass the throttle; opers need unfettered control.
