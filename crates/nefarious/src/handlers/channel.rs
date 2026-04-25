@@ -70,24 +70,58 @@ pub async fn handle_join(ctx: &HandlerContext, msg: &Message) {
         let channel = ctx.state.get_or_create_channel(chan_name);
         let is_new;
 
-        let (is_account, is_tls) = {
+        let (is_account, is_tls, account_owned, realname_owned, mark_owned) = {
             let c = ctx.client.read().await;
-            (c.account.is_some(), c.tls)
+            (
+                c.account.is_some(),
+                c.tls,
+                c.account.clone(),
+                c.realname.clone(),
+                c.dnsbl_mark.clone(),
+            )
         };
+
+        // Extban-aware ban gate. Runs BEFORE can_join so
+        // can_join doesn't have to know about extbans (it
+        // dropped its own ban check). The user's joined-channels
+        // view is fetched once and reused across this JOIN's
+        // ban-check call. Activity is None — JOIN is a hard ban
+        // check (only bans without an activity flag count).
+        let user_channels = ctx.state.user_channel_view(client_id).await;
+        let chan_view: Vec<(&str, crate::channel::InChannelStatus)> = user_channels
+            .iter()
+            .map(|(n, s)| (n.as_str(), *s))
+            .collect();
+        let view = crate::channel::ExtBanUserView {
+            prefix: &prefix,
+            account: account_owned.as_deref(),
+            realname: realname_owned.as_str(),
+            dnsbl_mark: mark_owned.as_deref(),
+            channels: &chan_view,
+        };
+        if ctx
+            .state
+            .is_user_banned_in(chan_name, &view, None)
+            .await
+        {
+            ctx.send_numeric(
+                ERR_BANNEDFROMCHAN,
+                vec![chan_name.to_string(), "Cannot join channel (+b)".into()],
+            )
+            .await;
+            continue;
+        }
 
         {
             let mut chan = channel.write().await;
 
             // Check join eligibility
-            match chan.can_join(&client_id, &prefix, key, is_account, is_tls) {
+            match chan.can_join(&client_id, key, is_account, is_tls) {
                 JoinCheck::Ok => {}
                 JoinCheck::AlreadyMember => continue,
                 JoinCheck::Banned => {
-                    ctx.send_numeric(
-                        ERR_BANNEDFROMCHAN,
-                        vec![chan_name.to_string(), "Cannot join channel (+b)".into()],
-                    )
-                    .await;
+                    // No longer produced by can_join; kept for
+                    // exhaustiveness while the variant exists.
                     continue;
                 }
                 JoinCheck::InviteOnly => {

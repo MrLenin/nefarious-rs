@@ -18,6 +18,21 @@ pub struct MembershipFlags {
 }
 
 impl MembershipFlags {
+    /// Highest rank held in the channel. Used by extban `~c`
+    /// matching to compare against an `[@%+]` prefix
+    /// requirement.
+    pub fn to_status(&self) -> InChannelStatus {
+        if self.op {
+            InChannelStatus::Op
+        } else if self.halfop {
+            InChannelStatus::HalfOp
+        } else if self.voice {
+            InChannelStatus::Voice
+        } else {
+            InChannelStatus::Plain
+        }
+    }
+
     /// Prefix character for NAMES reply.
     pub fn highest_prefix(&self) -> &str {
         if self.op {
@@ -1060,18 +1075,17 @@ impl Channel {
         Ok(())
     }
 
-    /// Check if a user matches any ban mask.
-    pub fn is_banned(&self, prefix: &str) -> bool {
-        self.bans
-            .iter()
-            .any(|b| wildcard_match(&b.mask, prefix))
-    }
-
-    /// Check if a user can join this channel.
+    /// Check if a user can join this channel. Caller is
+    /// responsible for the +b ban gate via
+    /// `ServerState::is_user_banned_in` *before* invoking
+    /// `can_join` — that path does the extban-aware async walk
+    /// and constructs `JoinCheck::Banned` itself. This method
+    /// only returns it as a placeholder for the legacy mask
+    /// path that no longer exists; future refactors can remove
+    /// the variant.
     pub fn can_join(
         &self,
         id: &ClientId,
-        prefix: &str,
         key: Option<&str>,
         is_account: bool,
         is_tls: bool,
@@ -1083,9 +1097,6 @@ impl Channel {
         // IRC semantics — user was explicitly let in.
         if self.invites.contains(id) {
             return JoinCheck::Ok;
-        }
-        if self.is_banned(prefix) {
-            return JoinCheck::Banned;
         }
         if self.modes.invite_only {
             return JoinCheck::InviteOnly;

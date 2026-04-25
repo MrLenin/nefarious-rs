@@ -415,6 +415,143 @@ impl ServerState {
         self.ssl_acceptor.load_full()
     }
 
+    /// Build the per-channel view a local client holds for use
+    /// in extban `~c` matching. For each channel the client is
+    /// in, returns the channel's name and the highest rank the
+    /// client holds there. Async because each channel lookup
+    /// crosses a `tokio::sync::RwLock`.
+    ///
+    /// Returns owned Strings so the caller can hand back
+    /// references that outlive any single channel lock.
+    pub async fn user_channel_view(
+        &self,
+        id: ClientId,
+    ) -> Vec<(String, crate::channel::InChannelStatus)> {
+        let names: Vec<String> = match self.clients.get(&id) {
+            Some(c) => c.read().await.channels.iter().cloned().collect(),
+            None => return Vec::new(),
+        };
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            if let Some(ch) = self.get_channel(&name) {
+                let g = ch.read().await;
+                if let Some(flags) = g.members.get(&id) {
+                    out.push((g.name.clone(), flags.to_status()));
+                }
+            }
+        }
+        out
+    }
+
+    /// Async, recursive ban-check. Mirrors the semantics of the
+    /// sync `find_extban_match` helper (built for unit tests),
+    /// but resolves `~j:<chan>` lookups against our live channel
+    /// registry — which means each hop is `await`-ed because
+    /// channels live behind `tokio::sync::RwLock`.
+    ///
+    /// `view.channels` should be the user's joined-channels
+    /// snapshot (built via `user_channel_view`); callers that
+    /// don't need `~c` matching can pass an empty slice.
+    /// `activity` controls which bans count: `None` for
+    /// JOIN-time hard-ban check, `Some(Quiet)` for the speak
+    /// gate, `Some(NoNick)` for the NICK gate.
+    pub async fn is_user_banned_in(
+        &self,
+        channel_name: &str,
+        view: &crate::channel::ExtBanUserView<'_>,
+        activity: Option<crate::channel::ExtBanActivity>,
+    ) -> bool {
+        let cfg = self.config();
+        self.ban_check_recursive(
+            channel_name,
+            view,
+            activity,
+            0,
+            cfg.extban_j_maxdepth(),
+            cfg.extban_j_maxperchan(),
+        )
+        .await
+    }
+
+    /// Inner recursive worker. Walks `channel_name`'s banlist
+    /// once at the given depth; on a `~j:<other>` entry, recurses
+    /// with `depth + 1` until `max_depth` is reached. Per-chan
+    /// `~j` cap stops further `~j` lookups within a single
+    /// banlist after `max_per_chan` entries.
+    async fn ban_check_recursive(
+        &self,
+        channel_name: &str,
+        view: &crate::channel::ExtBanUserView<'_>,
+        activity: Option<crate::channel::ExtBanActivity>,
+        depth: u32,
+        max_depth: u32,
+        max_per_chan: u32,
+    ) -> bool {
+        // Snapshot the bans before doing any awaiting work that
+        // might lock other channels — holding a channel read
+        // guard across a recursive lookup of another channel
+        // would deadlock if the recursion ever circled back.
+        let bans = match self.get_channel(channel_name) {
+            Some(ch) => ch.read().await.bans.clone(),
+            None => return false,
+        };
+        let mut j_seen = 0u32;
+        for ban in &bans {
+            match &ban.extban {
+                Some(eb) => {
+                    if !eb.applies_to(activity) {
+                        continue;
+                    }
+                    let raw_match = match &eb.criterion {
+                        crate::channel::ExtBanMatch::JoinedBan(target) => {
+                            j_seen += 1;
+                            if j_seen > max_per_chan {
+                                continue;
+                            }
+                            if depth >= max_depth {
+                                continue;
+                            }
+                            // Recurse via Box::pin so the async
+                            // recursion doesn't blow the
+                            // unsized-future error.
+                            Box::pin(self.ban_check_recursive(
+                                target,
+                                view,
+                                activity,
+                                depth + 1,
+                                max_depth,
+                                max_per_chan,
+                            ))
+                            .await
+                        }
+                        _ => eb.matches(view),
+                    };
+                    let matched = if eb.negate
+                        && matches!(
+                            &eb.criterion,
+                            crate::channel::ExtBanMatch::JoinedBan(_)
+                        )
+                    {
+                        !raw_match
+                    } else {
+                        raw_match
+                    };
+                    if matched {
+                        return true;
+                    }
+                }
+                None => {
+                    if activity.is_none()
+                        && crate::channel::wildcard_match(&ban.mask, view.prefix)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Resolve a P10 message origin (server numeric or user
     /// numeric, as a wire string) to whether the source is on a
     /// `UWorld { name = ... }` listed services / U-lined server.
