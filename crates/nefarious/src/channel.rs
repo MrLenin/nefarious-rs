@@ -341,15 +341,29 @@ impl ExtBan {
     }
 }
 
+/// Status the user holds in a channel from their perspective.
+/// Used by `~c:[@%+]channel` to narrow the match by membership
+/// rank — `~c:@#evil` matches only ops in `#evil`, `~c:%#evil`
+/// halfops or above, `~c:+#evil` voiced or above, `~c:#evil`
+/// any member regardless of rank.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InChannelStatus {
+    Plain,
+    Voice,
+    HalfOp,
+    Op,
+}
+
 /// Snapshot of the user attributes an extban matcher needs.
 ///
 /// Built once per ban-check sweep so we don't re-read the
 /// `Client` / `RemoteClient` structs (which would mean a lock
-/// per ban). Borrowed view; the caller owns the strings. The
-/// `joined_channel_*` fields are populated when the caller
-/// supports `~c` / `~j`; later commits will fill them in. For
-/// the simple-types matcher (this commit) they stay empty and
-/// those criteria return false.
+/// per ban). Borrowed view; the caller owns the strings.
+///
+/// `channels` is the user's joined-channels list with the
+/// status they hold in each, used by `~c`. Empty slice is
+/// fine — `~c` simply never matches. `~j` remains pending and
+/// always returns false here regardless of input.
 #[derive(Debug, Clone, Copy)]
 pub struct ExtBanUserView<'a> {
     /// `nick!user@host` — the canonical RFC form. Hostmask
@@ -366,6 +380,10 @@ pub struct ExtBanUserView<'a> {
     /// only when `account` is None. Free-form text (we store as
     /// `<zone>: <reason>`).
     pub dnsbl_mark: Option<&'a str>,
+    /// Channels the user is currently in, with their status in
+    /// each. Used by `~c`. Channel name comparison is done with
+    /// `wildcard_match` so `~c:#test*` works.
+    pub channels: &'a [(&'a str, InChannelStatus)],
 }
 
 impl ExtBan {
@@ -373,14 +391,13 @@ impl ExtBan {
     ///
     /// Returns the *match-criterion* result, including any `~!`
     /// negation. The activity flag (whether this ban *blocks*
-    /// JOIN vs MSG vs NICK) is a separate concern handled by the
-    /// integrating ban-check site — this method only answers
-    /// "does the user match this mask".
+    /// JOIN vs MSG vs NICK) is a separate concern handled by
+    /// `applies_to` — this method only answers "does the user
+    /// match this mask".
     ///
-    /// `~c` and `~j` always return false here; their data
-    /// requirements (channel-membership scan / recursive
-    /// banlist walk) live above this layer and need extra
-    /// arguments. They land in the next commits.
+    /// `~j` always returns false here; its recursive-banlist
+    /// walk lives above this layer and needs extra arguments.
+    /// It lands in the next commit.
     pub fn matches(&self, view: &ExtBanUserView<'_>) -> bool {
         let raw = match &self.criterion {
             ExtBanMatch::Account(glob) => view
@@ -395,16 +412,68 @@ impl ExtBan {
                     && view.dnsbl_mark.is_some_and(|m| wildcard_match(glob, m))
             }
             ExtBanMatch::Hostmask(mask) => wildcard_match(mask, view.prefix),
-            // ~c and ~j land in subsequent commits with their
-            // accompanying data plumbing. Until then they
-            // never match; a banlist using them silently
-            // permits everyone who would otherwise be blocked,
-            // which matches our current pre-extban behaviour
-            // and is the safest no-op.
-            ExtBanMatch::InChannel { .. } | ExtBanMatch::JoinedBan(_) => false,
+            ExtBanMatch::InChannel { prefix, channel } => {
+                view.channels.iter().any(|(name, status)| {
+                    wildcard_match(channel, name) && status_meets(*status, *prefix)
+                })
+            }
+            ExtBanMatch::JoinedBan(_) => {
+                // ~j needs the channel registry + recursion
+                // bookkeeping; a free-standing matcher can't
+                // resolve it. Lands in the next commit as a
+                // method that takes a registry handle.
+                false
+            }
         };
         if self.negate { !raw } else { raw }
     }
+
+    /// Does this ban apply to the given activity?
+    ///
+    /// Mirrors nefarious2 channel.c::find_ban's activity gate:
+    ///   `(banlist->extban.flags & extbantype)
+    ///    || !(banlist->extban.flags & EBAN_ACTIVITY)`
+    ///
+    /// In words:
+    /// - A ban with no activity flag (a "hard ban" like
+    ///   `~a:foo`) applies to every activity — JOIN, MSG, NICK.
+    /// - A ban with activity flags (`~q:...`, `~n:...`) only
+    ///   applies when the caller asks about that specific
+    ///   activity. So `~q:nick!user@host` *does* gate MSG
+    ///   delivery (`activity = Some(Quiet)`) but does *not*
+    ///   gate JOIN (`activity = None`).
+    ///
+    /// `activity = None` means "default ban-check" — the
+    /// JOIN-time path. Pass `Some(Quiet)` for the speak gate,
+    /// `Some(NoNick)` for the NICK gate.
+    pub fn applies_to(&self, activity: Option<ExtBanActivity>) -> bool {
+        match activity {
+            Some(act) => self.activities.contains(&act) || self.activities.is_empty(),
+            None => self.activities.is_empty(),
+        }
+    }
+}
+
+/// True when the user's status in a channel meets the
+/// `~c:[@%+]channel` rank requirement. `Op > HalfOp > Voice >
+/// Plain` — a higher rank also satisfies a lower-rank match,
+/// matching nefarious2's `IsChanOp || IsHalfOp || HasVoice`
+/// fall-through chain in find_ban (channel.c:553-559).
+fn status_meets(status: InChannelStatus, required_prefix: Option<char>) -> bool {
+    let required_rank = match required_prefix {
+        None => 0,
+        Some('+') => 1,
+        Some('%') => 2,
+        Some('@') => 3,
+        Some(_) => return false,
+    };
+    let user_rank = match status {
+        InChannelStatus::Plain => 0,
+        InChannelStatus::Voice => 1,
+        InChannelStatus::HalfOp => 2,
+        InChannelStatus::Op => 3,
+    };
+    user_rank >= required_rank
 }
 
 fn parse_in_channel(value: &str) -> Option<ExtBanMatch> {
@@ -522,6 +591,20 @@ mod extban_tests {
             account,
             realname,
             dnsbl_mark: mark,
+            channels: &[],
+        }
+    }
+
+    fn view_in<'a>(
+        prefix: &'a str,
+        channels: &'a [(&'a str, InChannelStatus)],
+    ) -> ExtBanUserView<'a> {
+        ExtBanUserView {
+            prefix,
+            account: None,
+            realname: "",
+            dnsbl_mark: None,
+            channels,
         }
     }
 
@@ -583,14 +666,79 @@ mod extban_tests {
     }
 
     #[test]
-    fn pending_criteria_dont_match() {
+    fn match_in_channel_any_member() {
         let cfg = cfg_all_on();
-        // ~c and ~j always return false at this commit; integrators
-        // need to wire data plumbing before they can produce hits.
-        let chan_ban = ExtBan::parse("~c:#evil", &cfg).unwrap();
-        assert!(!chan_ban.matches(&view("a!b@c", Some("alice"), "x", None)));
-        let jupe_ban = ExtBan::parse("~j:#evil", &cfg).unwrap();
-        assert!(!jupe_ban.matches(&view("a!b@c", Some("alice"), "x", None)));
+        let eb = ExtBan::parse("~c:#evil", &cfg).unwrap();
+        assert!(eb.matches(&view_in("a!b@c", &[("#evil", InChannelStatus::Plain)])));
+        // Op also satisfies "any member".
+        assert!(eb.matches(&view_in("a!b@c", &[("#evil", InChannelStatus::Op)])));
+        // Different channel — no match.
+        assert!(!eb.matches(&view_in("a!b@c", &[("#good", InChannelStatus::Plain)])));
+        // Empty channels list — no match.
+        assert!(!eb.matches(&view_in("a!b@c", &[])));
+    }
+
+    #[test]
+    fn match_in_channel_op_prefix() {
+        let cfg = cfg_all_on();
+        let eb = ExtBan::parse("~c:@#evil", &cfg).unwrap();
+        // Plain member doesn't satisfy `@` requirement.
+        assert!(!eb.matches(&view_in("a!b@c", &[("#evil", InChannelStatus::Plain)])));
+        assert!(!eb.matches(&view_in("a!b@c", &[("#evil", InChannelStatus::Voice)])));
+        assert!(!eb.matches(&view_in("a!b@c", &[("#evil", InChannelStatus::HalfOp)])));
+        // Op satisfies it.
+        assert!(eb.matches(&view_in("a!b@c", &[("#evil", InChannelStatus::Op)])));
+    }
+
+    #[test]
+    fn match_in_channel_voice_prefix_falls_through() {
+        let cfg = cfg_all_on();
+        let eb = ExtBan::parse("~c:+#evil", &cfg).unwrap();
+        // `+` requires voice or above. Plain doesn't qualify;
+        // voice/halfop/op all do — matches m_mode/find_ban's
+        // rank-fallthrough.
+        assert!(!eb.matches(&view_in("a!b@c", &[("#evil", InChannelStatus::Plain)])));
+        assert!(eb.matches(&view_in("a!b@c", &[("#evil", InChannelStatus::Voice)])));
+        assert!(eb.matches(&view_in("a!b@c", &[("#evil", InChannelStatus::HalfOp)])));
+        assert!(eb.matches(&view_in("a!b@c", &[("#evil", InChannelStatus::Op)])));
+    }
+
+    #[test]
+    fn match_in_channel_glob() {
+        let cfg = cfg_all_on();
+        let eb = ExtBan::parse("~c:#test*", &cfg).unwrap();
+        assert!(eb.matches(&view_in("a!b@c", &[("#test1", InChannelStatus::Plain)])));
+        assert!(eb.matches(&view_in("a!b@c", &[("#testing", InChannelStatus::Plain)])));
+        assert!(!eb.matches(&view_in("a!b@c", &[("#other", InChannelStatus::Plain)])));
+    }
+
+    #[test]
+    fn applies_to_hard_ban() {
+        let cfg = cfg_all_on();
+        // `~a:foo` has no activity flag — applies to every gate.
+        let eb = ExtBan::parse("~a:foo", &cfg).unwrap();
+        assert!(eb.applies_to(None)); // JOIN
+        assert!(eb.applies_to(Some(ExtBanActivity::Quiet))); // MSG
+        assert!(eb.applies_to(Some(ExtBanActivity::NoNick))); // NICK
+    }
+
+    #[test]
+    fn applies_to_quiet_only() {
+        let cfg = cfg_all_on();
+        // `~q:foo` is a speak-only mute.
+        let eb = ExtBan::parse("~q:nick!user@host", &cfg).unwrap();
+        assert!(!eb.applies_to(None)); // doesn't gate JOIN
+        assert!(eb.applies_to(Some(ExtBanActivity::Quiet))); // gates MSG
+        assert!(!eb.applies_to(Some(ExtBanActivity::NoNick))); // doesn't gate NICK
+    }
+
+    #[test]
+    fn applies_to_pending_jupe_criterion() {
+        let cfg = cfg_all_on();
+        // ~j still returns false from matches() at this commit;
+        // integrators need to wire data plumbing.
+        let eb = ExtBan::parse("~j:#evil", &cfg).unwrap();
+        assert!(!eb.matches(&view("a!b@c", Some("alice"), "x", None)));
     }
 }
 
