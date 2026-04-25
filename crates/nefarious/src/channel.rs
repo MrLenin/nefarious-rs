@@ -454,6 +454,104 @@ impl ExtBan {
     }
 }
 
+/// Walk a channel's banlist and return the first entry whose
+/// criterion matches `view` for the given `activity`. Mirrors
+/// nefarious2 channel.c::find_ban's outer loop.
+///
+/// `~j:<channel>` resolves recursively against the named
+/// channel's banlist. `fetch_banlist` is the channel registry
+/// handle — given a channel name it returns that channel's
+/// `&[BanEntry]` if known. We pass it in (rather than taking
+/// a `&ServerState`) so the matcher is testable without spinning
+/// up the whole server.
+///
+/// Recursion is bounded:
+/// - **depth**: the caller's starting depth, capped at
+///   `EXTBAN_j_MAXDEPTH`. Each `~j` recursion increments by one.
+/// - **per-channel `~j` cap** (`EXTBAN_j_MAXPERCHAN`): we count
+///   `~j` entries seen *in this banlist* and stop processing
+///   them past the cap. Entries above the cap are skipped, not
+///   treated as matches; the rest of the banlist is still
+///   walked.
+///
+/// Plain (non-extended) bans match via the existing
+/// `wildcard_match` against `view.prefix`.
+pub fn find_extban_match<'a, F>(
+    bans: &'a [BanEntry],
+    view: &ExtBanUserView<'_>,
+    activity: Option<ExtBanActivity>,
+    depth: u32,
+    max_depth: u32,
+    max_per_chan: u32,
+    fetch_banlist: &F,
+) -> Option<&'a BanEntry>
+where
+    F: Fn(&str) -> Option<Vec<BanEntry>>,
+{
+    let mut j_seen = 0u32;
+    for ban in bans {
+        match &ban.extban {
+            Some(eb) => {
+                if !eb.applies_to(activity) {
+                    continue;
+                }
+                let raw_match = match &eb.criterion {
+                    ExtBanMatch::JoinedBan(target) => {
+                        j_seen += 1;
+                        if j_seen > max_per_chan {
+                            // Per-chan cap reached — skip the
+                            // rest of this entry, keep walking
+                            // the banlist.
+                            continue;
+                        }
+                        if depth >= max_depth {
+                            // Depth cap reached — don't recurse.
+                            continue;
+                        }
+                        match fetch_banlist(target) {
+                            Some(other_bans) => find_extban_match(
+                                &other_bans,
+                                view,
+                                activity,
+                                depth + 1,
+                                max_depth,
+                                max_per_chan,
+                                fetch_banlist,
+                            )
+                            .is_some(),
+                            None => false,
+                        }
+                    }
+                    _ => eb.matches(view),
+                };
+                let matched = if eb.negate
+                    && matches!(&eb.criterion, ExtBanMatch::JoinedBan(_))
+                {
+                    // ~!j is unusual but supported: negate the
+                    // recursive result. (matches() already
+                    // handles negate for non-~j criteria.)
+                    !raw_match
+                } else {
+                    raw_match
+                };
+                if matched {
+                    return Some(ban);
+                }
+            }
+            None => {
+                // Plain (non-extended) ban — only counts when
+                // the caller is doing the default ban check.
+                // A `~q:foo` MSG-gate sweep wouldn't apply a
+                // plain JOIN ban; that's the caller's split.
+                if activity.is_none() && wildcard_match(&ban.mask, view.prefix) {
+                    return Some(ban);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// True when the user's status in a channel meets the
 /// `~c:[@%+]channel` rank requirement. `Op > HalfOp > Voice >
 /// Plain` — a higher rank also satisfies a lower-rank match,
@@ -735,10 +833,109 @@ mod extban_tests {
     #[test]
     fn applies_to_pending_jupe_criterion() {
         let cfg = cfg_all_on();
-        // ~j still returns false from matches() at this commit;
-        // integrators need to wire data plumbing.
+        // ExtBan::matches() returns false for ~j; the
+        // resolver function find_extban_match handles it.
         let eb = ExtBan::parse("~j:#evil", &cfg).unwrap();
         assert!(!eb.matches(&view("a!b@c", Some("alice"), "x", None)));
+    }
+
+    fn ban(mask: &str, cfg: &irc_config::Config) -> BanEntry {
+        BanEntry {
+            mask: mask.to_string(),
+            set_by: "test".to_string(),
+            set_at: chrono::Utc::now(),
+            extban: ExtBan::parse(mask, cfg),
+        }
+    }
+
+    #[test]
+    fn recursive_jupe_resolves() {
+        let cfg = cfg_all_on();
+        let other_bans = vec![ban("~a:bob", &cfg)];
+        let bans = vec![ban("~j:#other", &cfg)];
+        let v = view("a!b@c", Some("bob"), "x", None);
+        let fetch = |name: &str| -> Option<Vec<BanEntry>> {
+            if name == "#other" {
+                Some(other_bans.clone())
+            } else {
+                None
+            }
+        };
+        // Default depth: max_depth=1, max_per_chan=2.
+        let hit = find_extban_match(&bans, &v, None, 0, 1, 2, &fetch);
+        assert!(hit.is_some());
+        // Different account — ~a:bob doesn't fire, so no match.
+        let v2 = view("a!b@c", Some("alice"), "x", None);
+        let miss = find_extban_match(&bans, &v2, None, 0, 1, 2, &fetch);
+        assert!(miss.is_none());
+    }
+
+    #[test]
+    fn recursive_jupe_respects_depth_cap() {
+        let cfg = cfg_all_on();
+        // chain: #a → #b → #c (which would hit) — at depth=1
+        // we stop at #b and never see #c.
+        let c_bans = vec![ban("~a:bob", &cfg)];
+        let b_bans = vec![ban("~j:#c", &cfg)];
+        let a_bans = vec![ban("~j:#b", &cfg)];
+        let v = view("a!b@c", Some("bob"), "x", None);
+        let c_clone = c_bans.clone();
+        let b_clone = b_bans.clone();
+        let fetch = move |name: &str| -> Option<Vec<BanEntry>> {
+            match name {
+                "#b" => Some(b_clone.clone()),
+                "#c" => Some(c_clone.clone()),
+                _ => None,
+            }
+        };
+        // max_depth=1: walking #a → recurses into #b at depth 1;
+        // depth 1 >= max_depth 1, so the ~j:#c entry inside #b
+        // is skipped. Result: no match.
+        assert!(find_extban_match(&a_bans, &v, None, 0, 1, 2, &fetch).is_none());
+        // max_depth=2: #a → #b (depth 1) → #c (depth 2) hits.
+        assert!(find_extban_match(&a_bans, &v, None, 0, 2, 2, &fetch).is_some());
+    }
+
+    #[test]
+    fn recursive_jupe_respects_per_chan_cap() {
+        let cfg = cfg_all_on();
+        let target = vec![ban("~a:bob", &cfg)];
+        // Banlist with three ~j entries — only the first two
+        // get processed (per-chan cap default 2). Third is
+        // skipped, so if the hit is in the third resolution it
+        // never fires.
+        let bans = vec![
+            ban("~j:#empty1", &cfg),
+            ban("~j:#empty2", &cfg),
+            ban("~j:#real", &cfg),
+        ];
+        let v = view("a!b@c", Some("bob"), "x", None);
+        let target_clone = target.clone();
+        let fetch = move |name: &str| -> Option<Vec<BanEntry>> {
+            match name {
+                "#real" => Some(target_clone.clone()),
+                _ => Some(Vec::new()),
+            }
+        };
+        assert!(find_extban_match(&bans, &v, None, 0, 1, 2, &fetch).is_none());
+        // Lift cap to 3 and the third entry resolves.
+        assert!(find_extban_match(&bans, &v, None, 0, 1, 3, &fetch).is_some());
+    }
+
+    #[test]
+    fn plain_ban_only_for_default_activity() {
+        let cfg = cfg_all_on();
+        let bans = vec![ban("alice!*@*", &cfg)];
+        let v = view("alice!user@host", None, "x", None);
+        let fetch = |_: &str| -> Option<Vec<BanEntry>> { None };
+        // Default ban-check (None activity) → plain ban hits.
+        assert!(find_extban_match(&bans, &v, None, 0, 1, 2, &fetch).is_some());
+        // MSG-gate sweep (Some(Quiet)) → plain bans don't gate
+        // MSG, so no match.
+        assert!(
+            find_extban_match(&bans, &v, Some(ExtBanActivity::Quiet), 0, 1, 2, &fetch)
+                .is_none()
+        );
     }
 }
 
